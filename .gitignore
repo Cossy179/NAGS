@@ -1,0 +1,53 @@
+# Build directories
+build/
+bin/
+lib/
+__pycache__/
+*.pyc
+*.pyd
+*.so
+*.dll
+*.exe
+*.out
+
+# Generated files
+*.o
+*.a
+*.obj
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# IDE files
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python virtual environments
+venv/
+env/
+.env/
+.venv/
+
+# Training artifacts
+models/
+logs/
+*.log
+*.pt
+*.pth
+*.onnx
+*.tflite
+
+# Temporary files
+temp/
+tmp/
+.DS_Store
+Thumbs.db
+
+# Large datasets
+datasets/
+AJ-CORR-PGN-000.pgn 
