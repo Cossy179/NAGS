@@ -1,54 +1,40 @@
 # NAGS - Neuro-Adaptive Graph Search Chess Engine
 
-NAGS is a novel chess engine that marries a hypergraph-based board representation with advanced neural architectures and adaptive search strategies. Below are its core components with equations rendered as images for GitHub compatibility.
+NAGS is a state-of-the-art chess engine combining deep neural networks, graph-based board representation, and adaptive search techniques to achieve superhuman chess performance.
 
 ## Features
+
 - Hypergraph + GNN-based board representation
 - Dual-Head Transformer-GNN position evaluator
-- Hybrid search combining α-β pruning and MCTS with UCT selection
+- Hybrid search combining α-β and MCTS approaches
 - Meta-learning for position-specific search optimization
 - Dual-phase training: supervised learning from GM games followed by RL self-play
 - UCI compatibility for Arena chess GUI integration
+- Advanced parallel search with dynamic work stealing
+- Optimized SIMD-accelerated bitboard operations
+- Position-aware dynamic search scheduling
+- Ensemble neural network models with knowledge distillation
+- Curriculum learning for progressive skill development
 
-## System Architecture
+## Requirements
 
-### 1. Hypergraph Neural Network
+- Python 3.8+
+- PyTorch 2.0+
+- PyTorch Geometric
+- C++17 compatible compiler
+- CUDA 11.7+ (for GPU acceleration)
+- AVX2/BMI2 CPU instructions (for SIMD optimizations)
 
-This module processes a hypergraph representation of the board. The key update equations are:
+## Installation
 
-![Equation](https://latex.codecogs.com/svg.image?%5Cmathbf%7BZ%7D%20%3D%20%5Csigma%5Cbigl%28%5Cmathbf%7BD%7D_e%5E%7B-1%7D%5Cmathbf%7BH%7D%5E%5Ctop%20%5Cmathbf%7BX%7D%5Cmathbf%7BW%7D_e%5Cbigr%29%2C)
-![Equation](https://latex.codecogs.com/svg.image?%5Cquad%20%5Cmathbf%7BX%7D%27%20%3D%20%5Csigma%5Cbigl%28%5Cmathbf%7BD%7D_v%5E%7B-1%7D%5Cmathbf%7BH%7D%5Cmathbf%7BZ%7D%5Cmathbf%7BW%7D_v%5Cbigr%29.)
-
-### 2. Message Passing Neural Network (MPNN)
-
-The standard message-passing updates are:
-
-![Equation](https://latex.codecogs.com/svg.image?%5Cmathbf%7Bm%7D_i%5E%7B%28t%2B1%29%7D%20%3D%20%5Csum_%7Bj%5Cin%20%5Cmathcal%7BN%7D%28i%29%7D%20M%28%5Cmathbf%7Bh%7D_i%5E%7B%28t%29%7D%2C%5Cmathbf%7Bh%7D_j%5E%7B%28t%29%7D%29%2C)
-![Equation](https://latex.codecogs.com/svg.image?%5Cquad%20%5Cmathbf%7Bh%7D_i%5E%7B%28t%2B1%29%7D%20%3D%20U%28%5Cmathbf%7Bh%7D_i%5E%7B%28t%29%7D%2C%5Cmathbf%7Bm%7D_i%5E%7B%28t%2B1%29%7D%29.)
-
-### 3. Multi-Head Self-Attention
-
-The attention mechanism is given by:
-
-![Equation](https://latex.codecogs.com/svg.image?%5Cmathrm%7BAttention%7D%28Q%2CK%2CV%29%20%3D%20%5Cmathrm%7Bsoftmax%7D%5CBigl%28%5Cfrac%7BQK%5E%5Ctop%7D%7B%5Csqrt%7Bd_k%7D%7D%5CBigr%29V)
-
-### 4. UCT Selection (MCTS)
-
-Child node selection uses the UCT rule:
-
-![Equation](https://latex.codecogs.com/svg.image?i%5E%2A%20%3D%20%5Carg%5Cmax_i%20%5CBigl%28Q_i%20%2B%20c%20%5Csqrt%7B%5Cfrac%7B%5Cln%20N%7D%7Bn_i%7D%7D%5CBigr%29)
-
-## Installation & Usage
-1. Clone the repo:
-
-   ```bash
+1. Clone this repository:
+   ```
    git clone https://github.com/Cossy179/NAGS.git
    cd NAGS
    ```
 
-2. Install dependencies:
-
-   ```bash
+2. Install Python dependencies:
+   ```
    pip install -r requirements.txt
    ```
 
@@ -63,6 +49,13 @@ Child node selection uses the UCT rule:
    ```
    mkdir build && cd build
    cmake -DENABLE_CUDA=ON ..
+   make
+   ```
+   
+   For optimized AVX2/BMI2 support, use:
+   ```
+   mkdir build && cd build
+   cmake -DENABLE_CUDA=ON -DENABLE_AVX2=ON -DENABLE_BMI2=ON ..
    make
    ```
 
@@ -95,6 +88,16 @@ The integrated C++ training pipeline can handle both supervised and reinforcemen
   ./bin/nags_train --pgn AJ-CORR-PGN-000.pgn --sl-batch 1024 --sl-epochs 20 --rl-games 2000 --rl-iter 30
   ```
 
+- Use curriculum learning for progressive training:
+  ```
+  ./bin/nags_train --pgn AJ-CORR-PGN-000.pgn --curriculum --difficulty-stages 4
+  ```
+
+- Train ensemble models:
+  ```
+  ./bin/nags_train --pgn AJ-CORR-PGN-000.pgn --ensemble --models 3
+  ```
+
 - For help with all options:
   ```
   ./bin/nags_train --help
@@ -102,15 +105,58 @@ The integrated C++ training pipeline can handle both supervised and reinforcemen
 
 ### Alternative Python Training Scripts
 
-   ```bash
+1. Supervised learning from GM games:
+   ```
    python scripts/train_supervised.py --pgn_path AJ-CORR-PGN-000.pgn
    ```
 
-5. **Reinforcement Learning**:
-
-   ```bash
+2. Self-play reinforcement learning:
+   ```
    python scripts/train_rl.py --initial_model models/supervised_model.pt
    ```
+
+3. Curriculum learning:
+   ```
+   python scripts/curriculum_trainer.py --pgn_path AJ-CORR-PGN-000.pgn
+   ```
+
+4. Ensemble model training:
+   ```
+   python scripts/train_ensemble.py --pgn_path AJ-CORR-PGN-000.pgn --num_models 3
+   ```
+
+5. Knowledge distillation:
+   ```
+   python scripts/distill_model.py --teacher_models models/ensemble/*.pt --output models/distilled_model.pt
+   ```
+
+## Performance Optimizations
+
+NAGS includes several performance optimizations for maximum strength:
+
+1. **Parallel Search**: Dynamic multi-threaded search with work stealing for optimal CPU utilization.
+
+2. **Bitboard Operations**: SIMD-accelerated bitboard operations for ultra-fast move generation:
+   - AVX2 vector operations for parallel bit operations
+   - BMI2/PEXT instructions for magic-less move generation
+   - Optimized population count for fast piece counting
+
+3. **Adaptive Search**: Position-aware search that adjusts parameters dynamically:
+   - Late Move Reduction with adaptive parameters
+   - Null Move Pruning with dynamic reduction factors
+   - Aspiration windows for faster search convergence
+   - Futility pruning with position-dependent margins
+
+4. **Neural Network Optimizations**:
+   - Mixed precision training (FP16/BF16)
+   - CUDA graph capturing for faster inference
+   - Tensor parallelism for large model training
+   - Batch processing of positions for evaluation
+
+5. **Memory Management**:
+   - Lock-free transposition table with age-based replacement
+   - Optimized hash table sizing for current hardware
+   - Efficient memory layout for cache-friendly access
 
 ## Using NAGS with Arena
 
@@ -125,17 +171,25 @@ The integrated C++ training pipeline can handle both supervised and reinforcemen
 ## Project Structure
 
 - `src/core/`: Core C++ engine components (board representation, search)
+  - `bitboard.h`: SIMD-optimized bitboard operations
+  - `search.h`: Parallel alpha-beta and MCTS search
+  - `evaluator.h`: Neural network integration
 - `src/gnn/`: Graph Neural Network implementation
+  - `evaluator_model.py`: Enhanced Transformer-GNN models
+  - `board_encoder.py`: Position encoding for neural networks
 - `src/mcts/`: Monte Carlo Tree Search implementation
 - `src/uci/`: Universal Chess Interface protocol support
 - `src/meta/`: Meta-learning components for search adaptation
+  - `position_aware_scheduler.h`: Dynamic parameter tuning
 - `src/training/`: Training pipeline implementations
   - `supervised_trainer.h`: Supervised learning from GM games
   - `rl_trainer.h`: Self-play reinforcement learning
   - `dual_training_pipeline.h`: Combined training pipeline
+  - `curriculum_trainer.py`: Progressive difficulty training
 - `scripts/`: Utility scripts for training and evaluation
 - `tests/`: Test suite
 - `utils/`: Helper utilities
 
 ## License
+
 MIT
