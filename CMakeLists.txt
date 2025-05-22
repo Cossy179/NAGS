@@ -29,13 +29,28 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_subdirectory(src/core)
 add_subdirectory(src/uci)
 add_subdirectory(src/meta)
+add_subdirectory(src/nn)
+add_subdirectory(src/gnn)
+add_subdirectory(src/mcts)
+add_subdirectory(src/training)
 
 # Build the main executable
 add_executable(nags_v1 src/main.cpp)
-target_link_libraries(nags_v1 PRIVATE core uci meta Threads::Threads)
+target_link_libraries(nags_v1 PRIVATE core uci meta nn gnn mcts Threads::Threads)
 
-# Install target
-install(TARGETS nags_v1 DESTINATION bin)
+# Build the training executable
+add_executable(nags_train src/training/train_main.cpp)
+target_link_libraries(nags_train PRIVATE core meta nn gnn mcts training Threads::Threads)
+
+# Install targets
+install(TARGETS nags_v1 nags_train DESTINATION bin)
+
+# Training configuration options
+option(ENABLE_CUDA "Enable CUDA support for neural network training" OFF)
+if(ENABLE_CUDA)
+  find_package(CUDA REQUIRED)
+  add_definitions(-DUSE_CUDA)
+endif()
 
 # Testing
 option(BUILD_TESTS "Build tests" ON)

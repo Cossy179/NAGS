@@ -8,6 +8,7 @@ NAGS is a state-of-the-art chess engine combining deep neural networks, graph-ba
 - Dual-Head Transformer-GNN position evaluator
 - Hybrid search combining α-β and MCTS approaches
 - Meta-learning for position-specific search optimization
+- Dual-phase training: supervised learning from GM games followed by RL self-play
 - UCI compatibility for Arena chess GUI integration
 
 ## Requirements
@@ -33,13 +34,53 @@ NAGS is a state-of-the-art chess engine combining deep neural networks, graph-ba
 
 3. Build the C++ components:
    ```
-   cd src/core
    mkdir build && cd build
    cmake ..
    make
    ```
+   
+   For CUDA support, use:
+   ```
+   mkdir build && cd build
+   cmake -DENABLE_CUDA=ON ..
+   make
+   ```
 
 ## Training the Engine
+
+NAGS features a dual-phase training pipeline that combines supervised learning from GM games followed by self-play reinforcement learning.
+
+### Using the Integrated Training Pipeline
+
+The integrated C++ training pipeline can handle both supervised and reinforcement learning phases:
+
+```
+./bin/nags_train --pgn AJ-CORR-PGN-000.pgn --model-dir ./models
+```
+
+### Training Options
+
+- Run only supervised learning phase:
+  ```
+  ./bin/nags_train --pgn AJ-CORR-PGN-000.pgn --supervised-only
+  ```
+
+- Run only reinforcement learning phase (requires a pre-trained model):
+  ```
+  ./bin/nags_train --checkpoint ./models/supervised_model.bin --rl-only
+  ```
+
+- Customize training parameters:
+  ```
+  ./bin/nags_train --pgn AJ-CORR-PGN-000.pgn --sl-batch 1024 --sl-epochs 20 --rl-games 2000 --rl-iter 30
+  ```
+
+- For help with all options:
+  ```
+  ./bin/nags_train --help
+  ```
+
+### Alternative Python Training Scripts
 
 1. Supervised learning from GM games:
    ```
@@ -69,6 +110,9 @@ NAGS is a state-of-the-art chess engine combining deep neural networks, graph-ba
 - `src/uci/`: Universal Chess Interface protocol support
 - `src/meta/`: Meta-learning components for search adaptation
 - `src/training/`: Training pipeline implementations
+  - `supervised_trainer.h`: Supervised learning from GM games
+  - `rl_trainer.h`: Self-play reinforcement learning
+  - `dual_training_pipeline.h`: Combined training pipeline
 - `scripts/`: Utility scripts for training and evaluation
 - `tests/`: Test suite
 - `utils/`: Helper utilities
