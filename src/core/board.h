@@ -56,6 +56,10 @@ struct Square {
     int toIndex() const;
     static Square fromIndex(int index);
     
+    // Static utility methods
+    static std::string toAlgebraic(int index);
+    static int fromAlgebraic(const std::string& algebraic);
+    
     bool operator==(const Square& other) const {
         return file == other.file && rank == other.rank;
     }
@@ -80,8 +84,21 @@ public:
     bool isLegalMove(const Move& move) const;
     
     // Position information
-    Piece getPieceAt(const Square& square) const;
-    Color getSideToMove() const;
+    Piece getPieceAt(int square) const { 
+        if (square < 0 || square >= 64) return Piece{PieceType::NONE, Color::WHITE};
+        return pieces_[square]; 
+    }
+    
+    Piece getPieceAt(Square square) const { 
+        int sq = square.toIndex();
+        if (sq < 0 || sq >= 64) return Piece{PieceType::NONE, Color::WHITE};
+        return pieces_[sq]; 
+    }
+    
+    Color getSideToMove() const { return sideToMove_; }
+    void setSideToMove(Color color) { sideToMove_ = color; }
+    int getHalfMoveClock() const { return halfMoveClock_; }
+    
     bool isCheck() const;
     bool isCheckmate() const;
     bool isStalemate() const;
@@ -96,10 +113,11 @@ public:
     // Utility
     std::string toString() const;
     
+    // Hash
+    uint64_t getPositionHash() const { return positionHash_; }
+    
     // For graph representation
     friend class GraphBuilder;
-    
-    int getHalfMoveClock() const { return halfMoveClock_; }
     
 private:
     // Internal board representation
@@ -108,13 +126,22 @@ private:
     // Game state
     Color sideToMove_;
     std::bitset<4> castlingRights_; // KQkq
-    Square enPassantSquare_;
+    int enPassantSquare_;  // 0-63, or 64 for none
     int halfMoveClock_;
     int fullMoveNumber_;
+    uint64_t positionHash_;
     
     // Move generation helpers
-    std::vector<Move> generatePseudoLegalMoves() const;
-    bool isAttacked(const Square& square, Color attackerColor) const;
+    void generatePieceMoves(int square, std::vector<Move>& moves) const;
+    void generatePawnMoves(int square, std::vector<Move>& moves) const;
+    void generateKnightMoves(int square, std::vector<Move>& moves) const;
+    void generateSlidingMoves(int square, std::vector<Move>& moves, bool diagonal, bool straight) const;
+    void generateKingMoves(int square, std::vector<Move>& moves) const;
+    bool isAttacking(int from, int to) const;
+    bool isInCheck(Color color) const;
+    bool isClearPath(int from, int to) const;
+    char pieceToChar(const Piece& piece) const;
+    void calculateHash();
 };
 
 } // namespace nags 

@@ -1,0 +1,3 @@
+C:/Users/Alex/Documents/code/NAGS/build_minimal/CMakeFiles/nags_minimal.dir
+C:/Users/Alex/Documents/code/NAGS/build_minimal/CMakeFiles/ALL_BUILD.dir
+C:/Users/Alex/Documents/code/NAGS/build_minimal/CMakeFiles/ZERO_CHECK.dir

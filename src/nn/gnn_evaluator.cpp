@@ -7,6 +7,10 @@
 #include <random>
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
+#include <string>
+#include <vector>
+#include <utility>
 
 namespace nags {
 
