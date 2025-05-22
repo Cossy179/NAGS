@@ -99,6 +99,8 @@ public:
     // For graph representation
     friend class GraphBuilder;
     
+    int getHalfMoveClock() const { return halfMoveClock_; }
+    
 private:
     // Internal board representation
     std::array<Piece, 64> pieces_;
