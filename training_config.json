@@ -1,0 +1,36 @@
+{
+  "data_dir": "data",
+  "model_dir": "models", 
+  "logs_dir": "logs",
+  "pgn_file": "AJ-CORR-PGN-000.pgn",
+  "max_positions": 100000,
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "epochs": 10,
+  "self_play_games": 100,
+  "self_play_time": 0.5,
+  "elo_threshold": 25,
+  "baseline_engine": "stockfish",
+  "baseline_time": 1.0,
+  "model_params": {
+    "hidden_dim": 128,
+    "gnn_layers": 6,
+    "policy_layers": 4,
+    "value_layers": 2
+  },
+  "ppo_params": {
+    "epochs": 5,
+    "clip_ratio": 0.2,
+    "value_coef": 0.5,
+    "entropy_coef": 0.01
+  },
+  "evaluation": {
+    "num_games": 50,
+    "time_control": "1+0.1",
+    "opening_book": "book.bin"
+  },
+  "notifications": {
+    "slack_webhook": "",
+    "email_recipients": ["team@company.com"]
+  }
+}
