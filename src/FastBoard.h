@@ -31,6 +31,9 @@ public:
     // Legal moves for the side to move; noisyOnly keeps captures and promotions.
     std::vector<Move> generateLegalMoves(bool noisyOnly = false) const;
     void generatePseudoMoves(std::vector<Move> &moves) const;
+    // Pseudo-legal moves (they may leave the own king in check), in the same
+    // order generateLegalMoves filters them.
+    void generatePseudoLegalMoves(std::vector<Move> &out, bool noisyOnly = false) const;
 
     bool inCheck() const { return inCheck(side); }
     bool inCheck(Color c) const;

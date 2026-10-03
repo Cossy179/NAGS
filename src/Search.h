@@ -325,17 +325,24 @@ private:
             }
         }
 
-        std::vector<Move> moves = board.generateLegalMoves();
-        if (moves.empty()) return inCheck ? -MATE_SCORE + ply : 0;
+        // Pseudo-legal moves; legality is checked only for moves actually
+        // tried (most nodes cut off after a few moves).
+        std::vector<Move> moves;
+        board.generatePseudoLegalMoves(moves);
         orderMoves(moves, ttMove, ply);
 
+        const Color us = board.sideToMove();
         int originalAlpha = alpha;
         int best = -INF_SCORE;
         Move bestMove;
-        for (size_t i = 0; i < moves.size(); ++i) {
-            const Move m = moves[i];
+        size_t i = 0; // number of legal moves tried so far
+        for (const Move &m : moves) {
             bool quiet = !eval::isNoisy(board, m);
             board.makeMove(m);
+            if (board.inCheck(us)) { // illegal: leaves our own king in check
+                board.unmakeMove();
+                continue;
+            }
             bool givesCheck = board.inCheck();
             int score;
             if (i == 0) {
@@ -354,6 +361,7 @@ private:
             }
             board.unmakeMove();
             if (aborted) return 0;
+            ++i;
 
             if (score > best) {
                 best = score;
@@ -375,6 +383,8 @@ private:
                 }
             }
         }
+
+        if (i == 0) return inCheck ? -MATE_SCORE + ply : 0; // checkmate or stalemate
 
         if (tt) {
             Bound bound = best >= beta ? Bound::Lower : (best > originalAlpha ? Bound::Exact : Bound::Upper);
@@ -400,14 +410,21 @@ private:
         }
 
         // In check every evasion must be considered (no stand-pat).
-        std::vector<Move> moves = board.generateLegalMoves(!inCheck);
-        if (inCheck && moves.empty()) return -MATE_SCORE + ply;
+        std::vector<Move> moves;
+        board.generatePseudoLegalMoves(moves, !inCheck);
         orderMoves(moves, Move{}, MAX_PLY);
 
+        const Color us = board.sideToMove();
+        int legal = 0;
         for (const Move &m : moves) {
             if (!inCheck && m.promotion == Piece::None && stand + eval::capturedValue(board, m) + 200 <= alpha)
                 continue; // delta pruning
             board.makeMove(m);
+            if (board.inCheck(us)) {
+                board.unmakeMove();
+                continue;
+            }
+            ++legal;
             int score = -quiescence(-beta, -alpha, ply + 1);
             board.unmakeMove();
             if (aborted) return 0;
@@ -419,6 +436,7 @@ private:
                 }
             }
         }
+        if (inCheck && legal == 0) return -MATE_SCORE + ply; // checkmate
         return best;
     }
 };

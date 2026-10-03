@@ -2,6 +2,7 @@
 
 #include "BitOps.h"
 
+#include <algorithm>
 #include <cctype>
 #include <iostream>
 #include <random>
@@ -437,6 +438,17 @@ void FastBoard::generateCastlingMoves(std::vector<Move> &moves, Color c) const {
         if ((castlingRights & 8) && !(all_occupied & 0x0E00000000000000ULL) && (pieces[1][ROOK] & (1ULL << 56)) &&
             !isSquareAttacked(59, them) && !isSquareAttacked(58, them))
             addMove(moves, 60, 58, Piece::None, false, true);
+    }
+}
+
+void FastBoard::generatePseudoLegalMoves(std::vector<Move> &out, bool noisyOnly) const {
+    generatePseudoMoves(out);
+    if (noisyOnly) {
+        out.erase(std::remove_if(out.begin(), out.end(),
+                                 [&](const Move &m) {
+                                     return m.promotion == Piece::None && !m.isEnPassant && mailbox[m.to] == Piece::None;
+                                 }),
+                  out.end());
     }
 }
 

@@ -2,6 +2,7 @@
 
 #include "BitOps.h"
 
+#include <algorithm>
 #include <cctype>
 #include <random>
 #include <sstream>
@@ -366,6 +367,19 @@ void Board::generatePawnMoves(std::vector<Move> &moves, Color c) const {
             if ((pawns >> 9) & ~FILE_H & epMask) addMove(moves, epSquare + 9, epSquare, Piece::None, true);
             if ((pawns >> 7) & ~FILE_A & epMask) addMove(moves, epSquare + 7, epSquare, Piece::None, true);
         }
+    }
+}
+
+void Board::generatePseudoLegalMoves(std::vector<Move> &out, bool noisyOnly) const {
+    out.clear();
+    out.reserve(128);
+    generatePseudoMoves(out);
+    if (noisyOnly) {
+        out.erase(std::remove_if(out.begin(), out.end(),
+                                 [&](const Move &m) {
+                                     return m.promotion == Piece::None && !m.isEnPassant && !(occAll & (1ULL << m.to));
+                                 }),
+                  out.end());
     }
 }
 
