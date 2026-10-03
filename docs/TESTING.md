@@ -46,10 +46,10 @@ services). Fingerprints at the time of writing:
 
 | Engine | Bench nodes |
 |--------|-------------|
-| `nags_basic` | 3132880 |
-| `nags_fast` | 3160246 |
-| `nags_enhanced` | 3295246 |
-| `nags` | 3322746 |
+| `nags_basic` | 1043298 |
+| `nags_fast` | 982184 |
+| `nags_enhanced` | 1352416 |
+| `nags` | 1303048 |
 
 When search improvements make a run much faster, raise the depth (in the
 engine's `main` file) and record the new fingerprints.
@@ -211,12 +211,17 @@ occupied the other cores, so they are less precise than the rows above.
 ## Strength log
 
 Every change that affects playing strength is listed with the test that
-admitted it. Matches are `nags_enhanced` unless noted, at 5+0.05, with 3
-games in parallel on a 4-core VM, openings from `nags_balanced.epd` and
-resign adjudication (4 moves, 1000 cp).
+admitted it. Matches are `nags_enhanced` unless noted, at the time control
+in the Test column, with 3 games in parallel on a 4-core VM, openings from
+`nags_balanced.epd` and resign adjudication (4 moves, 1000 cp).
 
 | Change | Test | Result | Elo | Bench |
 |--------|------|--------|-----|-------|
-| Transposition table (`nags_enhanced` vs `nags_fast`, validation of the runner) | SPRT [0, 30] | H1 after 88 games (+52 =22 -14) | +161 ± 67 | 12213087 |
-| Null-move pruning (R = 3 + depth/6; not in check, at PV nodes, after a null move, near mate scores or with only pawns) | SPRT [0, 10] | H1 after 402 games (+192 =100 -110) | +72 ± 30 | 5328177 |
-| Reverse futility pruning (depth ≤ 6, static eval − 80·depth ≥ beta; not at PV nodes, in check or near mate scores) | SPRT [0, 10] | H1 after 328 games (+163 =82 -83) | +87 ± 32 | 3295246 |
+| Transposition table (`nags_enhanced` vs `nags_fast`, validation of the runner) | SPRT [0, 30], 5+0.05 | H1 after 88 games (+52 =22 -14) | +161 ± 67 | 12213087 |
+| Null-move pruning (R = 3 + depth/6; not in check, at PV nodes, after a null move, near mate scores or with only pawns) | SPRT [0, 10], 5+0.05 | H1 after 402 games (+192 =100 -110) | +72 ± 30 | 5328177 |
+| Reverse futility pruning (depth ≤ 6, static eval − 80·depth ≥ beta; not at PV nodes, in check or near mate scores) | SPRT [0, 10], 5+0.05 | H1 after 328 games (+163 =82 -83) | +87 ± 32 | 3295246 |
+| Logarithmic late-move reductions (0.75 + ln d · ln m / 2.25, from the third move, one ply less at PV nodes) and shallow quiet-move pruning (depth ≤ 3: skip quiet moves after 3 + depth² of them, or when static eval + 120·depth ≤ alpha) | SPRT [0, 10], 3+0.03 | H1 after 1950 games (+765 =518 -667) | +17.5 ± 12.7 | 1352416 |
+
+The reduction table alone was tested first, at 5+0.05, and stopped
+undecided at +21.2 ± 21.9 after 674 games (LLR 1.29); it was then tested
+together with the pruning at the faster 3+0.03 to get more games per hour.

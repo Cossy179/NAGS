@@ -16,8 +16,10 @@
 #include "TT.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -329,6 +331,17 @@ private:
         moves.swap(sorted);
     }
 
+    // Late-move reduction in plies: 0.75 + ln(depth) * ln(moveNumber) / 2.25.
+    static int lmrReduction(int depth, int moveNumber) {
+        static const auto table = [] {
+            std::array<std::array<int, 64>, 64> t{};
+            for (int d = 1; d < 64; ++d)
+                for (int m = 1; m < 64; ++m) t[d][m] = static_cast<int>(0.75 + std::log(d) * std::log(m) / 2.25);
+            return t;
+        }();
+        return table[std::min(depth, 63)][std::min(moveNumber, 63)];
+    }
+
     bool hasNonPawnMaterial(Color c) const {
         return (board.pieceBB(c, KNIGHT) | board.pieceBB(c, BISHOP) | board.pieceBB(c, ROOK) | board.pieceBB(c, QUEEN)) != 0;
     }
@@ -490,10 +503,17 @@ private:
         int best = -INF_SCORE;
         Move bestMove;
         int i = 0; // number of legal moves tried so far
+        int quietsTried = 0;
         for (int n = 0; n < moves.size(); ++n) {
             pickNext(moves, scores, n);
             const Move m = moves[n];
             bool quiet = !eval::isNoisy(board, m);
+            // Shallow quiet-move pruning. Only once a legal move has been
+            // searched, so checkmate / stalemate detection is unaffected.
+            if (!isPv && !inCheck && quiet && i > 0 && depth <= 3 && std::abs(alpha) < MATE_BOUND) {
+                if (quietsTried >= 3 + depth * depth) continue;  // late-move pruning
+                if (staticEval + 120 * depth <= alpha) continue; // futility pruning
+            }
             board.makeMove(m);
             if (board.inCheck(us)) { // illegal: leaves our own king in check
                 board.unmakeMove();
@@ -505,9 +525,10 @@ private:
                 score = -negamax(depth - 1, -beta, -alpha, ply + 1, isPv);
             } else {
                 int reduction = 0;
-                if (depth >= 3 && i >= 3 && quiet && !inCheck && !givesCheck &&
+                if (depth >= 3 && i >= 2 && quiet && !inCheck && !givesCheck &&
                     !sameMove(m, killers[ply][0]) && !sameMove(m, killers[ply][1])) {
-                    reduction = 1 + (i >= 6 && depth >= 6 ? 1 : 0);
+                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0);
+                    reduction = std::clamp(reduction, 0, depth - 2);
                 }
                 score = -negamax(depth - 1 - reduction, -alpha - 1, -alpha, ply + 1, false);
                 if (!aborted && reduction && score > alpha)
@@ -518,6 +539,7 @@ private:
             board.unmakeMove();
             if (aborted) return 0;
             ++i;
+            if (quiet) ++quietsTried;
 
             if (score > best) {
                 best = score;
