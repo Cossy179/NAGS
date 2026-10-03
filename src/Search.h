@@ -190,6 +190,7 @@ public:
     void clearHistory() {
         for (auto &k : killers) k[0] = k[1] = Move{};
         for (auto &side : history) for (auto &from : side) for (auto &v : from) v = 0;
+        for (auto &piece : counterMoves) for (auto &mv : piece) mv = Move{};
     }
 
     // Searches the root to `depth` (with an aspiration window around
@@ -278,6 +279,7 @@ private:
     std::vector<Move> rootMoves;
     Move killers[MAX_PLY][2];
     int history[2][64][64];
+    Move counterMoves[12][64]; // [piece that moved][its target square]
     Move pvTable[MAX_PLY][MAX_PLY];
     int pvLength[MAX_PLY] = {};
     uint64_t nodes = 0;
@@ -304,21 +306,30 @@ private:
         return aborted;
     }
 
-    int moveScore(const Move &m, const Move &ttMove, int ply) const {
+    // Order: TT move, winning/equal captures and promotions (MVV/LVA), killers
+    // and the countermove, losing captures (negative SEE), quiet moves by history.
+    int moveScore(const Move &m, const Move &ttMove, int ply, const Move &counter = Move{}) const {
         if (!ttMove.isNull() && sameMove(m, ttMove)) return 1 << 30;
-        int score = 0;
         if (eval::isNoisy(board, m)) {
             int victim = eval::capturedValue(board, m);
             int attacker = eval::pieceValue(board.pieceAt(m.from));
-            score = (1 << 24) + victim * 16 - attacker / 16;
+            int score = victim * 16 - attacker / 16;
             if (m.promotion != Piece::None) score += eval::pieceValue(m.promotion) * 16;
-            return score;
+            return (eval::see(board, m) >= 0 ? (1 << 24) : (1 << 22)) + score;
         }
         if (ply < MAX_PLY) {
             if (sameMove(m, killers[ply][0])) return (1 << 23) + 2;
             if (sameMove(m, killers[ply][1])) return (1 << 23) + 1;
+            if (!counter.isNull() && sameMove(m, counter)) return 1 << 23;
         }
         return history[colorIndex(board.sideToMove())][m.from][m.to];
+    }
+
+    // Quiet move that refuted the opponent's previous move last time.
+    Move counterMoveFor(const Move &prev) const {
+        if (prev.isNull()) return Move{};
+        Piece p = board.pieceAt(prev.to);
+        return p == Piece::None ? Move{} : counterMoves[static_cast<int>(p) - 1][prev.to];
     }
 
     void orderMoves(std::vector<Move> &moves, const Move &ttMove, int ply) const {
@@ -496,8 +507,10 @@ private:
         // tried (most nodes cut off after a few moves).
         MoveList moves;
         board.generatePseudoLegalMoves(moves);
+        const Move prevMove = board.lastMove();
+        const Move counter = counterMoveFor(prevMove);
         int scores[MoveList::kCapacity];
-        for (int k = 0; k < moves.size(); ++k) scores[k] = moveScore(moves[k], ttMove, ply);
+        for (int k = 0; k < moves.size(); ++k) scores[k] = moveScore(moves[k], ttMove, ply, counter);
 
         const Color us = board.sideToMove();
         int originalAlpha = alpha;
@@ -556,6 +569,10 @@ private:
                             }
                             int &h = history[colorIndex(board.sideToMove())][m.from][m.to];
                             h = std::min(h + depth * depth, 1 << 20);
+                            if (!prevMove.isNull()) {
+                                Piece p = board.pieceAt(prevMove.to);
+                                if (p != Piece::None) counterMoves[static_cast<int>(p) - 1][prevMove.to] = m;
+                            }
                         }
                         break;
                     }
@@ -606,6 +623,7 @@ private:
             const Move m = moves[n];
             if (!inCheck && m.promotion == Piece::None && stand + eval::capturedValue(board, m) + 200 <= alpha)
                 continue; // delta pruning
+            if (!inCheck && eval::see(board, m) < 0) continue; // losing capture
             board.makeMove(m);
             if (board.inCheck(us)) {
                 board.unmakeMove();

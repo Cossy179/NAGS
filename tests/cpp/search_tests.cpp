@@ -191,6 +191,31 @@ static void testSearch(TranspositionTable *tt, const char *label) {
     CHECK(r.bestMove.isNull(), "%s: stalemated side returned a move", label);
 }
 
+static void testSee() {
+    struct Case { const char *fen; const char *move; int see; };
+    // Expected values cross-checked with an independent reference implementation.
+    const Case cases[] = {
+        {"1k1r4/1pp4p/p7/4p3/8/P5P1/1PP4P/2K1R3 w - - 0 1", "e1e5", 100},          // free pawn
+        {"1k1r3q/1ppn3p/p4b2/4p3/8/P2N2P1/1PP1R1BP/2K1Q3 w - - 0 1", "d3e5", -220}, // x-ray defended
+        {"4k3/8/1n6/3p4/4P3/8/8/4K3 w - - 0 1", "e4d5", 0},                         // pawn trade
+        {"4k3/3r4/8/3q4/8/8/3R4/3QK3 w - - 0 1", "d2d5", 900},                      // battery behind
+    };
+    for (const auto &c : cases) {
+        FastBoard b;
+        b.setFromFEN(c.fen);
+        Board rb;
+        rb.setFromFEN(c.fen);
+        bool found = false;
+        for (const Move &m : b.generateLegalMoves()) {
+            if (moveToUciString(m) != c.move) continue;
+            found = true;
+            CHECK(eval::see(b, m) == c.see, "SEE(%s) = %d, expected %d", c.move, eval::see(b, m), c.see);
+            CHECK(eval::see(rb, m) == c.see, "Board SEE(%s) = %d, expected %d", c.move, eval::see(rb, m), c.see);
+        }
+        CHECK(found, "test move %s not legal", c.move);
+    }
+}
+
 static void testThreadsAndStop() {
     TranspositionTable tt(16);
     SearchResult r = searchFen<FastBoard>("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 7, &tt, 4);
@@ -296,6 +321,7 @@ int main() {
     testThreadsAndStop();
     testMultiPv();
     testPonder();
+    testSee();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;

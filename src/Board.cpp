@@ -267,6 +267,13 @@ bool Board::isSquareAttacked(int sq, Color byColor) const {
     return false;
 }
 
+Bitboard Board::attackersTo(int sq, Bitboard occ) const {
+    return (pawnAttacks[1][sq] & pieces[WP_]) | (pawnAttacks[0][sq] & pieces[BP_]) |
+           (knightAttacks[sq] & (pieces[WN_] | pieces[BN_])) | (kingAttacks[sq] & (pieces[WK_] | pieces[BK_])) |
+           (slidingAttackBishop(sq, occ) & (pieces[WB_] | pieces[BB_] | pieces[WQ_] | pieces[BQ_])) |
+           (slidingAttackRook(sq, occ) & (pieces[WR_] | pieces[BR_] | pieces[WQ_] | pieces[BQ_]));
+}
+
 bool Board::inCheck(Color c) const {
     int ksq = kingSquare(c);
     if (ksq == -1) return false;

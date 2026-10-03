@@ -13,6 +13,7 @@
 #include "ChessTypes.h"
 #include "Nnue.h"
 
+#include <algorithm>
 #include <type_traits>
 #include <utility>
 
@@ -163,6 +164,69 @@ int evaluate(const BoardT &b) {
         score += c == 0 ? king : -king;
     }
     return b.sideToMove() == Color::White ? score : -score;
+}
+
+// Static exchange evaluation: material balance (centipawns, from the mover's
+// side) of the capture sequence that `m` starts on its target square, with
+// both sides always recapturing with their least valuable attacker and
+// allowed to stop when continuing would lose material. Handles x-rays,
+// en passant and promotions.
+template <class BoardT>
+int see(const BoardT &b, const Move &m) {
+    static constexpr int VALUE[6] = {100, 320, 330, 500, 900, 20000};
+    const int to = m.to;
+    Piece mover = b.pieceAt(m.from);
+    if (mover == Piece::None) return 0;
+    Color side = colorOf(mover);
+    Bitboard occ = b.occupancy() ^ (1ULL << m.from);
+    int gain[34];
+    int d = 0;
+    if (m.isEnPassant) {
+        gain[0] = VALUE[PAWN];
+        occ ^= 1ULL << (side == Color::White ? to - 8 : to + 8);
+    } else {
+        Piece victim = b.pieceAt(to);
+        gain[0] = victim == Piece::None ? 0 : VALUE[pieceTypeOf(victim)];
+    }
+    int onSquare = VALUE[pieceTypeOf(mover)];
+    if (m.promotion != Piece::None) {
+        gain[0] += VALUE[pieceTypeOf(m.promotion)] - VALUE[PAWN];
+        onSquare = VALUE[pieceTypeOf(m.promotion)];
+    }
+    auto colorBB = [&](Color c) {
+        Bitboard bb = 0;
+        for (int t = PAWN; t <= KING; ++t) bb |= b.pieceBB(c, t);
+        return bb;
+    };
+    const Bitboard diagonal = b.pieceBB(Color::White, BISHOP) | b.pieceBB(Color::Black, BISHOP) |
+                              b.pieceBB(Color::White, QUEEN) | b.pieceBB(Color::Black, QUEEN);
+    const Bitboard straight = b.pieceBB(Color::White, ROOK) | b.pieceBB(Color::Black, ROOK) |
+                              b.pieceBB(Color::White, QUEEN) | b.pieceBB(Color::Black, QUEEN);
+    Bitboard attackers = b.attackersTo(to, occ) & occ;
+    side = opposite(side);
+    while (d < 32) {
+        Bitboard mine = attackers & colorBB(side);
+        if (!mine) break;
+        int type = PAWN, from = -1;
+        for (; type <= KING; ++type) {
+            Bitboard bb = mine & b.pieceBB(side, type);
+            if (bb) { from = lsb(bb); break; }
+        }
+        // The king may only recapture if the square is no longer defended.
+        if (type == KING && (attackers & ~mine & occ)) break;
+        ++d;
+        gain[d] = onSquare - gain[d - 1];
+        onSquare = VALUE[type];
+        occ ^= 1ULL << from;
+        attackers |= (BoardT::bishopAttacks(to, occ) & diagonal) | (BoardT::rookAttacks(to, occ) & straight);
+        attackers &= occ;
+        side = opposite(side);
+    }
+    while (d > 0) {
+        gain[d - 1] = -std::max(-gain[d - 1], gain[d]);
+        --d;
+    }
+    return gain[0];
 }
 
 // Small capture-only search used to give static evaluations some tactical

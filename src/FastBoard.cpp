@@ -358,6 +358,14 @@ bool FastBoard::inCheck(Color c) const {
     return isSquareAttacked(ksq, opposite(c));
 }
 
+Bitboard FastBoard::attackersTo(int sq, Bitboard occ) const {
+    return (pawnAttacks[1][sq] & pieces[0][PAWN]) | (pawnAttacks[0][sq] & pieces[1][PAWN]) |
+           (knightAttacks[sq] & (pieces[0][KNIGHT] | pieces[1][KNIGHT])) |
+           (kingAttacks[sq] & (pieces[0][KING] | pieces[1][KING])) |
+           (getBishopAttacks(sq, occ) & (pieces[0][BISHOP] | pieces[1][BISHOP] | pieces[0][QUEEN] | pieces[1][QUEEN])) |
+           (getRookAttacks(sq, occ) & (pieces[0][ROOK] | pieces[1][ROOK] | pieces[0][QUEEN] | pieces[1][QUEEN]));
+}
+
 bool FastBoard::isSquareAttacked(int sq, Color byColor) const {
     int ci = colorIndex(byColor);
     if (pawnAttacks[1 - ci][sq] & pieces[ci][PAWN]) return true;

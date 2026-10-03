@@ -62,6 +62,11 @@ public:
     void makeNullMove();
     void unmakeNullMove();
     bool lastMoveWasNull() const { return !history.empty() && history.back().move.isNull(); }
+    Move lastMove() const { return history.empty() ? Move{} : history.back().move; }
+    // Pieces of both colours attacking `sq` given the occupancy `occupied`.
+    Bitboard attackersTo(int sq, Bitboard occupied) const;
+    static Bitboard rookAttacks(int sq, Bitboard occupied) { return getRookAttacks(sq, occupied); }
+    static Bitboard bishopAttacks(int sq, Bitboard occupied) { return getBishopAttacks(sq, occupied); }
 
     // Fifty-move rule, repetition (one earlier occurrence) or insufficient material.
     bool isDraw() const;

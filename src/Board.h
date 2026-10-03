@@ -41,6 +41,12 @@ public:
     void makeNullMove();
     void unmakeNullMove() { unmakeMove(); }
     bool lastMoveWasNull() const { return !history.empty() && history.back().move.isNull(); }
+    Move lastMove() const { return history.empty() ? Move{} : history.back().move; }
+    // Pieces of both colours attacking `sq` given the occupancy `occupied`
+    // (used by static exchange evaluation, which removes pieces as it goes).
+    Bitboard attackersTo(int sq, Bitboard occupied) const;
+    static Bitboard rookAttacks(int sq, Bitboard occupied) { return slidingAttackRook(sq, occupied); }
+    static Bitboard bishopAttacks(int sq, Bitboard occupied) { return slidingAttackBishop(sq, occupied); }
 
     Color sideToMove() const { return side; }
     Piece pieceAt(int sq) const;
