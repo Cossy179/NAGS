@@ -6,6 +6,6 @@
 
 int main(int argc, char **argv) {
     ClassicEngine<FastBoard> engine("NAGS Enhanced", /*useHashTable=*/true);
-    engine.setDefaultBenchDepth(7);
+    engine.setDefaultBenchDepth(10);
     return uci::run(engine, argc, argv);
 }

@@ -40,16 +40,19 @@ The node count is a fingerprint of search behaviour, and it is deterministic
   commit message as `Bench: <nodes>` (the convention Stockfish and most
   engines use), so any build can be checked against its commit.
 
-Default depths: `nags_basic` and `nags_fast` 6, `nags_enhanced` 7, `nags` 7
+Default depths: `nags_basic` and `nags_fast` 8, `nags_enhanced` 10, `nags` 9
 (`nags` benches with the heuristic evaluator and without the Python
-services). Fingerprints at the time of writing:
+services). They were raised from 6/6/7/7 once pruning made those runs take
+well under a second, and so that features that only act at higher depths
+(singular extensions) show up in the fingerprint. Fingerprints at the time
+of writing:
 
 | Engine | Bench nodes |
 |--------|-------------|
-| `nags_basic` | 573709 |
-| `nags_fast` | 559703 |
-| `nags_enhanced` | 642327 |
-| `nags` | 687065 |
+| `nags_basic` | 2772872 |
+| `nags_fast` | 2766664 |
+| `nags_enhanced` | 4763917 |
+| `nags` | 2628216 |
 
 When search improvements make a run much faster, raise the depth (in the
 engine's `main` file) and record the new fingerprints.

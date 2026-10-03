@@ -130,7 +130,7 @@ public:
     // Uses the heuristic evaluator with no services and no exploration noise
     // so the node count depends only on the engine's own code.
     void bench(int depth) override {
-        if (depth <= 0) depth = 7;
+        if (depth <= 0) depth = 9;
         NagsSettings saved = controller.settings();
         NagsSettings &s = controller.settings();
         s.useNN = false;

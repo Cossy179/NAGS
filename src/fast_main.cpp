@@ -5,6 +5,6 @@
 
 int main(int argc, char **argv) {
     ClassicEngine<FastBoard> engine("NAGS Fast", /*useHashTable=*/false);
-    engine.setDefaultBenchDepth(6);
+    engine.setDefaultBenchDepth(8);
     return uci::run(engine, argc, argv);
 }
