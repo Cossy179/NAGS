@@ -411,6 +411,8 @@ class Match:
 
     def _record(self, idx: int, games: List[GameResult], engine1_white: List[bool]) -> None:
         with self.lock:
+            if self.decision is not None:
+                return  # pairs finishing after the SPRT stopped are not counted
             pair_points = 0.0
             for res, e1w in zip(games, engine1_white):
                 p = points_for(res.result, e1w)

@@ -46,10 +46,10 @@ services). Fingerprints at the time of writing:
 
 | Engine | Bench nodes |
 |--------|-------------|
-| `nags_basic` | 6858427 |
-| `nags_fast` | 6839010 |
-| `nags_enhanced` | 12213087 |
-| `nags` | 12377207 |
+| `nags_basic` | 4466165 |
+| `nags_fast` | 4428167 |
+| `nags_enhanced` | 5328177 |
+| `nags` | 5460649 |
 
 When search improvements make a run much faster, raise the depth (in the
 engine's `main` file) and record the new fingerprints.
@@ -215,3 +215,4 @@ resign adjudication (4 moves, 1000 cp).
 | Change | Test | Result | Elo | Bench |
 |--------|------|--------|-----|-------|
 | Transposition table (`nags_enhanced` vs `nags_fast`, validation of the runner) | SPRT [0, 30] | H1 after 88 games (+52 =22 -14) | +161 ± 67 | 12213087 |
+| Null-move pruning (R = 3 + depth/6; not in check, at PV nodes, after a null move, near mate scores or with only pawns) | SPRT [0, 10] | H1 after 402 games (+192 =100 -110) | +72 ± 30 | 5328177 |

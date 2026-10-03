@@ -244,6 +244,10 @@ private:
         moves.swap(sorted);
     }
 
+    bool hasNonPawnMaterial(Color c) const {
+        return (board.pieceBB(c, KNIGHT) | board.pieceBB(c, BISHOP) | board.pieceBB(c, ROOK) | board.pieceBB(c, QUEEN)) != 0;
+    }
+
     // Lazy move ordering: brings the highest-scored remaining move to index n.
     // Ties keep generation order (the same order as a stable sort), and moves
     // after a cutoff are never sorted at all.
@@ -341,6 +345,20 @@ private:
                     if (hit.bound == Bound::Upper && s <= alpha) return s;
                 }
             }
+        }
+
+        // Null-move pruning: if the side to move could pass and a reduced
+        // search still fails high, the position is good enough to cut. Not in
+        // check, at PV nodes, right after another null move, near mate scores,
+        // or with only king and pawns (zugzwang is common there).
+        if (!isPv && !inCheck && depth >= 3 && !board.lastMoveWasNull() && std::abs(beta) < MATE_BOUND &&
+            hasNonPawnMaterial(board.sideToMove()) && eval::evaluate(board) >= beta) {
+            int reduction = 3 + depth / 6;
+            board.makeNullMove();
+            int score = -negamax(depth - 1 - reduction, -beta, -beta + 1, ply + 1, false);
+            board.unmakeNullMove();
+            if (aborted) return 0;
+            if (score >= beta) return score >= MATE_BOUND ? beta : score; // don't trust unproven mates
         }
 
         // Pseudo-legal moves; legality is checked only for moves actually
