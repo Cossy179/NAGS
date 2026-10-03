@@ -347,12 +347,21 @@ private:
             }
         }
 
+        // Static evaluation for the pruning decisions below (not needed at PV
+        // nodes or in check, where nothing is pruned).
+        const int staticEval = (!isPv && !inCheck) ? eval::evaluate(board) : 0;
+
+        // Reverse futility pruning: at shallow depth, a static evaluation that
+        // beats beta by a depth-scaled margin is assumed to hold.
+        if (!isPv && !inCheck && depth <= 6 && std::abs(beta) < MATE_BOUND && staticEval - 80 * depth >= beta)
+            return staticEval;
+
         // Null-move pruning: if the side to move could pass and a reduced
         // search still fails high, the position is good enough to cut. Not in
         // check, at PV nodes, right after another null move, near mate scores,
         // or with only king and pawns (zugzwang is common there).
         if (!isPv && !inCheck && depth >= 3 && !board.lastMoveWasNull() && std::abs(beta) < MATE_BOUND &&
-            hasNonPawnMaterial(board.sideToMove()) && eval::evaluate(board) >= beta) {
+            hasNonPawnMaterial(board.sideToMove()) && staticEval >= beta) {
             int reduction = 3 + depth / 6;
             board.makeNullMove();
             int score = -negamax(depth - 1 - reduction, -beta, -beta + 1, ply + 1, false);
