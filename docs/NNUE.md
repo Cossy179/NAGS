@@ -48,9 +48,15 @@ described at the top of `train.py`.
 
 ## 3. Inference in the engine
 
-`src/Nnue.h` / `src/Nnue.cpp`. FastBoard keeps both accumulators up to date
-as pieces are put and removed (so unmaking a move restores them exactly),
-and `eval::evaluate` uses the network whenever one is active.
+`src/Nnue.h` / `src/Nnue.cpp`. FastBoard keeps a stack of accumulators:
+`makeMove` writes the new position's accumulators from the previous ones in
+one pass (adding and removing the moved, captured and castling pieces), and
+`unmakeMove` just drops them. `eval::evaluate` uses the network whenever one
+is active. The update and evaluation kernels are also compiled for AVX2 and
+chosen at run time with GCC on x86-64 Linux; other builds use the portable
+code. With the test network, `bench` runs at about 0.8× the speed of the
+hand-written evaluation (portable build; about 0.5× before the accumulator
+stack and the AVX2 kernels).
 
 * The build embeds `nets/nags.nnue` if it exists (CMake option
   `NAGS_NNUE_FILE`). Without it the engines use the hand-written evaluation.

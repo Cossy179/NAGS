@@ -9,6 +9,15 @@
 extern const unsigned char kNagsEmbeddedNet[];
 extern const unsigned long kNagsEmbeddedNetSize;
 
+// The two hot kernels are also compiled for AVX2 and picked at run time
+// where the toolchain supports it (GCC, x86-64 Linux); elsewhere the
+// portable build is used.
+#if defined(__GNUC__) && !defined(__clang__) && defined(__x86_64__) && defined(__linux__)
+#define NAGS_NNUE_KERNEL __attribute__((target_clones("avx2", "default")))
+#else
+#define NAGS_NNUE_KERNEL
+#endif
+
 namespace nnue {
 
 namespace {
@@ -82,11 +91,39 @@ void addFeature(Accumulator &acc, const Network &net, Piece p, int sq) {
     }
 }
 
-void removeFeature(Accumulator &acc, const Network &net, Piece p, int sq) {
+NAGS_NNUE_KERNEL
+int evaluate(const Accumulator &acc, Color stm) {
+    const Network &net = *network();
+    const int16_t *us = acc.v[colorIndex(stm)];
+    const int16_t *them = acc.v[colorIndex(stm) ^ 1];
+    int32_t sum = 0;
+    for (int i = 0; i < kHidden; ++i) {
+        int16_t a = us[i] < 0 ? 0 : us[i] > QA ? static_cast<int16_t>(QA) : us[i];
+        int16_t b = them[i] < 0 ? 0 : them[i] > QA ? static_cast<int16_t>(QA) : them[i];
+        sum += a * net.outWeights[i] + b * net.outWeights[kHidden + i];
+    }
+    return static_cast<int>((static_cast<int64_t>(sum) + net.outBias) * SCALE / (QA * QB));
+}
+
+NAGS_NNUE_KERNEL
+void update(const Accumulator &prev, Accumulator &next, const Network &net, const DirtyPieces &d) {
     for (int persp = 0; persp < 2; ++persp) {
-        const int16_t *w = net.ftWeights + featureIndex(persp, p, sq) * kHidden;
-        int16_t *a = acc.v[persp];
-        for (int i = 0; i < kHidden; ++i) a[i] = static_cast<int16_t>(a[i] - w[i]);
+        const int16_t *in = prev.v[persp];
+        int16_t *out = next.v[persp];
+        const int16_t *a0 = net.ftWeights + featureIndex(persp, d.addPiece[0], d.addSquare[0]) * kHidden;
+        const int16_t *r0 = net.ftWeights + featureIndex(persp, d.removePiece[0], d.removeSquare[0]) * kHidden;
+        if (d.adds == 1 && d.removes == 1) { // quiet move
+            for (int i = 0; i < kHidden; ++i) out[i] = static_cast<int16_t>(in[i] + a0[i] - r0[i]);
+            continue;
+        }
+        const int16_t *r1 = net.ftWeights + featureIndex(persp, d.removePiece[1], d.removeSquare[1]) * kHidden;
+        if (d.adds == 1) { // capture
+            for (int i = 0; i < kHidden; ++i) out[i] = static_cast<int16_t>(in[i] + a0[i] - r0[i] - r1[i]);
+            continue;
+        }
+        const int16_t *a1 = net.ftWeights + featureIndex(persp, d.addPiece[1], d.addSquare[1]) * kHidden;
+        for (int i = 0; i < kHidden; ++i) // castling
+            out[i] = static_cast<int16_t>(in[i] + a0[i] + a1[i] - r0[i] - r1[i]);
     }
 }
 

@@ -191,7 +191,7 @@ FastBoard::FastBoard() {
 FastBoard::FastBoard(const FastBoard &o, NoHistory)
     : all_occupied(o.all_occupied), side(o.side), castlingRights(o.castlingRights), epSquare(o.epSquare),
       halfmoveClock(o.halfmoveClock), fullmoveNumber(o.fullmoveNumber), pliesFromNull(o.pliesFromNull),
-      hash(o.hash), psq(o.psq), phase(o.phase), acc(o.acc) {
+      hash(o.hash), psq(o.psq), phase(o.phase), accStack(1, o.accStack.back()) { // never empty
     for (int c = 0; c < 2; ++c) {
         occupied[c] = o.occupied[c];
         for (int p = 0; p < 6; ++p) pieces[c][p] = o.pieces[c][p];
@@ -210,7 +210,6 @@ void FastBoard::putPiece(Piece p, int sq) {
     hash ^= zPiece[static_cast<int>(p) - 1][sq];
     psq += psqValue[static_cast<int>(p) - 1][sq];
     phase += phaseValue[static_cast<int>(p) - 1];
-    if (const nnue::Network *net = nnue::network()) nnue::addFeature(acc, *net, p, sq);
 }
 
 void FastBoard::removePiece(int sq) {
@@ -224,7 +223,11 @@ void FastBoard::removePiece(int sq) {
     hash ^= zPiece[static_cast<int>(p) - 1][sq];
     psq -= psqValue[static_cast<int>(p) - 1][sq];
     phase -= phaseValue[static_cast<int>(p) - 1];
-    if (const nnue::Network *net = nnue::network()) nnue::removeFeature(acc, *net, p, sq);
+}
+
+void FastBoard::refreshAccumulator() {
+    accStack.resize(1);
+    nnue::refresh(accStack[0], *this);
 }
 
 void FastBoard::movePiece(int from, int to) {
@@ -516,6 +519,22 @@ void FastBoard::makeMove(const Move &m) {
     }
 
     Piece moving = entry.moved;
+    if (const nnue::Network *net = nnue::network()) {
+        nnue::DirtyPieces d;
+        d.remove(moving, m.from);
+        d.add(m.promotion != Piece::None ? m.promotion : moving, m.to);
+        if (m.isEnPassant) d.remove(entry.captured, side == Color::White ? m.to - 8 : m.to + 8);
+        else if (entry.captured != Piece::None) d.remove(entry.captured, m.to);
+        if (m.isCastling) {
+            Piece rook = makePiece(side, ROOK);
+            int rookFrom = m.to == 6 ? 7 : m.to == 2 ? 0 : m.to == 62 ? 63 : 56;
+            int rookTo = m.to == 6 ? 5 : m.to == 2 ? 3 : m.to == 62 ? 61 : 59;
+            d.remove(rook, rookFrom);
+            d.add(rook, rookTo);
+        }
+        accStack.emplace_back();
+        nnue::update(accStack[accStack.size() - 2], accStack.back(), *net, d);
+    }
     if (m.isEnPassant) {
         removePiece(side == Color::White ? m.to - 8 : m.to + 8);
     } else if (entry.captured != Piece::None) {
@@ -622,6 +641,13 @@ void FastBoard::unmakeMove() {
     fullmoveNumber = entry.fullmoveNumber;
     hash = entry.hash;
     pliesFromNull = entry.pliesFromNull;
+
+    if (nnue::network()) {
+        // The saved accumulators end at the last refresh; before that they
+        // have to be recomputed.
+        if (accStack.size() > 1) accStack.pop_back();
+        else refreshAccumulator();
+    }
 }
 
 bool FastBoard::applyMovesUCI(const std::vector<std::string> &uciMoves) {

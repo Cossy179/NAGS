@@ -58,9 +58,19 @@ inline int featureIndex(int perspective, Piece p, int sq) {
     return colour * 384 + pieceTypeOf(p) * 64 + sq;
 }
 
-// Defined out of line so the board's move code stays small when NNUE is off.
 void addFeature(Accumulator &acc, const Network &net, Piece p, int sq);
-void removeFeature(Accumulator &acc, const Network &net, Piece p, int sq);
+
+// Pieces a move adds and removes (at most two of each: castling, captures).
+struct DirtyPieces {
+    int adds = 0, removes = 0;
+    Piece addPiece[2], removePiece[2];
+    int addSquare[2], removeSquare[2];
+    void add(Piece p, int sq) { addPiece[adds] = p; addSquare[adds++] = sq; }
+    void remove(Piece p, int sq) { removePiece[removes] = p; removeSquare[removes++] = sq; }
+};
+
+// next = prev with the move's pieces added and removed, in one pass.
+void update(const Accumulator &prev, Accumulator &next, const Network &net, const DirtyPieces &d);
 
 // Recomputes both accumulators from the pieces on the board.
 template <class BoardT>
@@ -75,18 +85,7 @@ void refresh(Accumulator &acc, const BoardT &b) {
     }
 }
 
-// Centipawns from the side to move's point of view.
-inline int evaluate(const Accumulator &acc, Color stm) {
-    const Network &net = *network();
-    const int16_t *us = acc.v[colorIndex(stm)];
-    const int16_t *them = acc.v[colorIndex(stm) ^ 1];
-    int32_t sum = 0;
-    for (int i = 0; i < kHidden; ++i) {
-        int a = us[i] < 0 ? 0 : us[i] > QA ? QA : us[i];
-        int b = them[i] < 0 ? 0 : them[i] > QA ? QA : them[i];
-        sum += a * net.outWeights[i] + b * net.outWeights[kHidden + i];
-    }
-    return static_cast<int>((static_cast<int64_t>(sum) + net.outBias) * SCALE / (QA * QB));
-}
+// Centipawns from the side to move's point of view (with the active network).
+int evaluate(const Accumulator &acc, Color stm);
 
 } // namespace nnue

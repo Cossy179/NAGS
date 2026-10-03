@@ -49,9 +49,13 @@ public:
     // Black), and the uncapped game phase (minor 1, rook 2, queen 4).
     int psqScore() const { return psq; }
     int gamePhase() const { return phase; }
-    // NNUE accumulators, updated incrementally while a network is active.
-    const nnue::Accumulator &accumulator() const { return acc; }
-    void refreshAccumulator() { nnue::refresh(acc, *this); }
+    // NNUE accumulators of the current position, valid while a network is
+    // active. makeMove computes them from the previous position's in one
+    // pass and unmakeMove just drops them.
+    const nnue::Accumulator &accumulator() const { return accStack.back(); }
+    // Recomputes them from scratch (after the network changed) and forgets
+    // the saved ones.
+    void refreshAccumulator();
     uint8_t getCastlingRights() const { return castlingRights; } // KQkq = bits 0..3
     int getEpSquare() const { return epSquare; } // -1 if none
     int getFullmoveNumber() const { return fullmoveNumber; }
@@ -108,7 +112,7 @@ private:
     uint64_t hash = 0;
     int psq = 0;
     int phase = 0;
-    nnue::Accumulator acc;
+    std::vector<nnue::Accumulator> accStack = std::vector<nnue::Accumulator>(1); // back(): the current position
 
     struct HistoryEntry {
         Move move;
