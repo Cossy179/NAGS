@@ -64,6 +64,9 @@ public:
     // default) from a clean state, prints per-position lines and the summary
     // from bench::summary(), then leaves the engine as after ucinewgame.
     virtual void bench(int depth) = 0;
+    // One "info string" line with the static evaluation of the current
+    // position (UCI command "eval").
+    virtual std::string staticEvaluation() const { return "info string eval not available"; }
 };
 
 // Runs the UCI loop. If argv[1] is "bench" (optionally followed by a depth),

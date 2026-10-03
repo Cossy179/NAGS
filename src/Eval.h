@@ -11,6 +11,7 @@
 
 #include "BitOps.h"
 #include "ChessTypes.h"
+#include "Nnue.h"
 
 #include <type_traits>
 #include <utility>
@@ -111,6 +112,12 @@ template <class BoardT>
 struct HasIncrementalEval<BoardT, std::void_t<decltype(std::declval<const BoardT &>().psqScore()),
                                               decltype(std::declval<const BoardT &>().gamePhase())>> : std::true_type {};
 
+// Boards that keep NNUE accumulators (FastBoard) provide accumulator().
+template <class BoardT, class = void>
+struct HasNnue : std::false_type {};
+template <class BoardT>
+struct HasNnue<BoardT, std::void_t<decltype(std::declval<const BoardT &>().accumulator())>> : std::true_type {};
+
 // Material and piece-square values of everything but the kings (White minus
 // Black), and the uncapped game phase, computed from scratch.
 template <class BoardT>
@@ -130,9 +137,13 @@ void materialAndPhase(const BoardT &b, int &score, int &phase) {
     }
 }
 
-// Score in centipawns from the side to move's point of view.
+// Score in centipawns from the side to move's point of view: the NNUE
+// network when one is active (FastBoard), otherwise the hand-written terms.
 template <class BoardT>
 int evaluate(const BoardT &b) {
+    if constexpr (HasNnue<BoardT>::value) {
+        if (nnue::network()) return nnue::evaluate(b.accumulator(), b.sideToMove());
+    }
     int score, phase; // phase: 24 = all pieces on the board, 0 = bare kings and pawns
     if constexpr (HasIncrementalEval<BoardT>::value) {
         score = b.psqScore();

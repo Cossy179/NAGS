@@ -34,14 +34,30 @@ if(MSVC)
   target_compile_definitions(fathom PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
 endif()
 
+# Default NNUE network, compiled into the engines (see tools/nnue/train.py).
+# Without the file the engines use the hand-written evaluation.
+set(NAGS_NNUE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/nets/nags.nnue" CACHE FILEPATH "NNUE network to embed")
+set(NAGS_EMBEDDED_NET ${CMAKE_CURRENT_BINARY_DIR}/nnue_embedded.cpp)
+set(embed_depends ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_net.cmake)
+if(EXISTS "${NAGS_NNUE_FILE}")
+  list(APPEND embed_depends "${NAGS_NNUE_FILE}")
+endif()
+add_custom_command(OUTPUT ${NAGS_EMBEDDED_NET}
+  COMMAND ${CMAKE_COMMAND} -DINPUT=${NAGS_NNUE_FILE} -DOUTPUT=${NAGS_EMBEDDED_NET}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_net.cmake
+  DEPENDS ${embed_depends}
+  COMMENT "Embedding NNUE network")
+
 # Code shared by every engine: boards, transposition table, UCI front end,
-# tablebases, networking for the Python services.
+# tablebases, NNUE, networking for the Python services.
 add_library(nags_core STATIC
   src/Board.cpp
   src/FastBoard.cpp
   src/TT.cpp
   src/Uci.cpp
   src/Syzygy.cpp
+  src/Nnue.cpp
+  ${NAGS_EMBEDDED_NET}
   src/Net.cpp
   src/MetaClient.cpp
 )
@@ -62,8 +78,10 @@ add_executable(nags_enhanced src/enhanced_main.cpp)
 add_executable(nags src/main.cpp src/NAGS.cpp)
 # Smoke test client for rpc_server.py.
 add_executable(rpc_client src/rpc_client.cpp)
+# Self-play training data for the NNUE evaluation.
+add_executable(nags_datagen src/datagen_main.cpp)
 
-foreach(target nags_basic nags_fast nags_enhanced nags rpc_client)
+foreach(target nags_basic nags_fast nags_enhanced nags rpc_client nags_datagen)
   target_link_libraries(${target} PRIVATE nags_core)
   nags_warnings(${target})
 endforeach()
@@ -76,9 +94,10 @@ if(NAGS_BUILD_TESTS)
   target_compile_definitions(fastboard_tests PRIVATE TEST_FAST_BOARD)
   add_executable(search_tests tests/cpp/search_tests.cpp)
   add_executable(syzygy_tests tests/cpp/syzygy_tests.cpp)
+  add_executable(nnue_tests tests/cpp/nnue_tests.cpp)
   set(NAGS_SYZYGY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/syzygy)
   target_compile_definitions(syzygy_tests PRIVATE NAGS_SYZYGY_DIR="${NAGS_SYZYGY_DIR}")
-  foreach(target board_tests fastboard_tests search_tests syzygy_tests)
+  foreach(target board_tests fastboard_tests search_tests syzygy_tests nnue_tests)
     target_link_libraries(${target} PRIVATE nags_core)
     nags_warnings(${target})
     add_test(NAME ${target} COMMAND ${target})

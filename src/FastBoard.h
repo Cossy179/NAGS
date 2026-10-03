@@ -5,6 +5,7 @@
 // Board so the search/evaluation templates work with either.
 
 #include "ChessTypes.h"
+#include "Nnue.h"
 
 #include <cstdint>
 #include <string>
@@ -48,6 +49,9 @@ public:
     // Black), and the uncapped game phase (minor 1, rook 2, queen 4).
     int psqScore() const { return psq; }
     int gamePhase() const { return phase; }
+    // NNUE accumulators, updated incrementally while a network is active.
+    const nnue::Accumulator &accumulator() const { return acc; }
+    void refreshAccumulator() { nnue::refresh(acc, *this); }
     uint8_t getCastlingRights() const { return castlingRights; } // KQkq = bits 0..3
     int getEpSquare() const { return epSquare; } // -1 if none
     int getFullmoveNumber() const { return fullmoveNumber; }
@@ -99,6 +103,7 @@ private:
     uint64_t hash = 0;
     int psq = 0;
     int phase = 0;
+    nnue::Accumulator acc;
 
     struct HistoryEntry {
         Move move;

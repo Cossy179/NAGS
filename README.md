@@ -71,7 +71,7 @@ printf 'uci\nposition startpos moves e2e4\ngo depth 8\n' | build/nags_enhanced
 The search runs on its own thread, so `stop`, `isready` and `quit` are handled
 while it thinks. Supported `go` parameters: `wtime btime winc binc movestogo
 movetime depth nodes mate infinite ponder`, plus the non-standard `go perft N`
-(also `perft N`) and `d` (print the FEN). The alpha-beta engines support
+(also `perft N`), `d` (print the FEN) and `eval` (static evaluation). The alpha-beta engines support
 pondering (`go ponder`, then `ponderhit` or `stop`); `nags` treats
 `go ponder` as a normal search.
 
@@ -87,6 +87,7 @@ UCI options:
 | `Ponder` | `nags_basic`, `nags_fast`, `nags_enhanced` | Lets the GUI know it may ponder |
 | `SyzygyPath` | all | Directories with Syzygy tablebase files (`:`-separated, `;` on Windows) |
 | `SyzygyProbeLimit` (default 7) | all | Only probe positions with at most this many pieces |
+| `UseNNUE` (default true), `EvalFile` | `nags_fast`, `nags_enhanced` | NNUE evaluation (see `docs/NNUE.md`); the hand-written evaluation is used when no network is available |
 | `UseNN`, `NNHost`, `NNPort` | `nags` | Use `rpc_server.py` for MCTS priors/values (default `127.0.0.1:5555`) |
 | `UseMetaLearner`, `MetaHost`, `MetaPort` | `nags` | Ask `meta_learner.py` for per-move deltas (default `127.0.0.1:5556`) |
 | `MetaExploration` (0-100) | `nags` | Gaussian noise (std = value/100) added to the deltas; used in self-play |

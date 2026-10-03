@@ -168,6 +168,7 @@ public:
 
     void setRoot(const BoardT &root) {
         board = root;
+        board.refreshAccumulator(); // the network may have changed since `root` was set up
         rootMoves = board.generateLegalMoves();
         orderMoves(rootMoves, Move{}, 0);
         nodes = 0;

@@ -191,7 +191,7 @@ FastBoard::FastBoard() {
 FastBoard::FastBoard(const FastBoard &o, NoHistory)
     : all_occupied(o.all_occupied), side(o.side), castlingRights(o.castlingRights), epSquare(o.epSquare),
       halfmoveClock(o.halfmoveClock), fullmoveNumber(o.fullmoveNumber), pliesFromNull(o.pliesFromNull),
-      hash(o.hash), psq(o.psq), phase(o.phase) {
+      hash(o.hash), psq(o.psq), phase(o.phase), acc(o.acc) {
     for (int c = 0; c < 2; ++c) {
         occupied[c] = o.occupied[c];
         for (int p = 0; p < 6; ++p) pieces[c][p] = o.pieces[c][p];
@@ -210,6 +210,7 @@ void FastBoard::putPiece(Piece p, int sq) {
     hash ^= zPiece[static_cast<int>(p) - 1][sq];
     psq += psqValue[static_cast<int>(p) - 1][sq];
     phase += phaseValue[static_cast<int>(p) - 1];
+    if (const nnue::Network *net = nnue::network()) nnue::addFeature(acc, *net, p, sq);
 }
 
 void FastBoard::removePiece(int sq) {
@@ -223,6 +224,7 @@ void FastBoard::removePiece(int sq) {
     hash ^= zPiece[static_cast<int>(p) - 1][sq];
     psq -= psqValue[static_cast<int>(p) - 1][sq];
     phase -= phaseValue[static_cast<int>(p) - 1];
+    if (const nnue::Network *net = nnue::network()) nnue::removeFeature(acc, *net, p, sq);
 }
 
 void FastBoard::movePiece(int from, int to) {
@@ -304,6 +306,7 @@ bool FastBoard::setFromFEN(const std::string &fen) {
     b.pliesFromNull = 0;
     b.fullmoveNumber = fm;
     b.hashRecompute();
+    b.refreshAccumulator();
     *this = std::move(b);
     history.clear();
     return true;

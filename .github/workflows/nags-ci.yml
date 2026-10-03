@@ -35,10 +35,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
-      - name: Build the engine (used by the self-play smoke test)
+      - name: Build the engines (used by the self-play and NNUE tests)
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DNAGS_BUILD_TESTS=OFF
-          cmake --build build --parallel --target nags rpc_client
+          cmake --build build --parallel --target nags nags_enhanced rpc_client
       - name: Unit tests
         run: python -m pytest -q
       - name: RPC round trip (rpc_server.py + rpc_client)

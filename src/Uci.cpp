@@ -285,6 +285,8 @@ int run(Engine &engine, int argc, char **argv) {
             engine.bench(tokens.size() > 1 ? benchDepth(tokens[1]) : 0);
         } else if (cmd == "d" || cmd == "fen") {
             send(engine.fen());
+        } else if (cmd == "eval") {
+            send(engine.staticEvaluation());
         } else if (cmd == "debug" || cmd == "register") {
             // Not used.
         } else {

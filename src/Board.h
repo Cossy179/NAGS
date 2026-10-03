@@ -50,6 +50,7 @@ public:
     int getHalfmoveClock() const { return halfmoveClock; }
     uint8_t getCastlingRights() const { return castlingRights; } // KQkq = bits 0..3
     int getEpSquare() const { return epSquare; } // -1 if none
+    void refreshAccumulator() {} // no NNUE on this board
     int getFullmoveNumber() const { return fullmoveNumber; }
 
     // Draw by fifty-move rule, repetition (a single earlier occurrence counts,

@@ -37,6 +37,10 @@ public:
         lines.push_back("option name MultiPV type spin default 1 min 1 max 256");
         lines.push_back("option name Ponder type check default false");
         for (const auto &l : uci::syzygyOptionLines()) lines.push_back(l);
+        if constexpr (eval::HasNnue<BoardT>::value) {
+            lines.push_back("option name UseNNUE type check default true");
+            lines.push_back("option name EvalFile type string default <embedded>");
+        }
         return lines;
     }
 
@@ -44,6 +48,27 @@ public:
         long long v = 0;
         bool ok = false;
         if (uci::setSyzygyOption(optName, value, message, ok)) return ok;
+        if constexpr (eval::HasNnue<BoardT>::value) {
+            if (optName == "UseNNUE") {
+                bool on = false;
+                if (!uci::parseBool(value, on)) { message = "invalid UseNNUE value '" + value + "'"; return false; }
+                bool active = nnue::setEnabled(on);
+                message = active ? "NNUE evaluation: " + nnue::networkName()
+                                 : on ? "no NNUE network loaded; using the classical evaluation" : "classical evaluation";
+                return true;
+            }
+            if (optName == "EvalFile") {
+                if (value.empty() || value == "<embedded>") {
+                    nnue::useEmbedded();
+                } else {
+                    std::string error;
+                    if (!nnue::load(value, error)) { message = "EvalFile: " + error; return false; }
+                }
+                message = nnue::network() ? "NNUE evaluation: " + nnue::networkName()
+                                          : "no NNUE network; using the classical evaluation";
+                return true;
+            }
+        }
         if (tt && optName == "Hash") {
             if (!uci::parseInt(value, v)) { message = "invalid Hash value '" + value + "'"; return false; }
             v = std::clamp<long long>(v, 1, 4096);
@@ -117,6 +142,15 @@ public:
     }
 
     std::string fen() const override { return board.getFEN(); }
+
+    std::string staticEvaluation() const override {
+        BoardT b = board;
+        b.refreshAccumulator();
+        std::string kind = "classical";
+        if constexpr (eval::HasNnue<BoardT>::value)
+            if (nnue::network()) kind = "nnue " + nnue::networkName();
+        return "info string eval " + std::to_string(eval::evaluate(b)) + " (side to move, " + kind + ")";
+    }
 
     void bench(int depth) override {
         if (depth <= 0) depth = defaultBenchDepth;

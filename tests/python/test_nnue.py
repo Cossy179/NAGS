@@ -1,0 +1,84 @@
+"""NNUE trainer tests: features, training/export, and (when nags_enhanced is
+built) exact agreement between the engine's evaluation and the reference."""
+
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+import torch
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tools" / "nnue"))
+import train  # noqa: E402
+
+FENS = [
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 2 3",
+    "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P3/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+    "8/8/1k6/8/8/8/6K1/7Q b - - 0 1",
+    "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+]
+
+
+def _dataset(path, n=400, seed=0):
+    rng = np.random.default_rng(seed)
+    with open(path, "w") as fh:
+        for i in range(n):
+            fen = FENS[i % len(FENS)]
+            fh.write(f"{fen} | {int(rng.integers(-300, 300))} | {rng.choice(['1.0', '0.5', '0.0'])}\n")
+
+
+def test_features():
+    f = train.white_features(FENS[0].split()[0])
+    assert len(f) == 32 and len(set(f)) == 32
+    assert 0 * 384 + 0 * 64 + 8 in f  # white pawn a2
+    assert 1 * 384 + 5 * 64 + 60 in f  # black king e8
+    # From Black's side the black king on e8 is "our king on e1".
+    black = train.mirror(np.array(f))
+    assert 0 * 384 + 5 * 64 + 4 in black
+    assert sorted(black.tolist()) == sorted(f)  # the start position is symmetric
+
+
+def test_train_and_export(tmp_path):
+    data = tmp_path / "d.txt"
+    _dataset(data)
+    out = tmp_path / "n.nnue"
+    train.main(["--data", str(data), "--out", str(out), "--epochs", "2", "--hidden", "16", "--batch", "64", "--threads", "1"])
+    assert out.stat().st_size == 16 + 2 * (768 * 16 + 16 + 32) + 4
+    net = train.read_net(out)
+    # The quantized evaluation tracks the float network closely.
+    model = train.Nnue(16)
+    with torch.no_grad():
+        model.ft.weight[:768] = torch.from_numpy(net[0] / train.QA).float()
+        model.ft_bias[:] = torch.from_numpy(net[1] / train.QA).float()
+        model.out.weight[0] = torch.from_numpy(net[2] / train.QB).float()
+        model.out.bias[0] = net[3] / (train.QA * train.QB)
+    for fen in FENS:
+        feats, stm, _, _ = train.parse_chunk([f"{fen} | 0 | 0.5"])
+        w, b, s, _ = train.tensors(feats, stm, np.zeros(1, np.int16), np.zeros(1, np.float32), np.array([0]), 1.0)
+        with torch.no_grad():
+            cp = float(model(w, b, s)) * train.SCALE
+        assert abs(train.quantized_eval(net, fen) - cp) <= 2
+
+
+def _engine():
+    for c in (ROOT / "build" / "nags_enhanced", ROOT / "build" / "Release" / "nags_enhanced.exe"):
+        if c.exists():
+            return c
+    return None
+
+
+@pytest.mark.skipif(_engine() is None, reason="nags_enhanced not built")
+def test_engine_matches_reference(tmp_path):
+    data = tmp_path / "d.txt"
+    _dataset(data)
+    out = tmp_path / "n.nnue"
+    train.main(["--data", str(data), "--out", str(out), "--epochs", "2", "--hidden", "256", "--batch", "64", "--threads", "1", "--lr", "0.01"])
+    net = train.read_net(out)
+    cmds = f"setoption name EvalFile value {out}\n" + "".join(f"position fen {f}\neval\n" for f in FENS)
+    lines = subprocess.run([str(_engine())], input=cmds, capture_output=True, text=True, timeout=60).stdout.splitlines()
+    evals = [int(l.split()[3]) for l in lines if l.startswith("info string eval")]
+    assert any("NNUE evaluation" in l for l in lines)
+    assert evals == [train.quantized_eval(net, f) for f in FENS]
