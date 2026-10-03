@@ -56,11 +56,25 @@ either.
 
 * Iterative deepening with aspiration windows (from depth 5) and principal
   variation search.
-* Check extension, late-move reductions for quiet moves, mate distance pruning.
-* Move ordering: transposition-table move, then captures by MVV/LVA (with
-  promotions), killer moves, history heuristic.
-* Quiescence search over captures and promotions with delta pruning. When in
-  check, all evasions are searched and there is no stand-pat.
+* Extensions: check extension; singular extension of the TT move (depth ≥ 8,
+  verified by a reduced search without it, with a multi-cut when even the
+  alternatives beat beta).
+* Pruning and reductions (outside PV nodes and check where it matters):
+  reverse futility pruning (depth ≤ 6), null-move pruning (R = 3 + depth/6),
+  late-move pruning and futility pruning of quiet moves (depth ≤ 3),
+  logarithmic late-move reductions, mate distance pruning.
+* Move ordering: transposition-table move, then winning/equal captures by
+  MVV/LVA (with promotions), killer moves, the countermove, losing captures
+  (negative static exchange evaluation), and quiet moves by a history table
+  with a malus for quiet moves that failed to cut off.
+* Quiescence search over captures and promotions with delta pruning and
+  without losing captures (SEE < 0). When in check, all evasions are
+  searched and there is no stand-pat.
+* Time management: no new iteration after a soft limit that grows when the
+  best move just changed or the score dropped and shrinks when the best move
+  is stable; a hard limit aborts the search.
+* Syzygy tablebases (WDL in the search, DTZ at the root), MultiPV and
+  pondering.
 * Transposition table entries record whether the score is exact or a bound,
   and mate scores are stored relative to the node, so they stay correct at
   other plies. The root never takes a TT cutoff, so every search returns a

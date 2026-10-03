@@ -2,10 +2,12 @@
 
 // Iterative-deepening alpha-beta search shared by every engine. Templated on
 // the board type (Board or FastBoard). Features: principal variation search,
-// aspiration windows, check extension, late-move reductions, killer/history
-// move ordering, quiescence search (with check evasions), repetition /
-// fifty-move draws, optional transposition table and Lazy SMP helper threads,
-// MultiPV, pondering and Syzygy tablebases.
+// aspiration windows, check and singular extensions, reverse futility and
+// null-move pruning, late-move pruning/reductions, futility pruning, SEE,
+// killer/countermove/history move ordering, quiescence search (with check
+// evasions), repetition / fifty-move draws, optional transposition table and
+// Lazy SMP helper threads, MultiPV, pondering and Syzygy tablebases. See
+// docs/ARCHITECTURE.md and, for the tested gain of each, docs/TESTING.md.
 //
 // Searcher drives a whole UCI "go"; SearchWorker can also be driven one
 // iteration at a time (the NAGS hybrid controller does this for its DFS arm).
@@ -427,7 +429,9 @@ private:
         return bestScore;
     }
 
-    int negamax(int depth, int alpha, int beta, int ply, bool isPv) {
+    // `excluded`: a move to leave out (singular extension verification). Such
+    // a search neither uses nor stores TT and tablebase results for the node.
+    int negamax(int depth, int alpha, int beta, int ply, bool isPv, const Move &excluded = Move{}) {
         pvLength[ply] = ply;
         if (checkStop()) return 0;
         if (board.isDraw()) return 0;
@@ -445,11 +449,14 @@ private:
         ++nodes;
         selDepth = std::max(selDepth, ply);
 
+        const bool excluding = !excluded.isNull();
         Move ttMove;
+        TTHit hit;
+        bool ttHit = false;
         uint64_t key = board.zobrist();
-        if (tt) {
-            TTHit hit;
+        if (tt && !excluding) {
             if (tt->probe(key, hit)) {
+                ttHit = true;
                 ttMove = hit.move;
                 if (!isPv && hit.depth >= depth) {
                     int s = scoreFromTT(hit.score, ply);
@@ -464,7 +471,7 @@ private:
         // or pawn move (half-move clock 0), without castling rights. A result
         // that does not cut off still bounds this node's score.
         int tbFloor = -INF_SCORE, tbCeiling = INF_SCORE;
-        if (syzygy::cardinality() > 0 && board.getHalfmoveClock() == 0 && board.getCastlingRights() == 0 &&
+        if (!excluding && syzygy::cardinality() > 0 && board.getHalfmoveClock() == 0 && board.getCastlingRights() == 0 &&
             popcount(board.occupancy()) <= syzygy::cardinality()) {
             syzygy::Wdl wdl;
             if (syzygy::probeWdl(syzygy::position(board), wdl)) {
@@ -488,14 +495,14 @@ private:
 
         // Reverse futility pruning: at shallow depth, a static evaluation that
         // beats beta by a depth-scaled margin is assumed to hold.
-        if (!isPv && !inCheck && depth <= 6 && std::abs(beta) < MATE_BOUND && staticEval - 80 * depth >= beta)
+        if (!isPv && !inCheck && !excluding && depth <= 6 && std::abs(beta) < MATE_BOUND && staticEval - 80 * depth >= beta)
             return staticEval;
 
         // Null-move pruning: if the side to move could pass and a reduced
         // search still fails high, the position is good enough to cut. Not in
         // check, at PV nodes, right after another null move, near mate scores,
         // or with only king and pawns (zugzwang is common there).
-        if (!isPv && !inCheck && depth >= 3 && !board.lastMoveWasNull() && std::abs(beta) < MATE_BOUND &&
+        if (!isPv && !inCheck && !excluding && depth >= 3 && !board.lastMoveWasNull() && std::abs(beta) < MATE_BOUND &&
             hasNonPawnMaterial(board.sideToMove()) && staticEval >= beta) {
             int reduction = 3 + depth / 6;
             board.makeNullMove();
@@ -518,18 +525,36 @@ private:
         int originalAlpha = alpha;
         int best = -INF_SCORE;
         Move bestMove;
+        // Singular extension candidate: a deep enough TT entry whose move
+        // failed high (or was exact).
+        const int ttScore = ttHit ? scoreFromTT(hit.score, ply) : 0;
+        const bool trySingular = !excluding && depth >= 8 && ttHit && !ttMove.isNull() && hit.depth >= depth - 3 &&
+                                 hit.bound != Bound::Upper && std::abs(ttScore) < TB_BOUND && ply < MAX_PLY / 2;
+
         int i = 0; // number of legal moves tried so far
         int quietsTried = 0;
         MoveList quietsSearched; // quiet moves searched without a cutoff
         for (int n = 0; n < moves.size(); ++n) {
             pickNext(moves, scores, n);
             const Move m = moves[n];
+            if (excluding && sameMove(m, excluded)) continue;
             bool quiet = !eval::isNoisy(board, m);
             // Shallow quiet-move pruning. Only once a legal move has been
             // searched, so checkmate / stalemate detection is unaffected.
             if (!isPv && !inCheck && quiet && i > 0 && depth <= 3 && std::abs(alpha) < MATE_BOUND) {
                 if (quietsTried >= 3 + depth * depth) continue;  // late-move pruning
                 if (staticEval + 120 * depth <= alpha) continue; // futility pruning
+            }
+            // Singular extension: if every other move fails low against a
+            // margin below the TT score, the TT move is singular and gets one
+            // more ply. If even the alternatives beat beta, cut (multi-cut).
+            int extension = 0;
+            if (trySingular && sameMove(m, ttMove)) {
+                int singularBeta = ttScore - 2 * depth;
+                int s = negamax((depth - 1) / 2, singularBeta - 1, singularBeta, ply, false, m);
+                if (aborted) return 0;
+                if (s < singularBeta) extension = 1;
+                else if (singularBeta >= beta) return singularBeta;
             }
             board.makeMove(m);
             if (board.inCheck(us)) { // illegal: leaves our own king in check
@@ -539,7 +564,7 @@ private:
             bool givesCheck = board.inCheck();
             int score;
             if (i == 0) {
-                score = -negamax(depth - 1, -beta, -alpha, ply + 1, isPv);
+                score = -negamax(depth - 1 + extension, -beta, -alpha, ply + 1, isPv);
             } else {
                 int reduction = 0;
                 if (depth >= 3 && i >= 2 && quiet && !inCheck && !givesCheck &&
@@ -547,11 +572,11 @@ private:
                     reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0);
                     reduction = std::clamp(reduction, 0, depth - 2);
                 }
-                score = -negamax(depth - 1 - reduction, -alpha - 1, -alpha, ply + 1, false);
+                score = -negamax(depth - 1 + extension - reduction, -alpha - 1, -alpha, ply + 1, false);
                 if (!aborted && reduction && score > alpha)
-                    score = -negamax(depth - 1, -alpha - 1, -alpha, ply + 1, false);
+                    score = -negamax(depth - 1 + extension, -alpha - 1, -alpha, ply + 1, false);
                 if (!aborted && score > alpha && score < beta)
-                    score = -negamax(depth - 1, -beta, -alpha, ply + 1, true);
+                    score = -negamax(depth - 1 + extension, -beta, -alpha, ply + 1, true);
             }
             board.unmakeMove();
             if (aborted) return 0;
@@ -590,7 +615,10 @@ private:
             if (quiet) quietsSearched.push_back(m);
         }
 
-        if (i == 0) return inCheck ? -MATE_SCORE + ply : 0; // checkmate or stalemate
+        if (i == 0) {
+            if (excluding) return alpha; // the excluded move was the only one
+            return inCheck ? -MATE_SCORE + ply : 0; // checkmate or stalemate
+        }
 
         Bound bound = best >= beta ? Bound::Lower : (best > originalAlpha ? Bound::Exact : Bound::Upper);
         if (best < tbFloor) {
@@ -600,7 +628,7 @@ private:
             best = tbCeiling;
             bound = Bound::Upper;
         }
-        if (tt) tt->store(key, depth, bound, scoreToTT(best, ply), bestMove);
+        if (tt && !excluding) tt->store(key, depth, bound, scoreToTT(best, ply), bestMove);
         return best;
     }
 
