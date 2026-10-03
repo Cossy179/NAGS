@@ -13,6 +13,8 @@ using TestBoard = Board;
 static const char *kBoardName = "Board";
 #endif
 
+#include "Eval.h"
+
 #include <cstdio>
 #include <random>
 #include <string>
@@ -59,9 +61,28 @@ static void testPerft() {
     }
 }
 
+#ifdef TEST_FAST_BOARD
+static_assert(eval::HasIncrementalEval<FastBoard>::value, "FastBoard should evaluate incrementally");
+#endif
+
+// Incrementally updated evaluation terms (FastBoard) must equal the ones
+// computed from scratch.
+template <class B>
+static bool incrementalEvalOk(const B &b) {
+    if constexpr (eval::HasIncrementalEval<B>::value) {
+        int score, phase;
+        eval::materialAndPhase(b, score, phase);
+        return score == b.psqScore() && phase == b.gamePhase();
+    } else {
+        (void)b;
+        return true;
+    }
+}
+
 // Plays seeded random games and checks, at every ply, that the incrementally
-// updated hash equals the hash of the same position loaded from its FEN, and
-// that unmaking every move restores the original position exactly.
+// updated hash (and evaluation terms) equal those of the same position loaded
+// from its FEN, and that unmaking every move restores the original position
+// exactly.
 static void testHashConsistency() {
     const char *starts[] = {
         "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -83,6 +104,7 @@ static void testHashConsistency() {
                 TestBoard fresh;
                 CHECK(fresh.setFromFEN(b.getFEN()), "FEN round trip rejected: %s", b.getFEN().c_str());
                 CHECK(fresh.zobrist() == b.zobrist(), "hash mismatch after %d plies at %s", ply + 1, b.getFEN().c_str());
+                CHECK(incrementalEvalOk(b), "incremental evaluation terms wrong after %d plies at %s", ply + 1, b.getFEN().c_str());
                 fens.push_back(b.getFEN());
                 hashes.push_back(b.zobrist());
                 ++checked;
@@ -91,6 +113,7 @@ static void testHashConsistency() {
                 b.unmakeMove();
                 CHECK(b.getFEN() == fens[i - 1], "unmake did not restore %s (got %s)", fens[i - 1].c_str(), b.getFEN().c_str());
                 CHECK(b.zobrist() == hashes[i - 1], "unmake did not restore hash at ply %zu", i - 1);
+                CHECK(incrementalEvalOk(b), "unmake did not restore the evaluation terms at ply %zu", i - 1);
             }
         }
     }

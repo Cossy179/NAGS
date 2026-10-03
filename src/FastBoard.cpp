@@ -1,6 +1,7 @@
 #include "FastBoard.h"
 
 #include "BitOps.h"
+#include "Eval.h"
 
 #include <algorithm>
 #include <cctype>
@@ -75,6 +76,8 @@ Magic FastBoard::bishopMagics[64];
 Bitboard FastBoard::rookTable[102400];
 Bitboard FastBoard::bishopTable[5248];
 uint64_t FastBoard::zPiece[12][64];
+int FastBoard::psqValue[12][64];
+int FastBoard::phaseValue[12];
 uint64_t FastBoard::zSide;
 uint64_t FastBoard::zCastle[16];
 uint64_t FastBoard::zEnpassant[8];
@@ -158,6 +161,15 @@ void FastBoard::initTables() {
     zSide = rng();
     for (auto &z : zCastle) z = rng();
     for (auto &z : zEnpassant) z = rng();
+
+    for (int p = 0; p < 12; ++p) {
+        Piece piece = static_cast<Piece>(p + 1);
+        Color c = colorOf(piece);
+        int t = pieceTypeOf(piece), sign = c == Color::White ? 1 : -1;
+        phaseValue[p] = t == KNIGHT || t == BISHOP ? 1 : t == ROOK ? 2 : t == QUEEN ? 4 : 0;
+        for (int sq = 0; sq < 64; ++sq)
+            psqValue[p][sq] = t == KING ? 0 : sign * (eval::PIECE_VALUE[t] + eval::PST[t][eval::pstIndex(c, sq)]);
+    }
 }
 
 Bitboard FastBoard::getRookAttacks(int sq, Bitboard occupied) {
@@ -179,7 +191,7 @@ FastBoard::FastBoard() {
 FastBoard::FastBoard(const FastBoard &o, NoHistory)
     : all_occupied(o.all_occupied), side(o.side), castlingRights(o.castlingRights), epSquare(o.epSquare),
       halfmoveClock(o.halfmoveClock), fullmoveNumber(o.fullmoveNumber), pliesFromNull(o.pliesFromNull),
-      hash(o.hash) {
+      hash(o.hash), psq(o.psq), phase(o.phase) {
     for (int c = 0; c < 2; ++c) {
         occupied[c] = o.occupied[c];
         for (int p = 0; p < 6; ++p) pieces[c][p] = o.pieces[c][p];
@@ -196,6 +208,8 @@ void FastBoard::putPiece(Piece p, int sq) {
     all_occupied |= b;
     mailbox[sq] = p;
     hash ^= zPiece[static_cast<int>(p) - 1][sq];
+    psq += psqValue[static_cast<int>(p) - 1][sq];
+    phase += phaseValue[static_cast<int>(p) - 1];
 }
 
 void FastBoard::removePiece(int sq) {
@@ -207,6 +221,8 @@ void FastBoard::removePiece(int sq) {
     all_occupied &= b;
     mailbox[sq] = Piece::None;
     hash ^= zPiece[static_cast<int>(p) - 1][sq];
+    psq -= psqValue[static_cast<int>(p) - 1][sq];
+    phase -= phaseValue[static_cast<int>(p) - 1];
 }
 
 void FastBoard::movePiece(int from, int to) {
@@ -234,6 +250,8 @@ bool FastBoard::setFromFEN(const std::string &fen) {
         b.occupied[c] = 0;
     }
     b.all_occupied = 0;
+    b.psq = 0;
+    b.phase = 0;
     for (auto &sq : b.mailbox) sq = Piece::None;
 
     int rank = 7, file = 0;

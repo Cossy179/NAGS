@@ -12,6 +12,9 @@
 #include "BitOps.h"
 #include "ChessTypes.h"
 
+#include <type_traits>
+#include <utility>
+
 namespace eval {
 
 constexpr int PIECE_VALUE[6] = {100, 320, 330, 500, 900, 0};
@@ -100,11 +103,20 @@ bool isNoisy(const BoardT &b, const Move &m) {
     return m.isEnPassant || m.promotion != Piece::None || b.pieceAt(m.to) != Piece::None;
 }
 
-// Score in centipawns from the side to move's point of view.
+// Boards that keep material + piece-square values and the game phase up to
+// date incrementally (FastBoard) provide psqScore() and gamePhase().
+template <class BoardT, class = void>
+struct HasIncrementalEval : std::false_type {};
 template <class BoardT>
-int evaluate(const BoardT &b) {
-    int score = 0;
-    int phase = 0; // 24 = all pieces on the board, 0 = bare kings and pawns
+struct HasIncrementalEval<BoardT, std::void_t<decltype(std::declval<const BoardT &>().psqScore()),
+                                              decltype(std::declval<const BoardT &>().gamePhase())>> : std::true_type {};
+
+// Material and piece-square values of everything but the kings (White minus
+// Black), and the uncapped game phase, computed from scratch.
+template <class BoardT>
+void materialAndPhase(const BoardT &b, int &score, int &phase) {
+    score = 0;
+    phase = 0;
     for (int c = 0; c < 2; ++c) {
         Color color = static_cast<Color>(c);
         int sign = c == 0 ? 1 : -1;
@@ -115,8 +127,21 @@ int evaluate(const BoardT &b) {
             phase += count * (type == KNIGHT || type == BISHOP ? 1 : type == ROOK ? 2 : type == QUEEN ? 4 : 0);
             while (bb) score += sign * PST[type][pstIndex(color, popLsb(bb))];
         }
-        if (popcount(b.pieceBB(color, BISHOP)) >= 2) score += sign * 30;
     }
+}
+
+// Score in centipawns from the side to move's point of view.
+template <class BoardT>
+int evaluate(const BoardT &b) {
+    int score, phase; // phase: 24 = all pieces on the board, 0 = bare kings and pawns
+    if constexpr (HasIncrementalEval<BoardT>::value) {
+        score = b.psqScore();
+        phase = b.gamePhase();
+    } else {
+        materialAndPhase(b, score, phase);
+    }
+    if (popcount(b.pieceBB(Color::White, BISHOP)) >= 2) score += 30;
+    if (popcount(b.pieceBB(Color::Black, BISHOP)) >= 2) score -= 30;
     if (phase > 24) phase = 24;
     for (int c = 0; c < 2; ++c) {
         Color color = static_cast<Color>(c);

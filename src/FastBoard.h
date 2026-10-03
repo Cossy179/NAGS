@@ -43,6 +43,11 @@ public:
     Bitboard occupancy() const { return all_occupied; }
     uint64_t zobrist() const { return hash; }
     int getHalfmoveClock() const { return halfmoveClock; }
+    // Kept up to date incrementally for eval::evaluate: material plus
+    // piece-square values of every piece except the kings (White minus
+    // Black), and the uncapped game phase (minor 1, rook 2, queen 4).
+    int psqScore() const { return psq; }
+    int gamePhase() const { return phase; }
     uint8_t getCastlingRights() const { return castlingRights; } // KQkq = bits 0..3
     int getEpSquare() const { return epSquare; } // -1 if none
     int getFullmoveNumber() const { return fullmoveNumber; }
@@ -92,6 +97,8 @@ private:
     int fullmoveNumber = 1;
     int pliesFromNull = 0; // repetitions are not looked for across a null move
     uint64_t hash = 0;
+    int psq = 0;
+    int phase = 0;
 
     struct HistoryEntry {
         Move move;
@@ -132,6 +139,8 @@ private:
     }
 
     static uint64_t zPiece[12][64];
+    static int psqValue[12][64]; // contribution of a piece on a square to psq
+    static int phaseValue[12];
     static uint64_t zSide;
     static uint64_t zCastle[16];
     static uint64_t zEnpassant[8];
