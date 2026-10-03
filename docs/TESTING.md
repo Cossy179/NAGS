@@ -222,6 +222,7 @@ in the Test column, with 3 games in parallel on a 4-core VM, openings from
 | Reverse futility pruning (depth ≤ 6, static eval − 80·depth ≥ beta; not at PV nodes, in check or near mate scores) | SPRT [0, 10], 5+0.05 | H1 after 328 games (+163 =82 -83) | +87 ± 32 | 3295246 |
 | Logarithmic late-move reductions (0.75 + ln d · ln m / 2.25, from the third move, one ply less at PV nodes) and shallow quiet-move pruning (depth ≤ 3: skip quiet moves after 3 + depth² of them, or when static eval + 120·depth ≤ alpha) | SPRT [0, 10], 3+0.03 | H1 after 1950 games (+765 =518 -667) | +17.5 ± 12.7 | 1352416 |
 | Static exchange evaluation (losing captures ordered after killers and skipped in quiescence) and the countermove heuristic | SPRT [0, 10], 3+0.03 | H1 after 502 games (+233 =127 -142) | +63.7 ± 27.1 | 714206 |
+| Time management: the soft limit is scaled by best-move stability (×2.0 right after the best move changed, down to ×0.85 after four stable iterations) and by score drops of more than 20 cp (up to ×1.5) | SPRT [0, 10], 3+0.03 | H1 after 2376 games (+898 =682 -796; 1 loss on time by the candidate) | +14.9 ± 11.4 | 714206 |
 
 The reduction table alone was tested first, at 5+0.05, and stopped
 undecided at +21.2 ± 21.9 after 674 games (LLR 1.29); it was then tested

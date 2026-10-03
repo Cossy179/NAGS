@@ -742,6 +742,7 @@ public:
         const bool multi = multiPv > 1 && rootMoves.size() > 1;
         int maxDepth = limits.depth > 0 ? std::min(limits.depth, MAX_PLY - 8) : MAX_PLY - 8;
         int prevScore = 0;
+        int stableIterations = 0; // completed iterations since the best move last changed
         for (int depth = 1; depth <= maxDepth; ++depth) {
             IterationResult r;
             if (multi) {
@@ -767,6 +768,8 @@ public:
                 }
                 report(depth, r.score, r.pv, 0);
             }
+            stableIterations = depth > 1 && sameMove(r.bestMove, result.bestMove) ? stableIterations + 1 : 0;
+            int scoreDrop = depth > 1 ? prevScore - r.score : 0;
             prevScore = r.score;
             result.bestMove = r.bestMove;
             result.score = r.score;
@@ -776,7 +779,14 @@ public:
             if (control.stop.load(std::memory_order_relaxed)) break;
             if (!limits.infinite) {
                 if (rootMoves.size() == 1 && (limits.softMs > 0 || limits.hardMs > 0)) break; // forced move
-                if (limits.softMs > 0 && !control.pondering() && control.elapsedMs() >= limits.softMs)
+                // Soft limit: stop earlier when the best move has been stable
+                // for several iterations, later when it just changed or the
+                // score is dropping (the hard limit still applies).
+                static constexpr double kStability[5] = {2.0, 1.5, 1.2, 1.0, 0.85};
+                double scale = kStability[std::min(stableIterations, 4)];
+                if (scoreDrop > 20) scale *= 1.0 + std::min(scoreDrop, 120) / 240.0;
+                if (limits.softMs > 0 && !control.pondering() &&
+                    control.elapsedMs() >= static_cast<int64_t>(limits.softMs * scale))
                     break; // next depth won't fit
                 if (std::abs(r.score) >= MATE_BOUND && depth >= (MATE_SCORE - std::abs(r.score)) + 4) break;
             }
