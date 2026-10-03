@@ -88,9 +88,11 @@ static void testEvalSymmetry() {
             std::string fen = b.getFEN();
             std::string mirror = mirrorFen(fen);
             int a = evalFen<FastBoard>(fen), m = evalFen<FastBoard>(mirror);
-            int ab = evalFen<Board>(fen);
             CHECK(a == m, "eval not colour-symmetric: %s -> %d, mirror %s -> %d", fen.c_str(), a, mirror.c_str(), m);
-            CHECK(a == ab, "Board and FastBoard evaluate differently at %s", fen.c_str());
+            if (!nnue::network()) { // the hand-written evaluation is the same on both boards
+                int ab = evalFen<Board>(fen);
+                CHECK(a == ab, "Board and FastBoard evaluate differently at %s", fen.c_str());
+            }
             ++checked;
         }
     }
@@ -311,8 +313,14 @@ static void testPonder() {
 }
 
 int main() {
+    // The hand-written evaluation (Board always uses it; FastBoard when no
+    // NNUE network is active), then the embedded network if there is one.
+    const bool haveNet = nnue::network() != nullptr;
+    nnue::setEnabled(false);
     testEvalOrientation();
     testEvalSymmetry();
+    nnue::setEnabled(true);
+    if (haveNet) testEvalSymmetry();
     testTT();
     testLimits();
     TranspositionTable tt(16);

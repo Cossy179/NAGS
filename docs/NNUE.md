@@ -58,8 +58,15 @@ code. With the test network, `bench` runs at about 0.8× the speed of the
 hand-written evaluation (portable build; about 0.5× before the accumulator
 stack and the AVX2 kernels).
 
-* The build embeds `nets/nags.nnue` if it exists (CMake option
-  `NAGS_NNUE_FILE`). Without it the engines use the hand-written evaluation.
+* The build embeds `nets/nags.nnue` (CMake option `NAGS_NNUE_FILE`), so
+  `nags_fast` and `nags_enhanced` use NNUE by default. Without the file the
+  engines use the hand-written evaluation.
+
+## Networks
+
+| Network | Data | Training | Result |
+|---------|------|----------|--------|
+| `nets/nags.nnue` (net 1) | 4.5M positions from 49,714 `nags_datagen` games (seed 1, 5000 nodes, engine at `efec5f8`) | 20 epochs, batch 16384, Adam 1e-3 cosine to 1e-5, λ = 0.75; validation loss 0.00646 | +143 ± 71 Elo at 20000 nodes, +103 ± 56 at 3+0.03 against the hand-written evaluation (`docs/TESTING.md`) |
 * UCI options (`nags_fast`, `nags_enhanced`): `UseNNUE` (default true) and
   `EvalFile` (a network file, or `<embedded>`).
 * The UCI command `eval` prints the static evaluation of the current

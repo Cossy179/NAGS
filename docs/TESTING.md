@@ -50,8 +50,8 @@ of writing:
 | Engine | Bench nodes |
 |--------|-------------|
 | `nags_basic` | 2772872 |
-| `nags_fast` | 2766664 |
-| `nags_enhanced` | 5243003 |
+| `nags_fast` | 3156192 |
+| `nags_enhanced` | 6429089 |
 | `nags` | 2863059 |
 
 When search improvements make a run much faster, raise the depth (in the
@@ -229,8 +229,13 @@ in the Test column, with 3 games in parallel on a 4-core VM, openings from
 | History malus and gravity: on a quiet cutoff the move gets +min(depth², 1200) and every quiet move searched before it the same penalty, with h += bonus − h·|bonus|/16384 keeping values within ±16384 | SPRT [0, 10], 3+0.03 | H1 after 554 games (+231 =166 -157) | +46.7 ± 22.9 | 642327 |
 | Singular extensions (depth ≥ 8, TT entry at depth − 3 or more and not an upper bound: the TT move gets one more ply if the other moves all fail low against TT score − 2·depth in a half-depth search; multi-cut if that bound is still ≥ beta) | SPRT [0, 10], 3+0.03 | H1 after 886 games (+334 =293 -259) | +29.5 ± 17.7 | 5243003 (depth 10) |
 
+| NNUE evaluation, first network `nets/nags.nnue` (4.5M self-play positions, 20 epochs; see `docs/NNUE.md`) vs the hand-written evaluation, same binary | SPRT [0, 30], 20000 nodes per move, 1 game at a time | H1 after 110 games (+66 =21 -23) | +143 ± 71 | – |
+| The same, with the clock (includes NNUE's speed cost) | SPRT [0, 30], 3+0.03 | H1 after 122 games (+69 =19 -34) | +103 ± 56 | 6429089 |
+
 Bench values before the singular-extension row are at the old default depth
-(`nags_enhanced` 7); from that row on they are at depth 10.
+(`nags_enhanced` 7); from that row on they are at depth 10. With the network
+embedded, `nags_fast` and `nags_enhanced` bench with NNUE; `nags_basic` and
+`nags` (ray-based Board) keep the hand-written evaluation.
 
 The reduction table alone was tested first, at 5+0.05, and stopped
 undecided at +21.2 ± 21.9 after 674 games (LLR 1.29); it was then tested
