@@ -50,8 +50,8 @@ of writing:
 | Engine | Bench nodes |
 |--------|-------------|
 | `nags_basic` | 2772872 |
-| `nags_fast` | 3156192 |
-| `nags_enhanced` | 6429089 |
+| `nags_fast` | 3252077 |
+| `nags_enhanced` | 7361021 |
 | `nags` | 2863059 |
 
 When search improvements make a run much faster, raise the depth (in the
@@ -231,6 +231,7 @@ in the Test column, with 3 games in parallel on a 4-core VM, openings from
 
 | NNUE evaluation, first network `nets/nags.nnue` (4.5M self-play positions, 20 epochs; see `docs/NNUE.md`) vs the hand-written evaluation, same binary | SPRT [0, 30], 20000 nodes per move, 1 game at a time | H1 after 110 games (+66 =21 -23) | +143 ± 71 | – |
 | The same, with the clock (includes NNUE's speed cost) | SPRT [0, 30], 3+0.03 | H1 after 122 games (+69 =19 -34) | +103 ± 56 | 6429089 |
+| Network 2 (8.1M positions) vs network 1; same architecture and speed, so a fixed-node match | SPRT [0, 10], 20000 nodes per move, 1 game at a time | H1 after 1234 games (+569 =202 -463) | +29.9 ± 17.9 | 7361021 |
 
 Bench values before the singular-extension row are at the old default depth
 (`nags_enhanced` 7); from that row on they are at depth 10. With the network

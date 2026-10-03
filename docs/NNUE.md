@@ -66,7 +66,8 @@ stack and the AVX2 kernels).
 
 | Network | Data | Training | Result |
 |---------|------|----------|--------|
-| `nets/nags.nnue` (net 1) | 4.5M positions from 49,714 `nags_datagen` games (seed 1, 5000 nodes, engine at `efec5f8`) | 20 epochs, batch 16384, Adam 1e-3 cosine to 1e-5, λ = 0.75; validation loss 0.00646 | +143 ± 71 Elo at 20000 nodes, +103 ± 56 at 3+0.03 against the hand-written evaluation (`docs/TESTING.md`) |
+| net 1 | 4.5M positions from 49,714 `nags_datagen` games (seed 1, 5000 nodes, engine at `efec5f8`) | 20 epochs, batch 16384, Adam 1e-3 cosine to 1e-5, λ = 0.75; validation loss 0.00646 | +143 ± 71 Elo at 20000 nodes, +103 ± 56 at 3+0.03 against the hand-written evaluation (`docs/TESTING.md`) |
+| `nets/nags.nnue` (net 2) | net 1's data plus 3.6M positions from 40,000 more games (seed 2): 8.1M positions | as net 1; validation loss 0.00643 | +29.9 ± 17.9 Elo against net 1 at 20000 nodes |
 * UCI options (`nags_fast`, `nags_enhanced`): `UseNNUE` (default true) and
   `EvalFile` (a network file, or `<embedded>`).
 * The UCI command `eval` prints the static evaluation of the current
