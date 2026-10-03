@@ -166,7 +166,44 @@ over months.
 
 ### Results
 
-Calibration results will be recorded here as they are measured.
+`nags_enhanced` (1 thread, 64 MB hash) against Stockfish 16 with
+`UCI_LimitStrength`, 60 games per level at 10+0.1 on a 4-core VM:
+
+| Stockfish `UCI_Elo` | Result | Score | Elo difference | Implied rating |
+|---|---|---|---|---|
+| 1900 | +44 =7 −9 | 79% | +232 ± 100 | 2132 ± 100 |
+| 2100 | +44 =12 −4 | 83% | +280 ± 99 | 2380 ± 99 |
+| 2300 | +31 =17 −12 | 66% | +114 ± 76 | 2414 ± 76 |
+
+Combined (inverse-variance weighted): **2329 ± 52** on Stockfish's
+`UCI_Elo` scale at 10+0.1.
+
+Treat this as a rough figure:
+
+* The 2100 and 2300 levels agree (about 2380–2410), but the 1900 level is
+  about 250 Elo lower, more than the error bars allow. Stockfish's
+  strength-limited levels are calibrated at 60+0.6, so they are probably not
+  evenly spaced at 10+0.1, and the ± 52 above understates the real
+  uncertainty.
+* The 1900 level ran on build `aa8472b`. The 2100 and 2300 levels ran on
+  `a8e5c0c`, which searches identically but is about 1.6× faster, so the
+  1900 result slightly understates the current engine.
+
+A more reliable absolute rating needs longer time controls, or engines with
+published CCRL ratings as opponents. Use the same ladder and time control
+when comparing future versions.
+
+### Speed log
+
+Nodes/second from `bench` (single thread, same VM, idle). These changes do
+not alter the search, so the bench node counts stay identical:
+
+| Commit | Change | `nags_basic` | `nags_fast` | `nags_enhanced` | `nags` |
+|---|---|---|---|---|---|
+| `aa8472b` vs `f895704` | legality checked only for moves the search tries | 1.44× | 1.30× | 1.41× | 1.30× |
+| `a8e5c0c` vs `aa8472b` | stack move list, lazy move ordering | 1.59× | 1.43× | 1.62× | 1.44× |
+
+At `a8e5c0c`, `nags_enhanced` benches at about 4.8M nodes/second.
 
 ## Strength log
 
