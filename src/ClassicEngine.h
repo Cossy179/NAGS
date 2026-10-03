@@ -36,11 +36,14 @@ public:
         lines.push_back("option name Move Overhead type spin default 50 min 0 max 5000");
         lines.push_back("option name MultiPV type spin default 1 min 1 max 256");
         lines.push_back("option name Ponder type check default false");
+        for (const auto &l : uci::syzygyOptionLines()) lines.push_back(l);
         return lines;
     }
 
     bool setOption(const std::string &optName, const std::string &value, std::string &message) override {
         long long v = 0;
+        bool ok = false;
+        if (uci::setSyzygyOption(optName, value, message, ok)) return ok;
         if (tt && optName == "Hash") {
             if (!uci::parseInt(value, v)) { message = "invalid Hash value '" + value + "'"; return false; }
             v = std::clamp<long long>(v, 1, 4096);

@@ -1,3 +1,5 @@
 *.pgn filter=lfs diff=lfs merge=lfs -text
 *.bat text eol=crlf
 *.sh text eol=lf
+*.rtbw binary
+*.rtbz binary

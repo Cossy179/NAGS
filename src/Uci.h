@@ -74,4 +74,9 @@ int run(Engine &engine, int argc = 0, char **argv = nullptr);
 bool parseInt(const std::string &s, long long &out);
 bool parseBool(const std::string &s, bool &out);
 
+// Syzygy options shared by the engines.
+std::vector<std::string> syzygyOptionLines();
+// Handles SyzygyPath / SyzygyProbeLimit; false if `name` is neither.
+bool setSyzygyOption(const std::string &name, const std::string &value, std::string &message, bool &ok);
+
 } // namespace uci

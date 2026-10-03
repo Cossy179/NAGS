@@ -24,18 +24,29 @@ function(nags_warnings target)
   endif()
 endfunction()
 
+# Syzygy tablebase probing (third_party/fathom, MIT). Compiled as C++ so it
+# needs no C11 atomics support (MSVC).
+add_library(fathom STATIC third_party/fathom/tbprobe.c)
+set_source_files_properties(third_party/fathom/tbprobe.c PROPERTIES LANGUAGE CXX)
+target_include_directories(fathom PUBLIC third_party/fathom)
+target_link_libraries(fathom PUBLIC Threads::Threads)
+if(MSVC)
+  target_compile_definitions(fathom PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+endif()
+
 # Code shared by every engine: boards, transposition table, UCI front end,
-# networking for the Python services.
+# tablebases, networking for the Python services.
 add_library(nags_core STATIC
   src/Board.cpp
   src/FastBoard.cpp
   src/TT.cpp
   src/Uci.cpp
+  src/Syzygy.cpp
   src/Net.cpp
   src/MetaClient.cpp
 )
 target_include_directories(nags_core PUBLIC src)
-target_link_libraries(nags_core PUBLIC Threads::Threads)
+target_link_libraries(nags_core PUBLIC Threads::Threads PRIVATE fathom)
 if(WIN32)
   target_link_libraries(nags_core PUBLIC ws2_32)
 endif()
@@ -64,7 +75,10 @@ if(NAGS_BUILD_TESTS)
   add_executable(fastboard_tests tests/cpp/board_tests.cpp)
   target_compile_definitions(fastboard_tests PRIVATE TEST_FAST_BOARD)
   add_executable(search_tests tests/cpp/search_tests.cpp)
-  foreach(target board_tests fastboard_tests search_tests)
+  add_executable(syzygy_tests tests/cpp/syzygy_tests.cpp)
+  set(NAGS_SYZYGY_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/syzygy)
+  target_compile_definitions(syzygy_tests PRIVATE NAGS_SYZYGY_DIR="${NAGS_SYZYGY_DIR}")
+  foreach(target board_tests fastboard_tests search_tests syzygy_tests)
     target_link_libraries(${target} PRIVATE nags_core)
     nags_warnings(${target})
     add_test(NAME ${target} COMMAND ${target})
@@ -89,6 +103,15 @@ if(NAGS_BUILD_TESTS)
     nags_uci_test(${engine}_movetime ${engine} movetime.txt "bestmove [a-h][1-8][a-h][1-8]")
   endforeach()
   nags_uci_test(nags_enhanced_threads nags_enhanced threads.txt "Threads set to 4.*bestmove [a-h][1-8][a-h][1-8]")
+  configure_file(tests/uci/syzygy.txt.in ${CMAKE_CURRENT_BINARY_DIR}/syzygy_uci.txt @ONLY)
+  foreach(engine nags_basic nags_fast nags_enhanced nags)
+    add_test(NAME ${engine}_syzygy
+      COMMAND ${CMAKE_COMMAND}
+        -DENGINE=$<TARGET_FILE:${engine}>
+        -DINPUT=${CMAKE_CURRENT_BINARY_DIR}/syzygy_uci.txt
+        "-DEXPECT=tablebases loaded: up to 3 pieces.*bestmove [a-h][1-8][a-h][1-8]"
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/uci/run_uci_test.cmake)
+  endforeach()
   foreach(engine nags_basic nags_fast nags_enhanced)
     nags_uci_test(${engine}_multipv ${engine} multipv.txt "depth 5 [^ ]+ [^ ]+ multipv 3 .*bestmove")
     nags_uci_test(${engine}_ponder ${engine} ponder.txt "bestmove [a-h][78][a-h][56]")

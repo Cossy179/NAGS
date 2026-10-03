@@ -19,18 +19,23 @@ constexpr int MAX_PLY = 128;
 constexpr int MATE_SCORE = 32000;
 constexpr int MATE_BOUND = MATE_SCORE - MAX_PLY; // |score| >= this means a forced mate
 constexpr int INF_SCORE = 32500;
+// Tablebase win found `ply` plies from the root: TB_WIN_SCORE - ply. Below
+// every mate score and above every evaluation.
+constexpr int TB_WIN_SCORE = MATE_BOUND - MAX_PLY - 1;
+constexpr int TB_BOUND = TB_WIN_SCORE - MAX_PLY; // |score| >= this: mate or tablebase result
 
-// Mate scores are stored relative to the node rather than the root so they
-// stay correct when the same position is reached at a different ply.
+// Mate and tablebase scores are stored relative to the node rather than the
+// root so they stay correct when the same position is reached at a
+// different ply.
 inline int scoreToTT(int score, int ply) {
-    if (score >= MATE_BOUND) return score + ply;
-    if (score <= -MATE_BOUND) return score - ply;
+    if (score >= TB_BOUND) return score + ply;
+    if (score <= -TB_BOUND) return score - ply;
     return score;
 }
 
 inline int scoreFromTT(int score, int ply) {
-    if (score >= MATE_BOUND) return score - ply;
-    if (score <= -MATE_BOUND) return score + ply;
+    if (score >= TB_BOUND) return score - ply;
+    if (score <= -TB_BOUND) return score + ply;
     return score;
 }
 

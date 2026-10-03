@@ -55,7 +55,7 @@ The C++ tests check move generation against reference perft counts, that the
 incremental Zobrist hash always matches a freshly computed one, search results
 on known positions (mates, perpetual check, stalemate), the time manager, and
 every engine's UCI behaviour (side to move, bad input, `movetime`, threads,
-MultiPV, pondering).
+MultiPV, pondering), and tablebase probing.
 CI runs both suites on Linux, Windows and macOS
 (`.github/workflows/nags-ci.yml`).
 
@@ -85,9 +85,21 @@ UCI options:
 | `Move Overhead` (ms, default 50) | all | Time kept in reserve per move for GUI/network lag |
 | `MultiPV` (default 1) | `nags_basic`, `nags_fast`, `nags_enhanced` | Number of best lines to report |
 | `Ponder` | `nags_basic`, `nags_fast`, `nags_enhanced` | Lets the GUI know it may ponder |
+| `SyzygyPath` | all | Directories with Syzygy tablebase files (`:`-separated, `;` on Windows) |
+| `SyzygyProbeLimit` (default 7) | all | Only probe positions with at most this many pieces |
 | `UseNN`, `NNHost`, `NNPort` | `nags` | Use `rpc_server.py` for MCTS priors/values (default `127.0.0.1:5555`) |
 | `UseMetaLearner`, `MetaHost`, `MetaPort` | `nags` | Ask `meta_learner.py` for per-move deltas (default `127.0.0.1:5556`) |
 | `MetaExploration` (0-100) | `nags` | Gaussian noise (std = value/100) added to the deltas; used in self-play |
+
+**Endgame tablebases.** With `SyzygyPath` set, the search probes the
+win/draw/loss tables after captures and pawn moves, and with the DTZ tables
+present a tablebase position at the root is played straight from the tables
+(the move that keeps the result under the fifty-move rule and makes
+progress). `nags` probes inside its alpha-beta arm only. Probing uses
+[Fathom](https://github.com/jdart1/Fathom) (MIT, `third_party/fathom`). The
+3-4-5 piece tables are about 1 GB, for example from
+<http://tablebase.sesse.net/syzygy/>; the tests use the 3-piece tables in
+`tests/data/syzygy`.
 
 `nags` works without the Python services: if they are not running it falls
 back (after a 150 ms connection attempt, retried at most once a minute) to a

@@ -48,6 +48,29 @@ bool parseBool(const std::string &s, bool &out) {
     return false;
 }
 
+std::vector<std::string> syzygyOptionLines() {
+    return {"option name SyzygyPath type string default <empty>",
+            "option name SyzygyProbeLimit type spin default 7 min 0 max 7"};
+}
+
+bool setSyzygyOption(const std::string &name, const std::string &value, std::string &message, bool &ok) {
+    if (name == "SyzygyPath") {
+        int n = syzygy::init(value);
+        if (n > 0) message = "Syzygy tablebases loaded: up to " + std::to_string(n) + " pieces";
+        else if (!value.empty() && value != "<empty>") message = "no Syzygy tablebases found in '" + value + "'";
+        ok = true;
+        return true;
+    }
+    if (name == "SyzygyProbeLimit") {
+        long long v = 0;
+        ok = parseInt(value, v);
+        if (ok) syzygy::setProbeLimit(static_cast<int>(std::clamp<long long>(v, 0, 7)));
+        else message = "invalid SyzygyProbeLimit value '" + value + "'";
+        return true;
+    }
+    return false;
+}
+
 bool parseGo(const std::vector<std::string> &tokens, GoParams &out, std::string &error) {
     out = GoParams{};
     auto number = [&](size_t &i, long long &v) -> bool {
@@ -125,7 +148,9 @@ std::string formatInfo(const SearchInfo &info) {
     oss << "info depth " << info.depth << " seldepth " << std::max(info.selDepth, info.depth);
     if (info.multiPv > 0) oss << " multipv " << info.multiPv;
     oss << " score " << formatScore(info.score) << " nodes " << info.nodes << " nps " << nps
-        << " hashfull " << info.hashfull << " time " << info.timeMs;
+        << " hashfull " << info.hashfull;
+    if (info.tbHits > 0) oss << " tbhits " << info.tbHits;
+    oss << " time " << info.timeMs;
     if (!info.pv.empty()) {
         oss << " pv";
         for (const Move &m : info.pv) oss << ' ' << moveToUciString(m);

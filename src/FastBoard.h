@@ -43,6 +43,8 @@ public:
     Bitboard occupancy() const { return all_occupied; }
     uint64_t zobrist() const { return hash; }
     int getHalfmoveClock() const { return halfmoveClock; }
+    uint8_t getCastlingRights() const { return castlingRights; } // KQkq = bits 0..3
+    int getEpSquare() const { return epSquare; } // -1 if none
     int getFullmoveNumber() const { return fullmoveNumber; }
 
     void makeMove(const Move &m);

@@ -16,7 +16,7 @@ __pycache__/
 venv/
 
 # Training artefacts (large / machine-specific)
-data/
+/data/
 models/
 logs/
 *.pth

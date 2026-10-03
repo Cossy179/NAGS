@@ -5,13 +5,14 @@
 // aspiration windows, check extension, late-move reductions, killer/history
 // move ordering, quiescence search (with check evasions), repetition /
 // fifty-move draws, optional transposition table and Lazy SMP helper threads,
-// MultiPV and pondering.
+// MultiPV, pondering and Syzygy tablebases.
 //
 // Searcher drives a whole UCI "go"; SearchWorker can also be driven one
 // iteration at a time (the NAGS hybrid controller does this for its DFS arm).
 
 #include "ChessTypes.h"
 #include "Eval.h"
+#include "Syzygy.h"
 #include "TT.h"
 
 #include <algorithm>
@@ -42,6 +43,7 @@ struct SearchInfo {
     int64_t timeMs = 0;
     int hashfull = 0;
     int multiPv = 0; // line number (1 = best) when MultiPV > 1, otherwise 0
+    uint64_t tbHits = 0;
     std::vector<Move> pv;
 };
 
@@ -59,6 +61,19 @@ inline std::string formatScore(int score) {
     if (score >= MATE_BOUND) return "mate " + std::to_string((MATE_SCORE - score + 1) / 2);
     if (score <= -MATE_BOUND) return "mate " + std::to_string(-(MATE_SCORE + score + 1) / 2);
     return "cp " + std::to_string(score);
+}
+
+// Score of a tablebase result `ply` plies from the root, from the side to
+// move's view. Wins and losses that the fifty-move rule turns into draws
+// score just off zero.
+inline int tbScore(syzygy::Wdl wdl, int ply) {
+    switch (wdl) {
+    case syzygy::Wdl::Win: return TB_WIN_SCORE - ply;
+    case syzygy::Wdl::Loss: return -TB_WIN_SCORE + ply;
+    case syzygy::Wdl::CursedWin: return 1;
+    case syzygy::Wdl::BlessedLoss: return -1;
+    default: return 0;
+    }
 }
 
 // Shared stop/limit state for one search.
@@ -157,6 +172,7 @@ public:
         unflushed = 0;
         selDepth = 0;
         aborted = false;
+        tbHits.store(0, std::memory_order_relaxed);
     }
 
     // Puts a move found elsewhere (e.g. the TT or another arm) first at the root.
@@ -242,6 +258,7 @@ public:
     }
 
     uint64_t nodeCount() const { return nodes; }
+    uint64_t tbHitCount() const { return tbHits.load(std::memory_order_relaxed); }
     int selectiveDepth() const { return selDepth; }
     bool wasAborted() const { return aborted; }
     void flushNodes() {
@@ -264,6 +281,7 @@ private:
     uint64_t unflushed = 0;
     int selDepth = 0;
     bool aborted = false;
+    std::atomic<uint64_t> tbHits{0}; // written by this worker only, read by the reporting thread
 
     // Moves `m` to position `pos` of the root move list, shifting the moves
     // in between down by one.
@@ -415,6 +433,28 @@ private:
             }
         }
 
+        // Endgame tablebases. The WDL tables only apply right after a capture
+        // or pawn move (half-move clock 0), without castling rights. A result
+        // that does not cut off still bounds this node's score.
+        int tbFloor = -INF_SCORE, tbCeiling = INF_SCORE;
+        if (syzygy::cardinality() > 0 && board.getHalfmoveClock() == 0 && board.getCastlingRights() == 0 &&
+            popcount(board.occupancy()) <= syzygy::cardinality()) {
+            syzygy::Wdl wdl;
+            if (syzygy::probeWdl(syzygy::position(board), wdl)) {
+                tbHits.store(tbHits.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+                int score = tbScore(wdl, ply);
+                // A win is a lower bound (a mate may be found), a loss an upper bound.
+                Bound bound = wdl == syzygy::Wdl::Win ? Bound::Lower : wdl == syzygy::Wdl::Loss ? Bound::Upper : Bound::Exact;
+                if (bound == Bound::Exact || (bound == Bound::Lower && score >= beta) ||
+                    (bound == Bound::Upper && score <= alpha)) {
+                    if (tt) tt->store(key, std::min(depth + 6, MAX_PLY - 1), bound, scoreToTT(score, ply), Move{});
+                    return score;
+                }
+                if (bound == Bound::Lower) tbFloor = score;
+                else tbCeiling = score;
+            }
+        }
+
         // Static evaluation for the pruning decisions below (not needed at PV
         // nodes or in check, where nothing is pruned).
         const int staticEval = (!isPv && !inCheck) ? eval::evaluate(board) : 0;
@@ -502,10 +542,15 @@ private:
 
         if (i == 0) return inCheck ? -MATE_SCORE + ply : 0; // checkmate or stalemate
 
-        if (tt) {
-            Bound bound = best >= beta ? Bound::Lower : (best > originalAlpha ? Bound::Exact : Bound::Upper);
-            tt->store(key, depth, bound, scoreToTT(best, ply), bestMove);
+        Bound bound = best >= beta ? Bound::Lower : (best > originalAlpha ? Bound::Exact : Bound::Upper);
+        if (best < tbFloor) {
+            best = tbFloor;
+            bound = Bound::Lower;
+        } else if (best > tbCeiling) {
+            best = tbCeiling;
+            bound = Bound::Upper;
         }
+        if (tt) tt->store(key, depth, bound, scoreToTT(best, ply), bestMove);
         return best;
     }
 
@@ -602,6 +647,43 @@ public:
         result.bestMove = rootMoves.front(); // always have a legal move to play
         result.pv = {result.bestMove};
 
+        auto report = [&](int depth, int score, const std::vector<Move> &pv, int line, uint64_t extraTbHits = 0) {
+            if (!onInfo) return;
+            main.flushNodes();
+            SearchInfo info;
+            info.depth = depth;
+            info.selDepth = main.selectiveDepth();
+            info.score = score;
+            info.nodes = control.nodes.load(std::memory_order_relaxed);
+            info.timeMs = control.elapsedMs();
+            info.hashfull = tt ? tt->hashfull() : 0;
+            info.multiPv = line;
+            info.tbHits = extraTbHits;
+            for (const auto &w : workers) info.tbHits += w->tbHitCount();
+            info.pv = pv;
+            onInfo(info);
+        };
+
+        // Tablebase position at the root: play the move with the best
+        // distance to zeroing, which keeps the result under the fifty-move
+        // rule and makes progress. Needs the DTZ tables.
+        if (syzygy::cardinality() > 0 && root.getCastlingRights() == 0 &&
+            popcount(root.occupancy()) <= syzygy::cardinality()) {
+            syzygy::RootResult tb;
+            if (syzygy::probeRoot(syzygy::position(root), tb)) {
+                for (const Move &m : rootMoves) {
+                    if (m.from != tb.from || m.to != tb.to || pieceTypeOf(m.promotion) != tb.promotion) continue;
+                    result.bestMove = m;
+                    result.pv = {m};
+                    result.score = tbScore(tb.wdl, 0);
+                    result.depth = 1;
+                    report(1, result.score, result.pv, multiPv > 1 ? 1 : 0, 1);
+                    control.holdBestMove();
+                    return result;
+                }
+            }
+        }
+
         std::vector<std::thread> helpers;
         for (size_t i = 1; i < workers.size(); ++i) {
             helpers.emplace_back([this, i] {
@@ -615,21 +697,6 @@ public:
                 w.flushNodes();
             });
         }
-
-        auto report = [&](int depth, int score, const std::vector<Move> &pv, int line) {
-            if (!onInfo) return;
-            main.flushNodes();
-            SearchInfo info;
-            info.depth = depth;
-            info.selDepth = main.selectiveDepth();
-            info.score = score;
-            info.nodes = control.nodes.load(std::memory_order_relaxed);
-            info.timeMs = control.elapsedMs();
-            info.hashfull = tt ? tt->hashfull() : 0;
-            info.multiPv = line;
-            info.pv = pv;
-            onInfo(info);
-        };
 
         const bool multi = multiPv > 1 && rootMoves.size() > 1;
         int maxDepth = limits.depth > 0 ? std::min(limits.depth, MAX_PLY - 8) : MAX_PLY - 8;

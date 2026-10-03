@@ -32,6 +32,9 @@ public:
             "option name MetaHost type string default " + s.metaHost,
             "option name MetaPort type spin default " + std::to_string(s.metaPort) + " min 1 max 65535",
             "option name MetaExploration type spin default 0 min 0 max 100",
+            // Probed by the alpha-beta arm (WDL tables, inside the search).
+            uci::syzygyOptionLines()[0],
+            uci::syzygyOptionLines()[1],
         };
     }
 
@@ -39,6 +42,8 @@ public:
         NagsSettings &s = controller.settings();
         long long v = 0;
         bool b = false;
+        bool ok = false;
+        if (uci::setSyzygyOption(opt, value, message, ok)) return ok;
         auto badValue = [&] {
             message = "invalid value '" + value + "' for " + opt;
             return false;
