@@ -125,12 +125,15 @@ struct NagsResult {
     Move bestMove;
     Move ponderMove;
     int score = 0;
+    uint64_t nodes = 0; // alpha-beta nodes + MCTS simulations
 };
 
 class NAGSController {
 public:
     explicit NAGSController(TranspositionTable &tt);
 
+    // Resets the bandit, history tables and RNG; searches after newGame() are
+    // reproducible when they have no time limit (used by `bench`).
     void newGame();
     NagsSettings &settings() { return config; }
     const NagsSettings &settings() const { return config; }
@@ -149,6 +152,7 @@ private:
     RpcEvaluator network;
     MetaClient meta;
     BayesianBandit bandit;
+    static constexpr uint32_t kSeed = 0xC0FFEEu;
     std::mt19937 rng;
     float lastUncertainty = 0.1f;
 

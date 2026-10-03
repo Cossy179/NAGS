@@ -89,4 +89,11 @@ if(NAGS_BUILD_TESTS)
     nags_uci_test(${engine}_movetime ${engine} movetime.txt "bestmove [a-h][1-8][a-h][1-8]")
   endforeach()
   nags_uci_test(nags_enhanced_threads nags_enhanced threads.txt "Threads set to 4.*bestmove [a-h][1-8][a-h][1-8]")
+
+  # The bench node count is the search fingerprint: it must be reproducible.
+  foreach(engine nags_basic nags_fast nags_enhanced nags)
+    add_test(NAME ${engine}_bench_deterministic
+      COMMAND ${CMAKE_COMMAND} -DENGINE=$<TARGET_FILE:${engine}> -DDEPTH=4
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/uci/run_bench_test.cmake)
+  endforeach()
 endif()

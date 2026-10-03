@@ -4,7 +4,8 @@
 #include "ClassicEngine.h"
 #include "FastBoard.h"
 
-int main() {
+int main(int argc, char **argv) {
     ClassicEngine<FastBoard> engine("NAGS Enhanced", /*useHashTable=*/true);
-    return uci::run(engine);
+    engine.setDefaultBenchDepth(7);
+    return uci::run(engine, argc, argv);
 }

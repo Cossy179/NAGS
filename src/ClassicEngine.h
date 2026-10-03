@@ -4,11 +4,14 @@
 // (Board, no hash table), nags_fast (FastBoard, no hash table) and
 // nags_enhanced (FastBoard, hash table + Lazy SMP threads).
 
+#include "Bench.h"
 #include "Search.h"
 #include "TT.h"
 #include "Uci.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <vector>
@@ -100,8 +103,38 @@ public:
 
     std::string fen() const override { return board.getFEN(); }
 
+    void bench(int depth) override {
+        if (depth <= 0) depth = defaultBenchDepth;
+        int threads = searcher.threadCount();
+        searcher.setThreads(1); // helper threads would make the node count nondeterministic
+        newGame();
+        const auto &fens = bench::positions();
+        uint64_t total = 0;
+        std::atomic<bool> stop{false};
+        auto start = std::chrono::steady_clock::now();
+        for (size_t i = 0; i < fens.size(); ++i) {
+            BoardT b;
+            b.setFromFEN(fens[i]);
+            SearchLimits limits;
+            limits.depth = depth;
+            SearchResult r = searcher.search(b, limits, stop, nullptr);
+            total += r.nodes;
+            uci::send("info string bench " + std::to_string(i + 1) + "/" + std::to_string(fens.size()) + " nodes " +
+                      std::to_string(r.nodes) + " bestmove " + moveToUciString(r.bestMove));
+        }
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        for (const auto &line : bench::summary(total, ms)) uci::send(line);
+        searcher.setThreads(threads);
+        newGame();
+    }
+
+    // Depth used by `bench` without an argument (chosen per engine so a run
+    // takes a few seconds).
+    void setDefaultBenchDepth(int depth) { defaultBenchDepth = depth; }
+
 private:
     static constexpr int kDefaultHashMB = 64;
+    int defaultBenchDepth = 10;
     std::string engineName;
     std::unique_ptr<TranspositionTable> tt;
     Searcher<BoardT> searcher;

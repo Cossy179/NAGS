@@ -45,6 +45,12 @@ macOS: `build/nags`) and in `build/Release/` with Visual Studio
 python -m pytest -q                                                  # Python: graph, network, services, pipeline
 ```
 
+Before merging a change that affects playing strength, follow
+[docs/TESTING.md](docs/TESTING.md): check the `bench` fingerprint
+(`build/nags_enhanced bench`), then prove the change in an SPRT match with
+`tools/sprt.py`. `tools/calibrate.py` estimates an absolute rating against
+Stockfish's strength-limited mode.
+
 The C++ tests check move generation against reference perft counts, that the
 incremental Zobrist hash always matches a freshly computed one, search results
 on known positions (mates, perpetual check, stalemate), the time manager, and

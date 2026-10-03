@@ -3,7 +3,8 @@
 #include "Board.h"
 #include "ClassicEngine.h"
 
-int main() {
+int main(int argc, char **argv) {
     ClassicEngine<Board> engine("NAGS Basic", /*useHashTable=*/false);
-    return uci::run(engine);
+    engine.setDefaultBenchDepth(6);
+    return uci::run(engine, argc, argv);
 }

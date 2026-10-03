@@ -144,12 +144,13 @@ void BayesianBandit::update(SearchArm arm, bool success) {
 
 NAGSController::NAGSController(TranspositionTable &table)
     : tt(table), dfs(std::make_unique<SearchWorker<Board>>(&table, &control)), network(heuristic),
-      rng(0xC0FFEEu) {}
+      rng(kSeed) {}
 
 void NAGSController::newGame() {
     bandit.reset();
     dfs->clearHistory();
     lastUncertainty = 0.1f;
+    rng.seed(kSeed);
 }
 
 float NAGSController::tacticalRatio(const Board &root) const {
@@ -358,7 +359,11 @@ NagsResult NAGSController::search(const Board &root, const SearchLimits &limits,
     bool forced = legal.size() == 1 && (limits.softMs > 0 || limits.hardMs > 0);
     int batch = static_cast<int>(std::clamp<long long>(mctsBudget / 20, 16, 400));
     // Wall-clock cap per MCTS pull: network evaluations can take tens of ms each.
-    int64_t sliceMs = limits.softMs > 0 ? std::clamp<int64_t>(limits.softMs / 10, 10, 1000) : 100;
+    // Without a time limit (fixed depth / nodes) pulls are bounded by the
+    // simulation count only, which keeps such searches reproducible.
+    int64_t sliceMs = limits.softMs > 0 ? std::clamp<int64_t>(limits.softMs / 10, 10, 1000)
+                      : limits.infinite ? 100
+                                        : std::numeric_limits<int64_t>::max() / 4;
 
     // ---- Main loop: the bandit allocates pulls between the two arms --------
     while (!forced && !control.poll()) {
@@ -411,6 +416,8 @@ NagsResult NAGSController::search(const Board &root, const SearchLimits &limits,
 
     result.bestMove = best;
     result.score = dfsScore;
+    dfs->flushNodes();
+    result.nodes = control.nodes.load(std::memory_order_relaxed);
     if (sameMove(best, dfsBest) && dfsPv.size() >= 2) result.ponderMove = dfsPv[1];
 
     if (onString) {

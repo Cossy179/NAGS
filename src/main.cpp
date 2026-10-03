@@ -1,12 +1,15 @@
 // nags: the hybrid NAGS engine (alpha-beta + MCTS chosen by a bandit, GNN
 // evaluation over RPC, meta-learned hyperparameters).
 
+#include "Bench.h"
 #include "Board.h"
 #include "NAGS.h"
 #include "TT.h"
 #include "Uci.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -118,6 +121,36 @@ public:
 
     std::string fen() const override { return board.getFEN(); }
 
+    // Uses the heuristic evaluator with no services and no exploration noise
+    // so the node count depends only on the engine's own code.
+    void bench(int depth) override {
+        if (depth <= 0) depth = 7;
+        NagsSettings saved = controller.settings();
+        NagsSettings &s = controller.settings();
+        s.useNN = false;
+        s.useMetaLearner = false;
+        s.metaExploration = 0.0f;
+        newGame();
+        const auto &fens = bench::positions();
+        uint64_t total = 0;
+        std::atomic<bool> stop{false};
+        auto start = std::chrono::steady_clock::now();
+        for (size_t i = 0; i < fens.size(); ++i) {
+            Board b;
+            b.setFromFEN(fens[i]);
+            SearchLimits limits;
+            limits.depth = depth;
+            NagsResult r = controller.search(b, limits, -1, stop, nullptr, nullptr);
+            total += r.nodes;
+            uci::send("info string bench " + std::to_string(i + 1) + "/" + std::to_string(fens.size()) + " nodes " +
+                      std::to_string(r.nodes) + " bestmove " + moveToUciString(r.bestMove));
+        }
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        for (const auto &line : bench::summary(total, ms)) uci::send(line);
+        s = saved;
+        newGame();
+    }
+
 private:
     static constexpr int kDefaultHashMB = 64;
     TranspositionTable tt;
@@ -126,7 +159,7 @@ private:
     int64_t moveOverheadMs = 50;
 };
 
-int main() {
+int main(int argc, char **argv) {
     NagsEngine engine;
-    return uci::run(engine);
+    return uci::run(engine, argc, argv);
 }

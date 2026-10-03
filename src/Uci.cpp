@@ -138,11 +138,24 @@ std::string bestMoveLine(const Move &best, const Move &ponder) {
     return line;
 }
 
-int run(Engine &engine) {
+namespace {
+// Depth argument of "bench [depth]"; 0 (engine default) if absent or invalid.
+int benchDepth(const std::string &arg) {
+    long long d = 0;
+    return parseInt(arg, d) ? static_cast<int>(std::clamp<long long>(d, 1, MAX_PLY - 8)) : 0;
+}
+} // namespace
+
+int run(Engine &engine, int argc, char **argv) {
     std::ios::sync_with_stdio(false);
     // cin is tied to cout by default: every read would flush cout from the
     // input thread without holding outputMutex, racing with the search thread.
     std::cin.tie(nullptr);
+
+    if (argc > 1 && std::string(argv[1]) == "bench") {
+        engine.bench(argc > 2 ? benchDepth(argv[2]) : 0);
+        return 0;
+    }
 
     std::thread worker;
     std::atomic<bool> stopFlag{false};
@@ -238,6 +251,9 @@ int run(Engine &engine) {
         } else if (cmd == "quit") {
             stopSearch();
             return 0;
+        } else if (cmd == "bench") {
+            stopSearch();
+            engine.bench(tokens.size() > 1 ? benchDepth(tokens[1]) : 0);
         } else if (cmd == "d" || cmd == "fen") {
             send(engine.fen());
         } else if (cmd == "debug" || cmd == "register") {

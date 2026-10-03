@@ -57,9 +57,15 @@ public:
     virtual void go(const GoParams &params, const std::atomic<bool> &stop) = 0;
     virtual uint64_t perft(int depth) = 0;
     virtual std::string fen() const = 0;
+    // Searches the bench positions single-threaded to `depth` (0 = engine
+    // default) from a clean state, prints per-position lines and the summary
+    // from bench::summary(), then leaves the engine as after ucinewgame.
+    virtual void bench(int depth) = 0;
 };
 
-int run(Engine &engine);
+// Runs the UCI loop. If argv[1] is "bench" (optionally followed by a depth),
+// runs the bench instead and exits.
+int run(Engine &engine, int argc = 0, char **argv = nullptr);
 
 // Helpers for option parsing.
 bool parseInt(const std::string &s, long long &out);
