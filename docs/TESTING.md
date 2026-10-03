@@ -46,10 +46,10 @@ services). Fingerprints at the time of writing:
 
 | Engine | Bench nodes |
 |--------|-------------|
-| `nags_basic` | 564739 |
-| `nags_fast` | 571199 |
-| `nags_enhanced` | 714206 |
-| `nags` | 729134 |
+| `nags_basic` | 573709 |
+| `nags_fast` | 559703 |
+| `nags_enhanced` | 642327 |
+| `nags` | 687065 |
 
 When search improvements make a run much faster, raise the depth (in the
 engine's `main` file) and record the new fingerprints.
@@ -223,6 +223,7 @@ in the Test column, with 3 games in parallel on a 4-core VM, openings from
 | Logarithmic late-move reductions (0.75 + ln d · ln m / 2.25, from the third move, one ply less at PV nodes) and shallow quiet-move pruning (depth ≤ 3: skip quiet moves after 3 + depth² of them, or when static eval + 120·depth ≤ alpha) | SPRT [0, 10], 3+0.03 | H1 after 1950 games (+765 =518 -667) | +17.5 ± 12.7 | 1352416 |
 | Static exchange evaluation (losing captures ordered after killers and skipped in quiescence) and the countermove heuristic | SPRT [0, 10], 3+0.03 | H1 after 502 games (+233 =127 -142) | +63.7 ± 27.1 | 714206 |
 | Time management: the soft limit is scaled by best-move stability (×2.0 right after the best move changed, down to ×0.85 after four stable iterations) and by score drops of more than 20 cp (up to ×1.5) | SPRT [0, 10], 3+0.03 | H1 after 2376 games (+898 =682 -796; 1 loss on time by the candidate) | +14.9 ± 11.4 | 714206 |
+| History malus and gravity: on a quiet cutoff the move gets +min(depth², 1200) and every quiet move searched before it the same penalty, with h += bonus − h·|bonus|/16384 keeping values within ±16384 | SPRT [0, 10], 3+0.03 | H1 after 554 games (+231 =166 -157) | +46.7 ± 22.9 | 642327 |
 
 The reduction table alone was tested first, at 5+0.05, and stopped
 undecided at +21.2 ± 21.9 after 674 games (LLR 1.29); it was then tested

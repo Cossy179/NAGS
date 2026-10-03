@@ -353,6 +353,8 @@ private:
         }();
         return table[std::min(depth, 63)][std::min(moveNumber, 63)];
     }
+    static void updateHistory(int &h, int bonus) { h += bonus - h * std::abs(bonus) / kHistoryMax; }
+    static constexpr int kHistoryMax = 16384;
 
     bool hasNonPawnMaterial(Color c) const {
         return (board.pieceBB(c, KNIGHT) | board.pieceBB(c, BISHOP) | board.pieceBB(c, ROOK) | board.pieceBB(c, QUEEN)) != 0;
@@ -518,6 +520,7 @@ private:
         Move bestMove;
         int i = 0; // number of legal moves tried so far
         int quietsTried = 0;
+        MoveList quietsSearched; // quiet moves searched without a cutoff
         for (int n = 0; n < moves.size(); ++n) {
             pickNext(moves, scores, n);
             const Move m = moves[n];
@@ -567,8 +570,14 @@ private:
                                 killers[ply][1] = killers[ply][0];
                                 killers[ply][0] = m;
                             }
-                            int &h = history[colorIndex(board.sideToMove())][m.from][m.to];
-                            h = std::min(h + depth * depth, 1 << 20);
+                            // Reward the cutoff move and penalise the quiet
+                            // moves tried before it; values decay towards
+                            // zero as they approach the bound.
+                            int bonus = std::min(depth * depth, 1200);
+                            auto &table = history[colorIndex(board.sideToMove())];
+                            updateHistory(table[m.from][m.to], bonus);
+                            for (int q = 0; q < quietsSearched.size(); ++q)
+                                updateHistory(table[quietsSearched[q].from][quietsSearched[q].to], -bonus);
                             if (!prevMove.isNull()) {
                                 Piece p = board.pieceAt(prevMove.to);
                                 if (p != Piece::None) counterMoves[static_cast<int>(p) - 1][prevMove.to] = m;
@@ -578,6 +587,7 @@ private:
                     }
                 }
             }
+            if (quiet) quietsSearched.push_back(m);
         }
 
         if (i == 0) return inCheck ? -MATE_SCORE + ply : 0; // checkmate or stalemate
