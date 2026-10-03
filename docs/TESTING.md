@@ -202,8 +202,11 @@ not alter the search, so the bench node counts stay identical:
 |---|---|---|---|---|---|
 | `aa8472b` vs `f895704` | legality checked only for moves the search tries | 1.44× | 1.30× | 1.41× | 1.30× |
 | `a8e5c0c` vs `aa8472b` | stack move list, lazy move ordering | 1.59× | 1.43× | 1.62× | 1.44× |
+| `06da148` vs `253627c` | incremental evaluation (FastBoard only) | – | ~1.16× | ~1.14× | – |
 
-At `a8e5c0c`, `nags_enhanced` benches at about 4.8M nodes/second.
+At `a8e5c0c`, `nags_enhanced` benches at about 4.8M nodes/second. The
+`06da148` figures are medians of six alternating runs taken while an SPRT
+occupied the other cores, so they are less precise than the rows above.
 
 ## Strength log
 
