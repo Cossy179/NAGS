@@ -118,7 +118,7 @@ Board::Board() {
 Board::Board(const Board &o, NoHistory)
     : pieces(o.pieces), occWhite(o.occWhite), occBlack(o.occBlack), occAll(o.occAll), side(o.side),
       castlingRights(o.castlingRights), epSquare(o.epSquare), halfmoveClock(o.halfmoveClock),
-      fullmoveNumber(o.fullmoveNumber), hash(o.hash) {
+      fullmoveNumber(o.fullmoveNumber), pliesFromNull(o.pliesFromNull), hash(o.hash) {
     history.reserve(1);
 }
 
@@ -225,6 +225,7 @@ bool Board::setFromFEN(const std::string &fen) {
 
     b.halfmoveClock = hm;
     b.fullmoveNumber = fm;
+    b.pliesFromNull = 0;
     b.hashRecompute();
     *this = std::move(b);
     history.clear();
@@ -272,7 +273,7 @@ bool Board::inCheck(Color c) const {
     return isSquareAttacked(ksq, opposite(c));
 }
 
-void Board::generatePseudoMoves(std::vector<Move> &moves) const {
+void Board::generatePseudoMoves(MoveList &moves) const {
     Color c = side;
     Bitboard us = (c == Color::White) ? occWhite : occBlack;
     int base = (c == Color::White) ? 0 : 6;
@@ -323,7 +324,7 @@ void Board::generatePseudoMoves(std::vector<Move> &moves) const {
     }
 }
 
-void Board::generatePawnMoves(std::vector<Move> &moves, Color c) const {
+void Board::generatePawnMoves(MoveList &moves, Color c) const {
     auto addPromos = [&](int from, int to) {
         addMove(moves, from, to, makePiece(c, QUEEN));
         addMove(moves, from, to, makePiece(c, ROOK));
@@ -370,31 +371,29 @@ void Board::generatePawnMoves(std::vector<Move> &moves, Color c) const {
     }
 }
 
-void Board::generatePseudoLegalMoves(std::vector<Move> &out, bool noisyOnly) const {
+void Board::generatePseudoLegalMoves(MoveList &out, bool noisyOnly) const {
     out.clear();
-    out.reserve(128);
     generatePseudoMoves(out);
     if (noisyOnly) {
-        out.erase(std::remove_if(out.begin(), out.end(),
-                                 [&](const Move &m) {
-                                     return m.promotion == Piece::None && !m.isEnPassant && !(occAll & (1ULL << m.to));
-                                 }),
-                  out.end());
+        int kept = 0;
+        for (int i = 0; i < out.size(); ++i) {
+            const Move &m = out[i];
+            if (m.promotion != Piece::None || m.isEnPassant || (occAll & (1ULL << m.to))) out[kept++] = m;
+        }
+        out.resize(kept);
     }
 }
 
 std::vector<Move> Board::generateLegalMoves(bool noisyOnly) const {
-    std::vector<Move> pseudo;
-    pseudo.reserve(128);
-    generatePseudoMoves(pseudo);
+    MoveList pseudo;
+    generatePseudoLegalMoves(pseudo, noisyOnly);
     std::vector<Move> legal;
     legal.reserve(pseudo.size());
     Board tmp(*this, NoHistory{}); // copying the game history here would cost O(game length) per node
     Color us = side;
-    for (const Move &m : pseudo) {
-        if (noisyOnly && m.promotion == Piece::None && !m.isEnPassant && !(occAll & (1ULL << m.to))) continue;
-        tmp.makeMove(m);
-        if (!tmp.inCheck(us)) legal.push_back(m);
+    for (int i = 0; i < pseudo.size(); ++i) {
+        tmp.makeMove(pseudo[i]);
+        if (!tmp.inCheck(us)) legal.push_back(pseudo[i]);
         tmp.unmakeMove();
     }
     return legal;
@@ -410,6 +409,7 @@ void Board::makeMove(const Move &m) {
     he.side = side;
     he.pieces = pieces;
     he.prevHash = hash;
+    he.pliesFromNull = pliesFromNull;
     he.captured = Piece::None;
 
     Piece moving = pieceAt(m.from);
@@ -479,7 +479,30 @@ void Board::makeMove(const Move &m) {
     if (side == Color::Black) ++fullmoveNumber;
     side = opposite(side);
     hash ^= zSide;
+    ++pliesFromNull;
 
+    history.push_back(he);
+}
+
+void Board::makeNullMove() {
+    HistoryEntry he;
+    he.move = Move{};
+    he.captured = Piece::None;
+    he.castlingRights = castlingRights;
+    he.epSquare = epSquare;
+    he.halfmoveClock = halfmoveClock;
+    he.fullmoveNumber = fullmoveNumber;
+    he.side = side;
+    he.pieces = pieces;
+    he.prevHash = hash;
+    he.pliesFromNull = pliesFromNull;
+    if (epSquare != -1) hash ^= zEnpassant[epSquare & 7];
+    epSquare = -1;
+    ++halfmoveClock;
+    if (side == Color::Black) ++fullmoveNumber;
+    side = opposite(side);
+    hash ^= zSide;
+    pliesFromNull = 0;
     history.push_back(he);
 }
 
@@ -493,6 +516,7 @@ void Board::unmakeMove() {
     halfmoveClock = he.halfmoveClock;
     fullmoveNumber = he.fullmoveNumber;
     hash = he.prevHash;
+    pliesFromNull = he.pliesFromNull;
     history.pop_back();
     updateOccupancy();
 }
@@ -531,7 +555,7 @@ bool Board::isRepetition() const {
     // the current position is at ply history.size(). Only positions with the
     // same side to move and no irreversible move in between can repeat.
     int n = static_cast<int>(history.size());
-    int stop = n - halfmoveClock;
+    int stop = n - std::min(halfmoveClock, pliesFromNull);
     if (stop < 0) stop = 0;
     for (int i = n - 2; i >= stop; i -= 2)
         if (history[i].prevHash == hash) return true;

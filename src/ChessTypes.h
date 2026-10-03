@@ -29,6 +29,30 @@ struct Move {
     bool isNull() const { return from < 0 || to < 0; }
 };
 
+// Fixed-capacity move list living on the stack (no heap allocation per
+// node). Slots are left uninitialised: Move has default member initialisers,
+// so a plain Move[256] would construct 256 moves every time.
+class MoveList {
+public:
+    static constexpr int kCapacity = 256; // > 218, the most legal moves in any position
+
+    void push_back(const Move &m) { slots[count++].move = m; }
+    void clear() { count = 0; }
+    int size() const { return count; }
+    bool empty() const { return count == 0; }
+    void resize(int n) { count = n; } // only to shrink
+    Move &operator[](int i) { return slots[i].move; }
+    const Move &operator[](int i) const { return slots[i].move; }
+
+private:
+    union Slot {
+        Move move;
+        Slot() {}
+    };
+    Slot slots[kCapacity];
+    int count = 0;
+};
+
 inline constexpr Color opposite(Color c) { return c == Color::White ? Color::Black : Color::White; }
 
 inline constexpr int colorIndex(Color c) { return static_cast<int>(c); }

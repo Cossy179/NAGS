@@ -244,6 +244,24 @@ private:
         moves.swap(sorted);
     }
 
+    // Lazy move ordering: brings the highest-scored remaining move to index n.
+    // Ties keep generation order (the same order as a stable sort), and moves
+    // after a cutoff are never sorted at all.
+    static void pickNext(MoveList &moves, int *scores, int n) {
+        int best = n;
+        for (int k = n + 1; k < moves.size(); ++k)
+            if (scores[k] > scores[best]) best = k;
+        if (best == n) return;
+        Move m = moves[best];
+        int sc = scores[best];
+        for (int k = best; k > n; --k) {
+            moves[k] = moves[k - 1];
+            scores[k] = scores[k - 1];
+        }
+        moves[n] = m;
+        scores[n] = sc;
+    }
+
     void updatePv(int ply, const Move &m) {
         pvTable[ply][ply] = m;
         int childLen = (ply + 1 < MAX_PLY) ? pvLength[ply + 1] : ply + 1;
@@ -327,16 +345,19 @@ private:
 
         // Pseudo-legal moves; legality is checked only for moves actually
         // tried (most nodes cut off after a few moves).
-        std::vector<Move> moves;
+        MoveList moves;
         board.generatePseudoLegalMoves(moves);
-        orderMoves(moves, ttMove, ply);
+        int scores[MoveList::kCapacity];
+        for (int k = 0; k < moves.size(); ++k) scores[k] = moveScore(moves[k], ttMove, ply);
 
         const Color us = board.sideToMove();
         int originalAlpha = alpha;
         int best = -INF_SCORE;
         Move bestMove;
-        size_t i = 0; // number of legal moves tried so far
-        for (const Move &m : moves) {
+        int i = 0; // number of legal moves tried so far
+        for (int n = 0; n < moves.size(); ++n) {
+            pickNext(moves, scores, n);
+            const Move m = moves[n];
             bool quiet = !eval::isNoisy(board, m);
             board.makeMove(m);
             if (board.inCheck(us)) { // illegal: leaves our own king in check
@@ -410,13 +431,16 @@ private:
         }
 
         // In check every evasion must be considered (no stand-pat).
-        std::vector<Move> moves;
+        MoveList moves;
         board.generatePseudoLegalMoves(moves, !inCheck);
-        orderMoves(moves, Move{}, MAX_PLY);
+        int scores[MoveList::kCapacity];
+        for (int k = 0; k < moves.size(); ++k) scores[k] = moveScore(moves[k], Move{}, MAX_PLY);
 
         const Color us = board.sideToMove();
         int legal = 0;
-        for (const Move &m : moves) {
+        for (int n = 0; n < moves.size(); ++n) {
+            pickNext(moves, scores, n);
+            const Move m = moves[n];
             if (!inCheck && m.promotion == Piece::None && stand + eval::capturedValue(board, m) + 200 <= alpha)
                 continue; // delta pruning
             board.makeMove(m);

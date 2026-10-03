@@ -30,13 +30,17 @@ public:
     // Pseudo-legal moves (they may leave the own king in check), in the same
     // order generateLegalMoves filters them. The search checks legality only
     // for moves it actually tries.
-    void generatePseudoLegalMoves(std::vector<Move> &out, bool noisyOnly = false) const;
+    void generatePseudoLegalMoves(MoveList &out, bool noisyOnly = false) const;
 
     bool inCheck() const { return inCheck(side); }
     bool inCheck(Color c) const;
 
     void makeMove(const Move &m);
     void unmakeMove();
+    // Passes the turn (for null-move pruning). Undo with unmakeNullMove().
+    void makeNullMove();
+    void unmakeNullMove() { unmakeMove(); }
+    bool lastMoveWasNull() const { return !history.empty() && history.back().move.isNull(); }
 
     Color sideToMove() const { return side; }
     Piece pieceAt(int sq) const;
@@ -75,6 +79,7 @@ private:
     int epSquare = -1; // en passant target square or -1
     int halfmoveClock = 0;
     int fullmoveNumber = 1;
+    int pliesFromNull = 0; // repetitions are not looked for across a null move
     uint64_t hash = 0;
 
     struct HistoryEntry {
@@ -87,6 +92,7 @@ private:
         Color side;
         std::array<Bitboard, 12> pieces;
         uint64_t prevHash;
+        int pliesFromNull;
     };
     std::vector<HistoryEntry> history;
 
@@ -111,9 +117,9 @@ private:
     static Bitboard slidingAttackRook(int sq, Bitboard occ);
     static Bitboard slidingAttackBishop(int sq, Bitboard occ);
 
-    void generatePseudoMoves(std::vector<Move> &moves) const;
-    void generatePawnMoves(std::vector<Move> &moves, Color c) const;
-    static void addMove(std::vector<Move> &moves, int from, int to, Piece promo = Piece::None, bool ep = false, bool castle = false) {
+    void generatePseudoMoves(MoveList &moves) const;
+    void generatePawnMoves(MoveList &moves, Color c) const;
+    static void addMove(MoveList &moves, int from, int to, Piece promo = Piece::None, bool ep = false, bool castle = false) {
         moves.push_back(Move{from, to, promo, ep, castle});
     }
 };

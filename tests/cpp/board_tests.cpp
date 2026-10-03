@@ -148,8 +148,30 @@ static void testApplyMoves() {
     CHECK(b.pieceAt(56) == Piece::WN, "under-promotion produced the wrong piece");
 }
 
+static void testNullMove() {
+    TestBoard b;
+    b.setFromFEN("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2");
+    const std::string fen = b.getFEN();
+    const uint64_t hash = b.zobrist();
+    b.makeNullMove();
+    CHECK(b.sideToMove() == Color::Black && b.lastMoveWasNull(), "null move did not pass the turn");
+    TestBoard flipped;
+    flipped.setFromFEN("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 1 2");
+    CHECK(b.zobrist() == flipped.zobrist(), "null-move hash differs from the side-flipped position");
+    b.unmakeNullMove();
+    CHECK(b.getFEN() == fen && b.zobrist() == hash, "unmakeNullMove did not restore the position");
+
+    // A repetition is not looked for across a null move.
+    b.setStartPos();
+    b.applyMovesUCI({"g1f3", "g8f6"});
+    b.makeNullMove();
+    b.makeNullMove();
+    CHECK(!b.isRepetition(), "repetition detected across a null move");
+}
+
 int main() {
     testPerft();
+    testNullMove();
     testHashConsistency();
     testFenValidation();
     testDraws();

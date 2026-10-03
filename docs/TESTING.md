@@ -167,3 +167,14 @@ over months.
 ### Results
 
 Calibration results will be recorded here as they are measured.
+
+## Strength log
+
+Every change that affects playing strength is listed with the test that
+admitted it. Matches are `nags_enhanced` unless noted, at 5+0.05, with 3
+games in parallel on a 4-core VM, openings from `nags_balanced.epd` and
+resign adjudication (4 moves, 1000 cp).
+
+| Change | Test | Result | Elo | Bench |
+|--------|------|--------|-----|-------|
+| Transposition table (`nags_enhanced` vs `nags_fast`, validation of the runner) | SPRT [0, 30] | H1 after 88 games (+52 =22 -14) | +161 ± 67 | 12213087 |

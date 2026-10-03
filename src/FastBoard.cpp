@@ -178,7 +178,8 @@ FastBoard::FastBoard() {
 
 FastBoard::FastBoard(const FastBoard &o, NoHistory)
     : all_occupied(o.all_occupied), side(o.side), castlingRights(o.castlingRights), epSquare(o.epSquare),
-      halfmoveClock(o.halfmoveClock), fullmoveNumber(o.fullmoveNumber), hash(o.hash) {
+      halfmoveClock(o.halfmoveClock), fullmoveNumber(o.fullmoveNumber), pliesFromNull(o.pliesFromNull),
+      hash(o.hash) {
     for (int c = 0; c < 2; ++c) {
         occupied[c] = o.occupied[c];
         for (int p = 0; p < 6; ++p) pieces[c][p] = o.pieces[c][p];
@@ -282,6 +283,7 @@ bool FastBoard::setFromFEN(const std::string &fen) {
     if (b.inCheck(opposite(b.side))) return false;
 
     b.halfmoveClock = hm;
+    b.pliesFromNull = 0;
     b.fullmoveNumber = fm;
     b.hashRecompute();
     *this = std::move(b);
@@ -345,15 +347,14 @@ bool FastBoard::isSquareAttacked(int sq, Color byColor) const {
     return false;
 }
 
-void FastBoard::generatePseudoMoves(std::vector<Move> &moves) const {
+void FastBoard::generatePseudoMoves(MoveList &moves) const {
     moves.clear();
-    moves.reserve(128);
     generatePawnMoves(moves, side);
     generatePieceMoves(moves, side);
     generateCastlingMoves(moves, side);
 }
 
-void FastBoard::generatePawnMoves(std::vector<Move> &moves, Color c) const {
+void FastBoard::generatePawnMoves(MoveList &moves, Color c) const {
     int ci = colorIndex(c);
     Bitboard pawns = pieces[ci][PAWN];
     Bitboard enemies = occupied[1 - ci];
@@ -400,7 +401,7 @@ void FastBoard::generatePawnMoves(std::vector<Move> &moves, Color c) const {
     }
 }
 
-void FastBoard::generatePieceMoves(std::vector<Move> &moves, Color c) const {
+void FastBoard::generatePieceMoves(MoveList &moves, Color c) const {
     int ci = colorIndex(c);
     Bitboard targets = ~occupied[ci];
     for (int type = KNIGHT; type <= KING; ++type) {
@@ -421,7 +422,7 @@ void FastBoard::generatePieceMoves(std::vector<Move> &moves, Color c) const {
     }
 }
 
-void FastBoard::generateCastlingMoves(std::vector<Move> &moves, Color c) const {
+void FastBoard::generateCastlingMoves(MoveList &moves, Color c) const {
     if (!castlingRights || inCheck(c)) return;
     Color them = opposite(c);
     if (c == Color::White) {
@@ -441,27 +442,27 @@ void FastBoard::generateCastlingMoves(std::vector<Move> &moves, Color c) const {
     }
 }
 
-void FastBoard::generatePseudoLegalMoves(std::vector<Move> &out, bool noisyOnly) const {
+void FastBoard::generatePseudoLegalMoves(MoveList &out, bool noisyOnly) const {
     generatePseudoMoves(out);
     if (noisyOnly) {
-        out.erase(std::remove_if(out.begin(), out.end(),
-                                 [&](const Move &m) {
-                                     return m.promotion == Piece::None && !m.isEnPassant && mailbox[m.to] == Piece::None;
-                                 }),
-                  out.end());
+        int kept = 0;
+        for (int i = 0; i < out.size(); ++i) {
+            const Move &m = out[i];
+            if (m.promotion != Piece::None || m.isEnPassant || mailbox[m.to] != Piece::None) out[kept++] = m;
+        }
+        out.resize(kept);
     }
 }
 
 std::vector<Move> FastBoard::generateLegalMoves(bool noisyOnly) const {
-    std::vector<Move> pseudo;
-    generatePseudoMoves(pseudo);
+    MoveList pseudo;
+    generatePseudoLegalMoves(pseudo, noisyOnly);
     std::vector<Move> legal;
     legal.reserve(pseudo.size());
     FastBoard tmp(*this, NoHistory{}); // one copy without the game history, then make/unmake
-    for (const Move &move : pseudo) {
-        if (noisyOnly && move.promotion == Piece::None && !move.isEnPassant && mailbox[move.to] == Piece::None) continue;
-        tmp.makeMove(move);
-        if (!tmp.inCheck(side)) legal.push_back(move);
+    for (int i = 0; i < pseudo.size(); ++i) {
+        tmp.makeMove(pseudo[i]);
+        if (!tmp.inCheck(side)) legal.push_back(pseudo[i]);
         tmp.unmakeMove();
     }
     return legal;
@@ -477,6 +478,7 @@ void FastBoard::makeMove(const Move &m) {
     entry.halfmoveClock = halfmoveClock;
     entry.fullmoveNumber = fullmoveNumber;
     entry.hash = hash;
+    entry.pliesFromNull = pliesFromNull;
     history.push_back(entry);
 
     if (epSquare != -1) {
@@ -526,6 +528,42 @@ void FastBoard::makeMove(const Move &m) {
     if (side == Color::Black) ++fullmoveNumber;
     side = opposite(side);
     hash ^= zSide;
+    ++pliesFromNull;
+}
+
+void FastBoard::makeNullMove() {
+    HistoryEntry entry;
+    entry.move = Move{};
+    entry.moved = Piece::None;
+    entry.captured = Piece::None;
+    entry.castlingRights = castlingRights;
+    entry.epSquare = epSquare;
+    entry.halfmoveClock = halfmoveClock;
+    entry.fullmoveNumber = fullmoveNumber;
+    entry.hash = hash;
+    entry.pliesFromNull = pliesFromNull;
+    history.push_back(entry);
+    if (epSquare != -1) {
+        hash ^= zEnpassant[epSquare & 7];
+        epSquare = -1;
+    }
+    ++halfmoveClock;
+    if (side == Color::Black) ++fullmoveNumber;
+    side = opposite(side);
+    hash ^= zSide;
+    pliesFromNull = 0;
+}
+
+void FastBoard::unmakeNullMove() {
+    if (history.empty()) return;
+    const HistoryEntry &entry = history.back();
+    side = opposite(side);
+    epSquare = entry.epSquare;
+    halfmoveClock = entry.halfmoveClock;
+    fullmoveNumber = entry.fullmoveNumber;
+    hash = entry.hash;
+    pliesFromNull = entry.pliesFromNull;
+    history.pop_back();
 }
 
 void FastBoard::unmakeMove() {
@@ -554,6 +592,7 @@ void FastBoard::unmakeMove() {
     halfmoveClock = entry.halfmoveClock;
     fullmoveNumber = entry.fullmoveNumber;
     hash = entry.hash;
+    pliesFromNull = entry.pliesFromNull;
 }
 
 bool FastBoard::applyMovesUCI(const std::vector<std::string> &uciMoves) {
@@ -587,7 +626,7 @@ bool FastBoard::applyMovesUCI(const std::vector<std::string> &uciMoves) {
 
 bool FastBoard::isRepetition() const {
     int n = static_cast<int>(history.size());
-    int stop = n - halfmoveClock;
+    int stop = n - std::min(halfmoveClock, pliesFromNull);
     if (stop < 0) stop = 0;
     // history[i].hash is the position i plies into the game; the current one is ply n.
     for (int i = n - 2; i >= stop; i -= 2)

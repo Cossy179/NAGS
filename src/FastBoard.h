@@ -30,10 +30,10 @@ public:
 
     // Legal moves for the side to move; noisyOnly keeps captures and promotions.
     std::vector<Move> generateLegalMoves(bool noisyOnly = false) const;
-    void generatePseudoMoves(std::vector<Move> &moves) const;
+    void generatePseudoMoves(MoveList &moves) const;
     // Pseudo-legal moves (they may leave the own king in check), in the same
     // order generateLegalMoves filters them.
-    void generatePseudoLegalMoves(std::vector<Move> &out, bool noisyOnly = false) const;
+    void generatePseudoLegalMoves(MoveList &out, bool noisyOnly = false) const;
 
     bool inCheck() const { return inCheck(side); }
     bool inCheck(Color c) const;
@@ -47,6 +47,10 @@ public:
 
     void makeMove(const Move &m);
     void unmakeMove();
+    // Passes the turn (for null-move pruning). Undo with unmakeNullMove().
+    void makeNullMove();
+    void unmakeNullMove();
+    bool lastMoveWasNull() const { return !history.empty() && history.back().move.isNull(); }
 
     // Fifty-move rule, repetition (one earlier occurrence) or insufficient material.
     bool isDraw() const;
@@ -84,6 +88,7 @@ private:
     int epSquare = -1;
     int halfmoveClock = 0;
     int fullmoveNumber = 1;
+    int pliesFromNull = 0; // repetitions are not looked for across a null move
     uint64_t hash = 0;
 
     struct HistoryEntry {
@@ -94,6 +99,7 @@ private:
         int epSquare;
         int halfmoveClock;
         int fullmoveNumber;
+        int pliesFromNull;
         uint64_t hash;
     };
     std::vector<HistoryEntry> history;
@@ -112,13 +118,13 @@ private:
     void removePiece(int sq);
     void movePiece(int from, int to);
 
-    void generatePawnMoves(std::vector<Move> &moves, Color c) const;
-    void generatePieceMoves(std::vector<Move> &moves, Color c) const;
-    void generateCastlingMoves(std::vector<Move> &moves, Color c) const;
+    void generatePawnMoves(MoveList &moves, Color c) const;
+    void generatePieceMoves(MoveList &moves, Color c) const;
+    void generateCastlingMoves(MoveList &moves, Color c) const;
     bool isSquareAttacked(int sq, Color byColor) const;
     int kingSquare(Color c) const;
     void sanitizeCastlingRights();
-    static void addMove(std::vector<Move> &moves, int from, int to,
+    static void addMove(MoveList &moves, int from, int to,
                         Piece promo = Piece::None, bool ep = false, bool castle = false) {
         moves.push_back(Move{from, to, promo, ep, castle});
     }
