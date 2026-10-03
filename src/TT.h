@@ -1,38 +1,72 @@
 #pragma once
 
+// Transposition table shared by all search threads.
+//
+// Each entry is two 64-bit words: the packed data and (key XOR data). A reader
+// accepts an entry only if the XOR checks out, so a torn read caused by a
+// concurrent writer is rejected instead of returning another position's score
+// (the usual lockless-hashing scheme). Both words are std::atomic with relaxed
+// ordering, so there is no data race in the C++ sense.
+
+#include "ChessTypes.h"
+
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
-#include <vector>
+#include <memory>
 
-#include "Board.h"
+constexpr int MAX_PLY = 128;
+constexpr int MATE_SCORE = 32000;
+constexpr int MATE_BOUND = MATE_SCORE - MAX_PLY; // |score| >= this means a forced mate
+constexpr int INF_SCORE = 32500;
 
-enum class TTFlag : uint8_t { Exact = 0, Lower = 1, Upper = 2 };
+// Mate scores are stored relative to the node rather than the root so they
+// stay correct when the same position is reached at a different ply.
+inline int scoreToTT(int score, int ply) {
+    if (score >= MATE_BOUND) return score + ply;
+    if (score <= -MATE_BOUND) return score - ply;
+    return score;
+}
 
-struct TTEntry {
-    uint64_t key; // non-atomic; simple single-writer design
-    int32_t score;
-    int16_t depth; // in plies
-    uint8_t flag;  // TTFlag
-    uint32_t movePacked; // from(6) | to(6) | promo(4)
+inline int scoreFromTT(int score, int ply) {
+    if (score >= MATE_BOUND) return score - ply;
+    if (score <= -MATE_BOUND) return score + ply;
+    return score;
+}
 
-    TTEntry() : key(0), score(0), depth(-1), flag(0), movePacked(0) {}
+enum class Bound : uint8_t { None = 0, Upper = 1, Lower = 2, Exact = 3 };
+
+struct TTHit {
+    Move move;        // from/to/promotion kind only; isNull() if none stored
+    int score = 0;    // node-relative (use scoreFromTT)
+    int depth = 0;
+    Bound bound = Bound::None;
 };
 
 class TranspositionTable {
 public:
-    TranspositionTable();
+    explicit TranspositionTable(size_t megabytes = 16);
 
-    void resizeMB(size_t megabytes);
+    // Rounds the entry count down to a power of two so the table never uses
+    // more memory than requested. Clears the table.
+    void resize(size_t megabytes);
     void clear();
+    void newSearch() { generation = static_cast<uint8_t>(generation + 1); }
 
-    bool probe(uint64_t key, TTEntry &out) const;
-    void store(uint64_t key, int depth, TTFlag flag, int score, const Move *bestMove);
+    bool probe(uint64_t key, TTHit &out) const;
+    void store(uint64_t key, int depth, Bound bound, int score, const Move &move);
 
-    static uint32_t packMove(const Move &m);
-    static Move unpackMove(uint32_t p);
+    // Permille of sampled entries written during the current search (UCI hashfull).
+    int hashfull() const;
+    size_t entryCount() const { return mask + 1; }
+    static constexpr size_t entryBytes() { return sizeof(Entry); }
 
 private:
-    std::vector<TTEntry> table;
-    size_t mask = 0; // table.size()-1 when size is power of two
+    struct Entry {
+        std::atomic<uint64_t> keyXorData;
+        std::atomic<uint64_t> data;
+    };
+    std::unique_ptr<Entry[]> table;
+    size_t mask = 0;
+    uint8_t generation = 0;
 };
-
-

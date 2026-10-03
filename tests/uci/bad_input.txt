@@ -1,0 +1,8 @@
+setoption name UseNN value false
+setoption name UseMetaLearner value false
+position fen this is not a fen
+go wtime abc
+setoption name Hash value lots
+position startpos moves e2e4 e7e5 e1e3
+position startpos moves e2e4 e7e5
+go depth 3

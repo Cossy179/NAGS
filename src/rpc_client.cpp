@@ -1,117 +1,102 @@
+// Smoke test for rpc_server.py: sends one batched request (8 positions, with
+// their legal moves) and checks that every result carries a value in [-1, 1],
+// an uncertainty and one prior per legal move.
+//
+// Usage: rpc_client [host] [port]
+
+#include "Board.h"
+#include "Net.h"
+
+#include <cmath>
 #include <iostream>
 #include <string>
-#include <vector>
-#include <cstring>
-#include <chrono>
 #include <thread>
+#include <vector>
 
-#ifdef _WIN32
-#  include <winsock2.h>
-#  include <ws2tcpip.h>
-#  pragma comment(lib, "Ws2_32.lib")
-#else
-#  include <sys/types.h>
-#  include <sys/socket.h>
-#  include <netinet/in.h>
-#  include <arpa/inet.h>
-#  include <unistd.h>
-#endif
+int main(int argc, char **argv) {
+    std::string host = argc > 1 ? argv[1] : "127.0.0.1";
+    int port = argc > 2 ? std::atoi(argv[2]) : 5555;
 
-static bool send_all(int sock, const char* data, size_t len) {
-    size_t sent = 0;
-    while (sent < len) {
-#ifdef _WIN32
-        int n = ::send(sock, data + sent, static_cast<int>(len - sent), 0);
-#else
-        ssize_t n = ::send(sock, data + sent, len - sent, 0);
-#endif
-        if (n <= 0) return false;
-        sent += static_cast<size_t>(n);
-    }
-    return true;
-}
-
-int main() {
-#ifdef _WIN32
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2,2), &wsaData) != 0) {
-        std::cerr << "WSAStartup failed" << std::endl;
-        return 1;
-    }
-#endif
-
-#ifdef _WIN32
-    SOCKET sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock == INVALID_SOCKET) { std::cerr << "socket() failed" << std::endl; return 1; }
-#else
-    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) { std::cerr << "socket() failed" << std::endl; return 1; }
-#endif
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(5555);
-    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-
-    // Retry connect for up to ~5 seconds
+    LineSocket sock;
     bool connected = false;
     for (int attempt = 0; attempt < 50 && !connected; ++attempt) {
-#ifdef _WIN32
-        if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) connected = true;
-#else
-        if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) connected = true;
-#endif
+        connected = sock.connect(host, port, 200);
         if (!connected) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    if (!connected) { std::cerr << "connect() failed" << std::endl; return 1; }
-
-    // Prepare 8 FENs (startpos duplicated)
-    std::vector<std::string> fens(8, "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-    std::string json = "{\"fens\":[";
-    for (size_t i = 0; i < fens.size(); ++i) {
-        if (i) json += ",";
-        // escape quotes if any (not expected in FEN)
-        json += "\"" + fens[i] + "\"";
-    }
-    json += "]}\n";
-
-    if (!send_all(sock, json.c_str(), json.size())) {
-        std::cerr << "send failed" << std::endl;
+    if (!connected) {
+        std::cerr << "could not connect to " << host << ":" << port << std::endl;
         return 1;
     }
 
-    // Read one line response
-    std::string resp;
-    char buf[4096];
-    while (true) {
-#ifdef _WIN32
-        int n = ::recv(sock, buf, sizeof(buf), 0);
-#else
-        ssize_t n = ::recv(sock, buf, sizeof(buf), 0);
-#endif
-        if (n <= 0) break;
-        resp.append(buf, buf + n);
-        if (resp.find('\n') != std::string::npos) break;
+    const std::vector<std::string> fens = {
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+        "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+        "8/8/8/K2pP2q/8/8/8/7k w - d6 0 1",
+        "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1",
+    };
+
+    std::vector<size_t> moveCounts;
+    std::string request = "{\"fens\":[";
+    std::string moves = "\"moves\":[";
+    for (size_t i = 0; i < fens.size(); ++i) {
+        Board b;
+        if (!b.setFromFEN(fens[i])) {
+            std::cerr << "bad test FEN " << fens[i] << std::endl;
+            return 1;
+        }
+        auto legal = b.generateLegalMoves();
+        moveCounts.push_back(legal.size());
+        request += (i ? ",\"" : "\"") + jsonlite::escape(fens[i]) + "\"";
+        moves += i ? ",[" : "[";
+        for (size_t j = 0; j < legal.size(); ++j) moves += (j ? ",\"" : "\"") + moveToUciString(legal[j]) + "\"";
+        moves += "]";
     }
+    request += "]," + moves + "]}";
 
-#ifdef _WIN32
-    closesocket(sock);
-    WSACleanup();
-#else
-    close(sock);
-#endif
-
-    // Naive check: count occurrences of "\"value\":" as proxy for results length
-    size_t count = 0, pos = 0;
-    const std::string needle = "\"value\":";
-    while ((pos = resp.find(needle, pos)) != std::string::npos) { ++count; pos += needle.size(); }
-    std::cout << "Response length: " << resp.size() << " bytes, value-count: " << count << std::endl;
-    if (count != 8) {
-        std::cerr << "Expected 8 evaluations, got " << count << std::endl;
+    std::string response;
+    if (!sock.request(request, response, 60000)) {
+        std::cerr << "no response from server" << std::endl;
+        return 1;
+    }
+    std::string error;
+    if (jsonlite::findString(response, "error", error)) {
+        std::cerr << "server error: " << error << std::endl;
         return 2;
     }
-    std::cout << "OK: received 8 evaluations in one RPC call." << std::endl;
+
+    // Results come back in order; walk them one "move_priors" array at a time.
+    size_t pos = 0;
+    for (size_t i = 0; i < fens.size(); ++i) {
+        size_t start = response.find("{\"value\"", pos);
+        if (start == std::string::npos) start = response.find("\"value\"", pos);
+        size_t end = response.find('}', start);
+        if (start == std::string::npos || end == std::string::npos) {
+            std::cerr << "missing result " << i << std::endl;
+            return 2;
+        }
+        std::string item = response.substr(start, end - start + 1);
+        double value = 0, uncertainty = 0;
+        std::vector<double> priors;
+        if (!jsonlite::findNumber(item, "value", value) || !jsonlite::findNumber(item, "uncertainty", uncertainty) ||
+            !jsonlite::findNumberArray(item, "move_priors", priors)) {
+            std::cerr << "malformed result " << i << ": " << item.substr(0, 200) << std::endl;
+            return 2;
+        }
+        double sum = 0;
+        for (double p : priors) sum += p;
+        if (value < -1.0 || value > 1.0 || priors.size() != moveCounts[i] || std::abs(sum - 1.0) > 1e-3) {
+            std::cerr << "bad result " << i << ": value " << value << ", " << priors.size() << " priors (expected "
+                      << moveCounts[i] << "), sum " << sum << std::endl;
+            return 2;
+        }
+        std::cout << "position " << i << ": value " << value << " uncertainty " << uncertainty << " moves "
+                  << priors.size() << std::endl;
+        pos = end + 1;
+    }
+    std::cout << "OK: received " << fens.size() << " evaluations in one RPC call." << std::endl;
     return 0;
 }
-
-

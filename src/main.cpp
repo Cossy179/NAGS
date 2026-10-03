@@ -1,134 +1,132 @@
+// nags: the hybrid NAGS engine (alpha-beta + MCTS chosen by a bandit, GNN
+// evaluation over RPC, meta-learned hyperparameters).
+
 #include "Board.h"
-#include "Search.h"
 #include "NAGS.h"
+#include "TT.h"
+#include "Uci.h"
 
 #include <algorithm>
-#include <chrono>
-#include <iostream>
-#include <random>
-#include <sstream>
 #include <string>
 #include <vector>
 
-static std::vector<std::string> split(const std::string &s) {
-    std::istringstream iss(s);
-    std::vector<std::string> out;
-    std::string tok;
-    while (iss >> tok) out.push_back(tok);
-    return out;
-}
+class NagsEngine : public uci::Engine {
+public:
+    NagsEngine() : tt(kDefaultHashMB), controller(tt) {}
+
+    std::string name() const override { return "NAGS"; }
+
+    std::vector<std::string> optionLines() const override {
+        const NagsSettings &s = controller.settings();
+        return {
+            "option name Hash type spin default " + std::to_string(kDefaultHashMB) + " min 1 max 4096",
+            "option name Clear Hash type button",
+            "option name Move Overhead type spin default 50 min 0 max 5000",
+            std::string("option name UseNN type check default ") + (s.useNN ? "true" : "false"),
+            "option name NNHost type string default " + s.nnHost,
+            "option name NNPort type spin default " + std::to_string(s.nnPort) + " min 1 max 65535",
+            std::string("option name UseMetaLearner type check default ") + (s.useMetaLearner ? "true" : "false"),
+            "option name MetaHost type string default " + s.metaHost,
+            "option name MetaPort type spin default " + std::to_string(s.metaPort) + " min 1 max 65535",
+            "option name MetaExploration type spin default 0 min 0 max 100",
+        };
+    }
+
+    bool setOption(const std::string &opt, const std::string &value, std::string &message) override {
+        NagsSettings &s = controller.settings();
+        long long v = 0;
+        bool b = false;
+        auto badValue = [&] {
+            message = "invalid value '" + value + "' for " + opt;
+            return false;
+        };
+        if (opt == "Hash") {
+            if (!uci::parseInt(value, v)) return badValue();
+            v = std::clamp<long long>(v, 1, 4096);
+            tt.resize(static_cast<size_t>(v));
+            message = "Hash set to " + std::to_string(v) + " MB";
+        } else if (opt == "Clear Hash") {
+            tt.clear();
+            message = "Hash cleared";
+        } else if (opt == "Move Overhead") {
+            if (!uci::parseInt(value, v)) return badValue();
+            moveOverheadMs = std::clamp<long long>(v, 0, 5000);
+        } else if (opt == "UseNN") {
+            if (!uci::parseBool(value, b)) return badValue();
+            s.useNN = b;
+        } else if (opt == "NNHost") {
+            if (value.empty()) return badValue();
+            s.nnHost = value;
+        } else if (opt == "NNPort") {
+            if (!uci::parseInt(value, v) || v < 1 || v > 65535) return badValue();
+            s.nnPort = static_cast<int>(v);
+        } else if (opt == "UseMetaLearner") {
+            if (!uci::parseBool(value, b)) return badValue();
+            s.useMetaLearner = b;
+        } else if (opt == "MetaHost") {
+            if (value.empty()) return badValue();
+            s.metaHost = value;
+        } else if (opt == "MetaPort") {
+            if (!uci::parseInt(value, v) || v < 1 || v > 65535) return badValue();
+            s.metaPort = static_cast<int>(v);
+        } else if (opt == "MetaExploration") {
+            if (!uci::parseInt(value, v)) return badValue();
+            s.metaExploration = static_cast<float>(std::clamp<long long>(v, 0, 100)) / 100.0f;
+        } else {
+            return false;
+        }
+        return true;
+    }
+
+    void newGame() override {
+        tt.clear();
+        controller.newGame();
+        board.setStartPos();
+    }
+
+    bool setPosition(const std::string &fen, const std::vector<std::string> &moves, std::string &error) override {
+        Board next;
+        if (!fen.empty() && !next.setFromFEN(fen)) {
+            error = "invalid FEN '" + fen + "'";
+            return false;
+        }
+        for (const std::string &m : moves) {
+            if (!next.applyMovesUCI({m})) {
+                error = "illegal move '" + m + "' in position " + next.getFEN();
+                return false;
+            }
+        }
+        board = next;
+        return true;
+    }
+
+    void go(const uci::GoParams &params, const std::atomic<bool> &stop) override {
+        Board root = board; // the search never touches the engine's own board
+        bool white = root.sideToMove() == Color::White;
+        SearchLimits limits = uci::computeLimits(params, white, moveOverheadMs);
+        int64_t timeLeft = white ? params.wtime : params.btime;
+        NagsResult r = controller.search(
+            root, limits, timeLeft, stop, [](const SearchInfo &info) { uci::send(uci::formatInfo(info)); },
+            [](const std::string &s) { uci::send("info string " + s); });
+        uci::send(uci::bestMoveLine(r.bestMove, r.ponderMove));
+    }
+
+    uint64_t perft(int depth) override {
+        Board copy = board;
+        return copy.perft(depth);
+    }
+
+    std::string fen() const override { return board.getFEN(); }
+
+private:
+    static constexpr int kDefaultHashMB = 64;
+    TranspositionTable tt;
+    NAGSController controller;
+    Board board;
+    int64_t moveOverheadMs = 50;
+};
 
 int main() {
-    std::ios::sync_with_stdio(false);
-    std::cin.tie(nullptr);
-
-    Board board;
-
-    std::mt19937 rng(static_cast<unsigned int>(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
-
-    std::string line;
-    int hashMB = 16;
-    int numThreads = 1;
-    while (std::getline(std::cin, line)) {
-        if (line.empty()) continue;
-        auto tokens = split(line);
-        if (tokens.empty()) continue;
-        const std::string &cmd = tokens[0];
-
-        if (cmd == "uci") {
-            std::cout << "id name NAGS\n";
-            std::cout << "id author Alex\n";
-            std::cout << "option name Hash type spin default 16 min 1 max 4096\n";
-            std::cout << "option name Threads type spin default 1 min 1 max 64\n";
-            std::cout << "option name Clear Hash type button\n";
-            std::cout << "uciok\n" << std::flush;
-        } else if (cmd == "isready") {
-            std::cout << "readyok\n" << std::flush;
-        } else if (cmd == "ucinewgame") {
-            board.setStartPos();
-        } else if (cmd == "position") {
-            // position [fen <fen> | startpos ]  moves ...
-            size_t i = 1;
-            if (i < tokens.size() && tokens[i] == "startpos") {
-                board.setFromFEN("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-                i++;
-            } else if (i < tokens.size() && tokens[i] == "fen") {
-                std::string fen;
-                // FEN is 6 fields; gather until we have 6 fields collected
-                int fields = 0;
-                i++;
-                for (; i < tokens.size() && fields < 6; ++i) {
-                    if (!fen.empty()) fen += ' ';
-                    fen += tokens[i];
-                    fields++;
-                }
-                board.setFromFEN(fen);
-            }
-            if (i < tokens.size() && tokens[i] == "moves") {
-                ++i;
-                std::vector<std::string> moves;
-                for (; i < tokens.size(); ++i) moves.push_back(tokens[i]);
-                board.applyMovesUCI(moves);
-            }
-        } else if (cmd == "setoption") {
-            // setoption name <Name> value <Value>
-            // Simple parser
-            std::string name, value;
-            for (size_t i = 1; i < tokens.size(); ++i) {
-                if (tokens[i] == "name") {
-                    name.clear();
-                    ++i; while (i < tokens.size() && tokens[i] != "value") { if (!name.empty()) name += ' '; name += tokens[i]; ++i; }
-                    if (i < tokens.size() && tokens[i] == "value") { ++i; }
-                    value.clear();
-                    while (i < tokens.size()) { if (!value.empty()) value += ' '; value += tokens[i]; ++i; }
-                    break;
-                }
-            }
-            if (!name.empty()) {
-                if (name == "Hash") {
-                    try { hashMB = std::max(1, std::min(4096, std::stoi(value))); } catch (...) {}
-                } else if (name == "Threads") {
-                    try { numThreads = std::max(1, std::min(64, std::stoi(value))); } catch (...) {}
-                } else if (name == "Clear Hash") {
-                    // Will clear on next Search construction
-                }
-            }
-        } else if (cmd == "go") {
-            // Parse time controls and depth
-            SearchLimits limits;
-            for (size_t i = 1; i < tokens.size(); ++i) {
-                const std::string &t = tokens[i];
-                if (t == "wtime" && i + 1 < tokens.size()) {
-                    long long w = std::stoll(tokens[++i]);
-                    if (board.sideToMove() == Color::White) limits.timeMs = w;
-                } else if (t == "btime" && i + 1 < tokens.size()) {
-                    long long btm = std::stoll(tokens[++i]);
-                    if (board.sideToMove() == Color::Black) limits.timeMs = btm;
-                } else if (t == "movestogo" && i + 1 < tokens.size()) {
-                    limits.movesToGo = static_cast<int>(std::stoll(tokens[++i]));
-                } else if (t == "depth" && i + 1 < tokens.size()) {
-                    limits.depth = static_cast<int>(std::stoll(tokens[++i]));
-                }
-            }
-            
-            // Use NAGS hybrid controller
-            NAGSController nags(board);
-            Move bestMove = nags.search(limits);
-            
-            if (bestMove.from == -1) {
-                std::cout << "bestmove 0000\n" << std::flush;
-            } else {
-                std::cout << "bestmove " << Board::moveToUci(bestMove) << "\n" << std::flush;
-            }
-        } else if (cmd == "stop") {
-            // No search implemented; ignore
-        } else if (cmd == "quit") {
-            break;
-        } else if (cmd == "d") {
-            std::cout << board.getFEN() << "\n";
-        }
-    }
-    return 0;
+    NagsEngine engine;
+    return uci::run(engine);
 }
-
-

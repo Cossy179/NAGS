@@ -1,7 +1,0 @@
-C:/Users/Alex/Documents/code/NAGS/build/CMakeFiles/nags_basic.dir
-C:/Users/Alex/Documents/code/NAGS/build/CMakeFiles/nags_fast.dir
-C:/Users/Alex/Documents/code/NAGS/build/CMakeFiles/nags_enhanced.dir
-C:/Users/Alex/Documents/code/NAGS/build/CMakeFiles/nags.dir
-C:/Users/Alex/Documents/code/NAGS/build/CMakeFiles/rpc_client.dir
-C:/Users/Alex/Documents/code/NAGS/build/CMakeFiles/ALL_BUILD.dir
-C:/Users/Alex/Documents/code/NAGS/build/CMakeFiles/ZERO_CHECK.dir
