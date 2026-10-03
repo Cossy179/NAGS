@@ -54,7 +54,8 @@ Stockfish's strength-limited mode.
 The C++ tests check move generation against reference perft counts, that the
 incremental Zobrist hash always matches a freshly computed one, search results
 on known positions (mates, perpetual check, stalemate), the time manager, and
-every engine's UCI behaviour (side to move, bad input, `movetime`, threads).
+every engine's UCI behaviour (side to move, bad input, `movetime`, threads,
+MultiPV, pondering).
 CI runs both suites on Linux, Windows and macOS
 (`.github/workflows/nags-ci.yml`).
 
@@ -69,8 +70,10 @@ printf 'uci\nposition startpos moves e2e4\ngo depth 8\n' | build/nags_enhanced
 
 The search runs on its own thread, so `stop`, `isready` and `quit` are handled
 while it thinks. Supported `go` parameters: `wtime btime winc binc movestogo
-movetime depth nodes mate infinite`, plus the non-standard `go perft N` (also
-`perft N`) and `d` (print the FEN). Pondering is not supported.
+movetime depth nodes mate infinite ponder`, plus the non-standard `go perft N`
+(also `perft N`) and `d` (print the FEN). The alpha-beta engines support
+pondering (`go ponder`, then `ponderhit` or `stop`); `nags` treats
+`go ponder` as a normal search.
 
 UCI options:
 
@@ -80,6 +83,8 @@ UCI options:
 | `Threads` (default 1) | `nags_enhanced` | Lazy SMP search threads |
 | `Clear Hash` | `nags`, `nags_enhanced` | Empty the transposition table |
 | `Move Overhead` (ms, default 50) | all | Time kept in reserve per move for GUI/network lag |
+| `MultiPV` (default 1) | `nags_basic`, `nags_fast`, `nags_enhanced` | Number of best lines to report |
+| `Ponder` | `nags_basic`, `nags_fast`, `nags_enhanced` | Lets the GUI know it may ponder |
 | `UseNN`, `NNHost`, `NNPort` | `nags` | Use `rpc_server.py` for MCTS priors/values (default `127.0.0.1:5555`) |
 | `UseMetaLearner`, `MetaHost`, `MetaPort` | `nags` | Ask `meta_learner.py` for per-move deltas (default `127.0.0.1:5556`) |
 | `MetaExploration` (0-100) | `nags` | Gaussian noise (std = value/100) added to the deltas; used in self-play |

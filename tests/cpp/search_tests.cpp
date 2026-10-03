@@ -7,10 +7,13 @@
 #include "Uci.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <random>
+#include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 
 static int failures = 0;
 
@@ -204,6 +207,84 @@ static void testThreadsAndStop() {
     CHECK(legal, "stopped search returned an illegal move %s", moveToUciString(r.bestMove).c_str());
 }
 
+static void testMultiPv() {
+    TranspositionTable tt(16);
+    FastBoard b;
+    b.setFromFEN("r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 2 3");
+    Searcher<FastBoard> s(&tt);
+    s.setMultiPv(3);
+    SearchLimits limits;
+    limits.depth = 5;
+    std::atomic<bool> stop{false};
+    std::vector<SearchInfo> last;
+    SearchResult r = s.search(b, limits, stop, [&](const SearchInfo &info) {
+        if (info.multiPv == 1) last.clear();
+        last.push_back(info);
+    });
+    CHECK(last.size() == 3, "expected 3 lines at the last depth, got %zu", last.size());
+    std::set<std::string> firstMoves;
+    for (size_t k = 0; k < last.size(); ++k) {
+        CHECK(last[k].multiPv == static_cast<int>(k) + 1 && last[k].depth == 5, "line %zu: multipv %d depth %d", k, last[k].multiPv, last[k].depth);
+        CHECK(k == 0 || last[k].score <= last[k - 1].score, "lines not sorted by score");
+        if (!last[k].pv.empty()) firstMoves.insert(moveToUciString(last[k].pv[0]));
+    }
+    CHECK(firstMoves.size() == last.size(), "MultiPV lines start with the same move");
+    CHECK(!last.empty() && moveToUciString(r.bestMove) == "f3f7" && last[0].score == MATE_SCORE - 1,
+          "MultiPV best line should be the mate in 1, got %s", moveToUciString(r.bestMove).c_str());
+
+    // Fewer legal moves than lines: one line per move.
+    b.setFromFEN("7k/8/8/8/8/8/8/K7 w - - 0 1");
+    last.clear();
+    s.setMultiPv(10);
+    s.search(b, limits, stop, [&](const SearchInfo &info) {
+        if (info.multiPv == 1) last.clear();
+        last.push_back(info);
+    });
+    CHECK(last.size() == 3, "K vs K corner king has 3 moves, got %zu lines", last.size());
+}
+
+// "go ponder": no bestmove while pondering, however long the search runs past
+// its time limit; after ponderhit the time limit applies from that moment.
+static void testPonder() {
+    TranspositionTable tt(16);
+    Searcher<FastBoard> s(&tt);
+    FastBoard b;
+    SearchLimits limits;
+    limits.softMs = 30;
+    limits.hardMs = 60;
+    std::atomic<bool> stop{false}, ponder{true}, done{false};
+    SearchResult r;
+    std::thread t([&] {
+        r = s.search(b, limits, stop, nullptr, &ponder);
+        done = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(!done, "search returned while pondering");
+    auto hit = std::chrono::steady_clock::now();
+    ponder = false;
+    while (!done && std::chrono::steady_clock::now() - hit < std::chrono::seconds(5))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - hit).count();
+    CHECK(done && ms < 1000, "search did not finish within the time limit after ponderhit (%lld ms)", (long long)ms);
+    if (!done) stop = true;
+    t.join();
+    CHECK(!r.bestMove.isNull() && r.depth > 1, "ponder search returned no move or depth %d", r.depth);
+
+    // A ponder miss: "stop" ends the search at once.
+    ponder = true;
+    done = false;
+    stop = false;
+    std::thread t2([&] {
+        r = s.search(b, limits, stop, nullptr, &ponder);
+        done = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK(!done, "search returned while pondering");
+    stop = true;
+    t2.join();
+    CHECK(!r.bestMove.isNull(), "stopped ponder search returned no move");
+}
+
 int main() {
     testEvalOrientation();
     testEvalSymmetry();
@@ -213,6 +294,8 @@ int main() {
     testSearch<Board>(nullptr, "Board/noTT");
     testSearch<FastBoard>(&tt, "FastBoard/TT");
     testThreadsAndStop();
+    testMultiPv();
+    testPonder();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;

@@ -34,6 +34,8 @@ public:
             lines.push_back("option name Clear Hash type button");
         }
         lines.push_back("option name Move Overhead type spin default 50 min 0 max 5000");
+        lines.push_back("option name MultiPV type spin default 1 min 1 max 256");
+        lines.push_back("option name Ponder type check default false");
         return lines;
     }
 
@@ -62,6 +64,17 @@ public:
             moveOverheadMs = std::clamp<long long>(v, 0, 5000);
             return true;
         }
+        if (optName == "MultiPV") {
+            if (!uci::parseInt(value, v)) { message = "invalid MultiPV value '" + value + "'"; return false; }
+            searcher.setMultiPv(static_cast<int>(std::clamp<long long>(v, 1, 256)));
+            return true;
+        }
+        if (optName == "Ponder") {
+            // Only tells the engine the GUI may ponder; "go ponder" works either way.
+            bool b = false;
+            if (!uci::parseBool(value, b)) { message = "invalid Ponder value '" + value + "'"; return false; }
+            return true;
+        }
         return false;
     }
 
@@ -87,12 +100,11 @@ public:
         return true;
     }
 
-    void go(const uci::GoParams &params, const std::atomic<bool> &stop) override {
+    void go(const uci::GoParams &params, const std::atomic<bool> &stop, const std::atomic<bool> &ponder) override {
         BoardT root = board;
         SearchLimits limits = uci::computeLimits(params, root.sideToMove() == Color::White, moveOverheadMs);
-        SearchResult result = searcher.search(root, limits, stop, [](const SearchInfo &info) {
-            uci::send(uci::formatInfo(info));
-        });
+        SearchResult result = searcher.search(
+            root, limits, stop, [](const SearchInfo &info) { uci::send(uci::formatInfo(info)); }, &ponder);
         uci::send(uci::bestMoveLine(result.bestMove, result.ponderMove));
     }
 
@@ -106,7 +118,9 @@ public:
     void bench(int depth) override {
         if (depth <= 0) depth = defaultBenchDepth;
         int threads = searcher.threadCount();
+        int lines = searcher.multiPvCount();
         searcher.setThreads(1); // helper threads would make the node count nondeterministic
+        searcher.setMultiPv(1);
         newGame();
         const auto &fens = bench::positions();
         uint64_t total = 0;
@@ -125,6 +139,7 @@ public:
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
         for (const auto &line : bench::summary(total, ms)) uci::send(line);
         searcher.setThreads(threads);
+        searcher.setMultiPv(lines);
         newGame();
     }
 

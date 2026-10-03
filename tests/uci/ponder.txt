@@ -1,0 +1,4 @@
+setoption name Ponder value true
+position startpos moves e2e4
+go ponder wtime 2000 btime 2000
+ponderhit

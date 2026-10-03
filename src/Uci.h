@@ -27,6 +27,7 @@ struct GoParams {
     uint64_t nodes = 0;
     int perft = 0;
     bool infinite = false;
+    bool ponder = false; // "go ponder": the clock starts at ponderhit
 };
 
 // Returns false (with a message) on malformed numbers.
@@ -54,7 +55,9 @@ public:
     // fen empty means the start position. On error the previous position is kept.
     virtual bool setPosition(const std::string &fen, const std::vector<std::string> &moves, std::string &error) = 0;
     // Runs on the worker thread and must finish by printing "bestmove".
-    virtual void go(const GoParams &params, const std::atomic<bool> &stop) = 0;
+    // `ponder` is set during "go ponder" until "ponderhit"; engines that
+    // support pondering hold bestmove while it is set (as for "infinite").
+    virtual void go(const GoParams &params, const std::atomic<bool> &stop, const std::atomic<bool> &ponder) = 0;
     virtual uint64_t perft(int depth) = 0;
     virtual std::string fen() const = 0;
     // Searches the bench positions single-threaded to `depth` (0 = engine

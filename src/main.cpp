@@ -103,7 +103,8 @@ public:
         return true;
     }
 
-    void go(const uci::GoParams &params, const std::atomic<bool> &stop) override {
+    // Pondering is not supported (no Ponder option); "go ponder" searches normally.
+    void go(const uci::GoParams &params, const std::atomic<bool> &stop, const std::atomic<bool> &) override {
         Board root = board; // the search never touches the engine's own board
         bool white = root.sideToMove() == Color::White;
         SearchLimits limits = uci::computeLimits(params, white, moveOverheadMs);

@@ -4,7 +4,8 @@
 // the board type (Board or FastBoard). Features: principal variation search,
 // aspiration windows, check extension, late-move reductions, killer/history
 // move ordering, quiescence search (with check evasions), repetition /
-// fifty-move draws, optional transposition table and Lazy SMP helper threads.
+// fifty-move draws, optional transposition table and Lazy SMP helper threads,
+// MultiPV and pondering.
 //
 // Searcher drives a whole UCI "go"; SearchWorker can also be driven one
 // iteration at a time (the NAGS hybrid controller does this for its DFS arm).
@@ -20,6 +21,7 @@
 #include <cstdlib>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -39,6 +41,7 @@ struct SearchInfo {
     uint64_t nodes = 0;
     int64_t timeMs = 0;
     int hashfull = 0;
+    int multiPv = 0; // line number (1 = best) when MultiPV > 1, otherwise 0
     std::vector<Move> pv;
 };
 
@@ -59,27 +62,44 @@ inline std::string formatScore(int score) {
 }
 
 // Shared stop/limit state for one search.
+//
+// Pondering: while the GUI's ponder flag is set, time limits are ignored. The
+// first check that sees the flag cleared (ponderhit) restarts the clock, so
+// the time limits count from the ponderhit.
 class SearchControl {
 public:
     using Clock = std::chrono::steady_clock;
 
-    void begin(const SearchLimits &l, const std::atomic<bool> *externalStop) {
+    void begin(const SearchLimits &l, const std::atomic<bool> *externalStop,
+               const std::atomic<bool> *ponderFlag = nullptr) {
         limits = l;
         external = externalStop;
-        start = Clock::now();
+        ponder = ponderFlag;
+        startNs.store(nowNs(), std::memory_order_relaxed);
         stop.store(false, std::memory_order_relaxed);
         nodes.store(0, std::memory_order_relaxed);
+        ponderActive.store(ponder && ponder->load(std::memory_order_acquire), std::memory_order_release);
     }
 
-    int64_t elapsedMs() const {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
+    int64_t elapsedMs() const { return (nowNs() - startNs.load(std::memory_order_relaxed)) / 1000000; }
+
+    // True while pondering. Restarts the clock at the ponderhit.
+    bool pondering() {
+        if (!ponderActive.load(std::memory_order_acquire)) return false;
+        if (ponder->load(std::memory_order_acquire)) return true;
+        std::lock_guard<std::mutex> lock(ponderMutex);
+        if (ponderActive.load(std::memory_order_relaxed)) {
+            startNs.store(nowNs(), std::memory_order_relaxed);
+            ponderActive.store(false, std::memory_order_release);
+        }
+        return false;
     }
 
     // Polled periodically by the workers; latches `stop`.
     bool poll() {
         if (stop.load(std::memory_order_relaxed)) return true;
         bool s = (external && external->load(std::memory_order_relaxed)) ||
-                 (limits.hardMs > 0 && elapsedMs() >= limits.hardMs) ||
+                 (limits.hardMs > 0 && !pondering() && elapsedMs() >= limits.hardMs) ||
                  (limits.nodes > 0 && nodes.load(std::memory_order_relaxed) >= limits.nodes);
         if (s) stop.store(true, std::memory_order_relaxed);
         return s;
@@ -87,13 +107,27 @@ public:
 
     bool externallyStopped() const { return external && external->load(std::memory_order_relaxed); }
 
+    // UCI: bestmove must not be sent during an infinite search or while
+    // pondering until "stop" (or "ponderhit").
+    void holdBestMove() {
+        while ((limits.infinite || pondering()) && !externallyStopped())
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
     SearchLimits limits;
     std::atomic<bool> stop{false};
     std::atomic<uint64_t> nodes{0};
-    Clock::time_point start;
 
 private:
+    static int64_t nowNs() {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+    }
+
     const std::atomic<bool> *external = nullptr;
+    const std::atomic<bool> *ponder = nullptr;
+    std::atomic<int64_t> startNs{0};
+    std::atomic<bool> ponderActive{false};
+    std::mutex ponderMutex;
 };
 
 struct IterationResult {
@@ -101,6 +135,13 @@ struct IterationResult {
     int score = 0;
     std::vector<Move> pv;
     bool improved = false; // an aborted iteration still found a reliably better root move
+};
+
+// One MultiPV line.
+struct RootLine {
+    Move move;
+    int score = 0;
+    std::vector<Move> pv;
 };
 
 template <class BoardT>
@@ -169,6 +210,25 @@ public:
         }
     }
 
+    // MultiPV: finds the best `count` root moves one after another, each with
+    // a full-window search over the moves not chosen yet. Lines come back best
+    // first, and the root moves are reordered to match. Returns false if
+    // aborted.
+    bool iterateLines(int depth, int count, std::vector<RootLine> &lines) {
+        lines.clear();
+        count = std::min(count, static_cast<int>(rootMoves.size()));
+        for (int k = 0; k < count; ++k) {
+            IterationResult attempt;
+            int score = rootSearch(depth, -INF_SCORE, INF_SCORE, attempt, static_cast<size_t>(k));
+            if (aborted) return false;
+            lines.push_back({attempt.bestMove, score, attempt.pv});
+            moveRootMove(attempt.bestMove, static_cast<size_t>(k));
+        }
+        std::stable_sort(lines.begin(), lines.end(), [](const RootLine &a, const RootLine &b) { return a.score > b.score; });
+        for (int k = 0; k < count; ++k) moveRootMove(lines[k].move, static_cast<size_t>(k));
+        return true;
+    }
+
     // Score of `m` from the root side's view, searched to depth-1 after the
     // move with a full window. Used to verify a candidate from another source.
     // Returns false if aborted.
@@ -204,6 +264,13 @@ private:
     uint64_t unflushed = 0;
     int selDepth = 0;
     bool aborted = false;
+
+    // Moves `m` to position `pos` of the root move list, shifting the moves
+    // in between down by one.
+    void moveRootMove(const Move &m, size_t pos) {
+        auto it = std::find_if(rootMoves.begin() + pos, rootMoves.end(), [&](const Move &x) { return sameMove(x, m); });
+        if (it != rootMoves.end()) std::rotate(rootMoves.begin() + pos, it, it + 1);
+    }
 
     bool checkStop() {
         if (aborted) return true;
@@ -273,15 +340,16 @@ private:
         pvLength[ply] = std::max(childLen, ply + 1);
     }
 
-    int rootSearch(int depth, int alpha, int beta, IterationResult &out) {
+    // Searches root moves [first, end) (MultiPV skips the lines already found).
+    int rootSearch(int depth, int alpha, int beta, IterationResult &out, size_t first = 0) {
         pvLength[0] = 0;
         int bestScore = -INF_SCORE;
         int originalAlpha = alpha;
-        for (size_t i = 0; i < rootMoves.size(); ++i) {
+        for (size_t i = first; i < rootMoves.size(); ++i) {
             const Move m = rootMoves[i];
             board.makeMove(m);
             int score;
-            if (i == 0) {
+            if (i == first) {
                 score = -negamax(depth - 1, -beta, -alpha, 1, true);
             } else {
                 score = -negamax(depth - 1, -alpha - 1, -alpha, 1, false);
@@ -306,8 +374,8 @@ private:
         }
         if (out.bestMove.isNull()) {
             // Fail low: everything scored at or below alpha.
-            out.bestMove = rootMoves.front();
-            out.pv = {rootMoves.front()};
+            out.bestMove = rootMoves[first];
+            out.pv = {rootMoves[first]};
             out.score = bestScore;
             out.improved = false;
         }
@@ -507,13 +575,20 @@ public:
     }
     int threadCount() const { return static_cast<int>(workers.size()); }
 
+    // Number of best lines reported (UCI MultiPV).
+    void setMultiPv(int n) { multiPv = std::max(1, n); }
+    int multiPvCount() const { return multiPv; }
+
     void clearHistory() {
         for (auto &w : workers) w->clearHistory();
     }
 
+    // ponderFlag: set by the GUI during "go ponder" and cleared at ponderhit
+    // (may be null).
     SearchResult search(const BoardT &root, const SearchLimits &limits, const std::atomic<bool> &externalStop,
-                        const std::function<void(const SearchInfo &)> &onInfo) {
-        control.begin(limits, &externalStop);
+                        const std::function<void(const SearchInfo &)> &onInfo,
+                        const std::atomic<bool> *ponderFlag = nullptr) {
+        control.begin(limits, &externalStop, ponderFlag);
         if (tt) tt->newSearch();
         for (auto &w : workers) w->setRoot(root);
 
@@ -521,7 +596,7 @@ public:
         SearchResult result;
         const auto &rootMoves = main.legalRootMoves();
         if (rootMoves.empty()) {
-            waitIfInfinite(limits, externalStop);
+            control.holdBestMove();
             return result; // checkmate or stalemate: bestmove 0000
         }
         result.bestMove = rootMoves.front(); // always have a legal move to play
@@ -541,30 +616,48 @@ public:
             });
         }
 
+        auto report = [&](int depth, int score, const std::vector<Move> &pv, int line) {
+            if (!onInfo) return;
+            main.flushNodes();
+            SearchInfo info;
+            info.depth = depth;
+            info.selDepth = main.selectiveDepth();
+            info.score = score;
+            info.nodes = control.nodes.load(std::memory_order_relaxed);
+            info.timeMs = control.elapsedMs();
+            info.hashfull = tt ? tt->hashfull() : 0;
+            info.multiPv = line;
+            info.pv = pv;
+            onInfo(info);
+        };
+
+        const bool multi = multiPv > 1 && rootMoves.size() > 1;
         int maxDepth = limits.depth > 0 ? std::min(limits.depth, MAX_PLY - 8) : MAX_PLY - 8;
         int prevScore = 0;
         for (int depth = 1; depth <= maxDepth; ++depth) {
             IterationResult r;
-            bool completed = main.iterate(depth, prevScore, r);
-            if (!completed) {
-                if (r.improved && !r.bestMove.isNull()) {
-                    // A root move was fully searched in the interrupted
-                    // iteration and beat the previous best: report and use it.
-                    result.bestMove = r.bestMove;
-                    result.pv = r.pv;
-                    result.score = r.score;
-                    main.flushNodes();
-                    SearchInfo info;
-                    info.depth = depth;
-                    info.selDepth = main.selectiveDepth();
-                    info.score = r.score;
-                    info.nodes = control.nodes.load(std::memory_order_relaxed);
-                    info.timeMs = control.elapsedMs();
-                    info.hashfull = tt ? tt->hashfull() : 0;
-                    info.pv = r.pv;
-                    if (onInfo) onInfo(info);
+            if (multi) {
+                std::vector<RootLine> lines;
+                if (!main.iterateLines(depth, multiPv, lines)) break; // keep the last complete iteration
+                r.bestMove = lines[0].move;
+                r.score = lines[0].score;
+                r.pv = lines[0].pv;
+                for (size_t k = 0; k < lines.size(); ++k)
+                    report(depth, lines[k].score, lines[k].pv, static_cast<int>(k) + 1);
+            } else {
+                bool completed = main.iterate(depth, prevScore, r);
+                if (!completed) {
+                    if (r.improved && !r.bestMove.isNull()) {
+                        // A root move was fully searched in the interrupted
+                        // iteration and beat the previous best: report and use it.
+                        result.bestMove = r.bestMove;
+                        result.pv = r.pv;
+                        result.score = r.score;
+                        report(depth, r.score, r.pv, 0);
+                    }
+                    break;
                 }
-                break;
+                report(depth, r.score, r.pv, 0);
             }
             prevScore = r.score;
             result.bestMove = r.bestMove;
@@ -572,26 +665,16 @@ public:
             result.depth = depth;
             result.pv = r.pv;
 
-            main.flushNodes();
-            SearchInfo info;
-            info.depth = depth;
-            info.selDepth = main.selectiveDepth();
-            info.score = r.score;
-            info.nodes = control.nodes.load(std::memory_order_relaxed);
-            info.timeMs = control.elapsedMs();
-            info.hashfull = tt ? tt->hashfull() : 0;
-            info.pv = r.pv;
-            if (onInfo) onInfo(info);
-
             if (control.stop.load(std::memory_order_relaxed)) break;
             if (!limits.infinite) {
                 if (rootMoves.size() == 1 && (limits.softMs > 0 || limits.hardMs > 0)) break; // forced move
-                if (limits.softMs > 0 && control.elapsedMs() >= limits.softMs) break;         // next depth won't fit
+                if (limits.softMs > 0 && !control.pondering() && control.elapsedMs() >= limits.softMs)
+                    break; // next depth won't fit
                 if (std::abs(r.score) >= MATE_BOUND && depth >= (MATE_SCORE - std::abs(r.score)) + 4) break;
             }
         }
 
-        waitIfInfinite(limits, externalStop);
+        control.holdBestMove();
         control.stop.store(true, std::memory_order_relaxed);
         for (auto &t : helpers) t.join();
         main.flushNodes();
@@ -604,10 +687,5 @@ private:
     TranspositionTable *tt;
     SearchControl control;
     std::vector<std::unique_ptr<SearchWorker<BoardT>>> workers;
-
-    // UCI: in infinite mode bestmove must not be sent before "stop".
-    static void waitIfInfinite(const SearchLimits &limits, const std::atomic<bool> &externalStop) {
-        while (limits.infinite && !externalStop.load(std::memory_order_relaxed))
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
+    int multiPv = 1;
 };

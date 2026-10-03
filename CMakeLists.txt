@@ -89,6 +89,10 @@ if(NAGS_BUILD_TESTS)
     nags_uci_test(${engine}_movetime ${engine} movetime.txt "bestmove [a-h][1-8][a-h][1-8]")
   endforeach()
   nags_uci_test(nags_enhanced_threads nags_enhanced threads.txt "Threads set to 4.*bestmove [a-h][1-8][a-h][1-8]")
+  foreach(engine nags_basic nags_fast nags_enhanced)
+    nags_uci_test(${engine}_multipv ${engine} multipv.txt "depth 5 [^ ]+ [^ ]+ multipv 3 .*bestmove")
+    nags_uci_test(${engine}_ponder ${engine} ponder.txt "bestmove [a-h][78][a-h][56]")
+  endforeach()
 
   # The bench node count is the search fingerprint: it must be reproducible.
   foreach(engine nags_basic nags_fast nags_enhanced nags)

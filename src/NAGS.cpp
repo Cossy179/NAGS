@@ -301,15 +301,11 @@ NagsResult NAGSController::search(const Board &root, const SearchLimits &limits,
     control.begin(limits, &stop);
     tt.newSearch();
     infoCallback = onInfo;
-    auto waitIfInfinite = [&] {
-        while (limits.infinite && !stop.load(std::memory_order_relaxed))
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    };
 
     dfs->setRoot(root);
     const std::vector<Move> legal = dfs->legalRootMoves();
     if (legal.empty()) {
-        waitIfInfinite();
+        control.holdBestMove();
         return result; // checkmate or stalemate: bestmove 0000
     }
 
@@ -439,7 +435,7 @@ NagsResult NAGSController::search(const Board &root, const SearchLimits &limits,
         onString(m.str());
     }
 
-    waitIfInfinite();
+    control.holdBestMove();
     mctsRoot.reset();
     infoCallback = nullptr;
     return result;

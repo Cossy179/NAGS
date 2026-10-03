@@ -63,7 +63,7 @@ bool parseGo(const std::vector<std::string> &tokens, GoParams &out, std::string 
         const std::string &t = tokens[i];
         long long v = 0;
         if (t == "infinite") { out.infinite = true; anyLimit = true; continue; }
-        if (t == "ponder") { continue; } // pondering is not supported; treated as a normal search
+        if (t == "ponder") { out.ponder = true; continue; }
         if (t == "searchmoves") { break; } // not supported; ignore the move list
         if (!number(i, v)) return false;
         if (t == "wtime") { out.wtime = std::max<long long>(0, v); anyLimit = true; }
@@ -122,8 +122,9 @@ SearchLimits computeLimits(const GoParams &go, bool whiteToMove, int64_t overhea
 std::string formatInfo(const SearchInfo &info) {
     std::ostringstream oss;
     uint64_t nps = info.timeMs > 0 ? info.nodes * 1000 / static_cast<uint64_t>(info.timeMs) : info.nodes;
-    oss << "info depth " << info.depth << " seldepth " << std::max(info.selDepth, info.depth)
-        << " score " << formatScore(info.score) << " nodes " << info.nodes << " nps " << nps
+    oss << "info depth " << info.depth << " seldepth " << std::max(info.selDepth, info.depth);
+    if (info.multiPv > 0) oss << " multipv " << info.multiPv;
+    oss << " score " << formatScore(info.score) << " nodes " << info.nodes << " nps " << nps
         << " hashfull " << info.hashfull << " time " << info.timeMs;
     if (!info.pv.empty()) {
         oss << " pv";
@@ -159,6 +160,7 @@ int run(Engine &engine, int argc, char **argv) {
 
     std::thread worker;
     std::atomic<bool> stopFlag{false};
+    std::atomic<bool> ponderFlag{false};
     bool currentInfinite = false;
 
     auto waitForSearch = [&] {
@@ -242,12 +244,14 @@ int run(Engine &engine, int argc, char **argv) {
                 continue;
             }
             stopFlag.store(false);
+            ponderFlag.store(params.ponder);
             currentInfinite = params.infinite;
-            worker = std::thread([&engine, params, &stopFlag] { engine.go(params, stopFlag); });
+            worker = std::thread([&engine, params, &stopFlag, &ponderFlag] { engine.go(params, stopFlag, ponderFlag); });
         } else if (cmd == "stop") {
             stopSearch();
         } else if (cmd == "ponderhit") {
-            // Pondering is not supported; nothing to do.
+            // The predicted move was played: the search continues on the clock.
+            ponderFlag.store(false);
         } else if (cmd == "quit") {
             stopSearch();
             return 0;
@@ -263,8 +267,8 @@ int run(Engine &engine, int argc, char **argv) {
         }
     }
     // End of input: let a finite search finish so piped scripts get their
-    // bestmove; an infinite one can never finish, so stop it.
-    if (currentInfinite) stopFlag.store(true);
+    // bestmove; an infinite or pondering one would never finish, so stop it.
+    if (currentInfinite || ponderFlag.load()) stopFlag.store(true);
     waitForSearch();
     return 0;
 }
