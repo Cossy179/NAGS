@@ -96,6 +96,23 @@ A smaller version of this simulation runs in the test suite.
 | New feature / tweak | `--sprt 0 5` | accept only if likely to gain Elo |
 | Simplification / removal | `--sprt -5 0` | accept if it does not lose Elo |
 | Large expected gain (early development) | `--sprt 0 10` | faster decisions while gains are big |
+| Very large expected gain (e.g. a new subsystem) | `--sprt 0 30` | quick yes/no for big jumps |
+
+**Narrow bounds need many games, however lopsided the match.** H0 and H1
+differ by Δs in expected score (Δs ≈ 0.0072 for 5 Elo, 0.0144 for 10 Elo).
+Each game pair can raise the exact log-likelihood ratio by at most about
+2·Δs. So reaching the acceptance bound of 2.94 takes at least about
+2.94 / (2·Δs) pairs, even when one engine wins almost every game:
+
+| Bounds | Minimum games to accept H1 |
+|--------|----------------------------|
+| `[0, 5]` | ~410 |
+| `[0, 10]` | ~205 |
+| `[0, 30]` | ~70 |
+
+This is the test working correctly: a handful of games cannot distinguish
+"+0 Elo" from "+10 Elo". It is also why narrow bounds are reserved for
+small, mature changes, while early development uses wider ones.
 
 **Time controls.** Test at a short time control first (STC, e.g. `8+0.08`).
 For changes that pass STC and touch search scaling (pruning, extensions,
