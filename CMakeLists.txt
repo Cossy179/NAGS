@@ -37,6 +37,7 @@ endif()
 # Default NNUE network, compiled into the engines (see tools/nnue/train.py).
 # Without the file the engines use the hand-written evaluation.
 set(NAGS_NNUE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/nets/nags.nnue" CACHE FILEPATH "NNUE network to embed")
+set(NAGS_NNUE_HIDDEN 256 CACHE STRING "NNUE hidden layer size (must match the networks used)")
 set(NAGS_EMBEDDED_NET ${CMAKE_CURRENT_BINARY_DIR}/nnue_embedded.cpp)
 set(embed_depends ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_net.cmake)
 if(EXISTS "${NAGS_NNUE_FILE}")
@@ -62,6 +63,7 @@ add_library(nags_core STATIC
   src/MetaClient.cpp
 )
 target_include_directories(nags_core PUBLIC src)
+target_compile_definitions(nags_core PUBLIC NAGS_NNUE_HIDDEN=${NAGS_NNUE_HIDDEN})
 target_link_libraries(nags_core PUBLIC Threads::Threads PRIVATE fathom)
 if(WIN32)
   target_link_libraries(nags_core PUBLIC ws2_32)

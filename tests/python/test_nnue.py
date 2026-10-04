@@ -63,6 +63,18 @@ def test_train_and_export(tmp_path):
         assert abs(train.quantized_eval(net, fen) - cp) <= 2
 
 
+def test_resume_reproduces_a_full_run(tmp_path):
+    data = tmp_path / "d.txt"
+    _dataset(data)
+    common = ["--data", str(data), "--epochs", "4", "--hidden", "8", "--batch", "64", "--threads", "1"]
+    train.main(common + ["--out", str(tmp_path / "full.nnue")])
+    train.main(common + ["--out", str(tmp_path / "split.nnue"), "--stop-after", "2"])
+    train.main(common + ["--out", str(tmp_path / "split.nnue"), "--resume"])
+    assert (tmp_path / "full.nnue").read_bytes() == (tmp_path / "split.nnue").read_bytes()
+    with pytest.raises(SystemExit):  # a different schedule must not be resumed silently
+        train.main([a if a != "4" else "5" for a in common] + ["--out", str(tmp_path / "split.nnue"), "--resume"])
+
+
 def _engine():
     for c in (ROOT / "build" / "nags_enhanced", ROOT / "build" / "Release" / "nags_enhanced.exe"):
         if c.exists():

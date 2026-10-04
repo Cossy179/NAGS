@@ -17,8 +17,12 @@
 
 namespace nnue {
 
+#ifndef NAGS_NNUE_HIDDEN
+#define NAGS_NNUE_HIDDEN 256 // CMake option NAGS_NNUE_HIDDEN
+#endif
+
 constexpr int kFeatures = 768;
-constexpr int kHidden = 256;
+constexpr int kHidden = NAGS_NNUE_HIDDEN; // networks of another size are rejected when loaded
 constexpr int QA = 255, QB = 64, SCALE = 400;
 
 struct Network {

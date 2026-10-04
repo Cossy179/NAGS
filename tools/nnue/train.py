@@ -247,6 +247,10 @@ def main(argv=None):
     ap.add_argument("--val", type=float, default=0.01, help="fraction held out for validation")
     ap.add_argument("--threads", type=int, default=0)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--resume", action="store_true",
+                    help="continue from <out>.ckpt (saved after every epoch) with the same data and settings")
+    ap.add_argument("--stop-after", type=int, default=0,
+                    help="stop after this many epochs in this run (continue later with --resume)")
     args = ap.parse_args(argv)
 
     if args.threads:
@@ -268,7 +272,20 @@ def main(argv=None):
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     steps = args.epochs * math.ceil(len(train_idx) / args.batch)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, steps), eta_min=args.lr * 0.01)
-    for epoch in range(1, args.epochs + 1):
+    ckpt_path = args.out + ".ckpt"
+    first_epoch = 1
+    if args.resume and os.path.exists(ckpt_path):
+        ckpt = torch.load(ckpt_path, weights_only=False)
+        if ckpt["positions"] != n or ckpt["hidden"] != args.hidden or ckpt["epochs"] != args.epochs:
+            sys.exit(f"{ckpt_path} was made with different data, network size or --epochs")
+        model.load_state_dict(ckpt["model"])
+        opt.load_state_dict(ckpt["opt"])
+        sched.load_state_dict(ckpt["sched"])
+        rng.bit_generator.state = ckpt["rng"]
+        first_epoch = ckpt["epoch"] + 1
+        print(f"resuming after epoch {ckpt['epoch']}", flush=True)
+    last_epoch = args.epochs if not args.stop_after else min(args.epochs, first_epoch + args.stop_after - 1)
+    for epoch in range(first_epoch, last_epoch + 1):
         t = time.time()
         total, count = 0.0, 0
         for idx in batches(len(train_idx), args.batch, True, rng):
@@ -286,7 +303,12 @@ def main(argv=None):
             msg += f"  val {evaluate_loss(model, data, val_idx, args.lam):.6f}"
         print(f"{msg}  ({time.time() - t:.0f}s)", flush=True)
         export(model, args.out)
-    print(f"wrote {args.out}")
+        torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(),
+                    "rng": rng.bit_generator.state, "epoch": epoch, "positions": n, "hidden": args.hidden,
+                    "epochs": args.epochs},
+                   ckpt_path + ".tmp")
+        os.replace(ckpt_path + ".tmp", ckpt_path)
+    print(f"wrote {args.out}" + (f" (stopped after epoch {last_epoch} of {args.epochs})" if last_epoch < args.epochs else ""))
 
 
 if __name__ == "__main__":

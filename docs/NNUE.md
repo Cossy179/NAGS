@@ -44,7 +44,9 @@ The target is `λ·sigmoid(score/400) + (1 − λ)·result` for the side to move
 Training uses Adam with a cosine learning-rate schedule and holds out 1% of
 the positions for a validation loss. The network is exported after every
 epoch, quantized (feature weights × 255, output weights × 64), in the format
-described at the top of `train.py`.
+described at the top of `train.py`, and the training state is saved to
+`<out>.ckpt`, so an interrupted run continues with `--resume` (same data and
+settings).
 
 ## 3. Inference in the engine
 
@@ -58,6 +60,9 @@ code. With the test network, `bench` runs at about 0.8× the speed of the
 hand-written evaluation (portable build; about 0.5× before the accumulator
 stack and the AVX2 kernels).
 
+* The hidden layer size is fixed at compile time: CMake option
+  `NAGS_NNUE_HIDDEN` (default 256; train with the same `--hidden`). Networks
+  of another size are rejected when loaded.
 * The build embeds `nets/nags.nnue` (CMake option `NAGS_NNUE_FILE`), so
   `nags_fast` and `nags_enhanced` use NNUE by default. Without the file the
   engines use the hand-written evaluation.
