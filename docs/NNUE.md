@@ -61,20 +61,6 @@ stack and the AVX2 kernels).
 * The build embeds `nets/nags.nnue` (CMake option `NAGS_NNUE_FILE`), so
   `nags_fast` and `nags_enhanced` use NNUE by default. Without the file the
   engines use the hand-written evaluation.
-
-## Networks
-
-| Network | Data | Training | Result |
-|---------|------|----------|--------|
-| net 1 | 4.5M positions from 49,714 `nags_datagen` games (seed 1, 5000 nodes, engine at `efec5f8`) | 20 epochs, batch 16384, Adam 1e-3 cosine to 1e-5, λ = 0.75; validation loss 0.00646 | +143 ± 71 Elo at 20000 nodes, +103 ± 56 at 3+0.03 against the hand-written evaluation (`docs/TESTING.md`) |
-| net 2 | net 1's data plus 3.6M positions from 40,000 more games (seed 2): 8.1M positions | as net 1; validation loss 0.00643 | +29.9 ± 17.9 Elo against net 1 at 20000 nodes |
-| net 3 | net 2's data plus 8.0M positions from ~90,000 games played by the engine with net 1 (seed 3, engine at `20797e4`): 16.1M positions | as net 1, 4 threads; validation loss 0.00723 (not comparable: the validation set now includes the NNUE-engine positions) | +258 ± 51 Elo against net 2 and +354 ± 132 against the hand-written evaluation, both at 3+0.03 |
-
-| `nets/nags.nnue` (net 4b) | net 3's data plus 2.7M positions from the net-2 engine (seed 4) and 8.2M from the net-3 engine (seed 5): 26.9M positions | as net 1, 2 threads; validation loss 0.00780 | +92.3 ± 32.1 Elo against net 3 at 3+0.03; +15.7 ± 11.8 at 20000 nodes against net 4a, the same network trained without the 8.1M positions from the hand-written-evaluation engine |
-
-Labels from games played by NNUE engines gave the biggest gains: each round
-of data from the current network, then retraining, has added a lot. Keeping
-the older data (net 4b vs net 4a) also helped.
 * UCI options (`nags_fast`, `nags_enhanced`): `UseNNUE` (default true) and
   `EvalFile` (a network file, or `<embedded>`).
 * The UCI command `eval` prints the static evaluation of the current
@@ -85,3 +71,23 @@ random games, colour-mirrored positions evaluate the same, the search runs
 on a network) and `tests/python/test_nnue.py` (features, export, and exact
 agreement between the engine's `eval` and the trainer's integer reference
 `quantized_eval`).
+
+## Networks
+
+All networks so far use the architecture and training settings above (20
+epochs, batch 16384, Adam 1e-3 with a cosine schedule to 1e-5, λ = 0.75)
+and differ only in their data. Each was admitted by a match against the
+previous default (`docs/TESTING.md`).
+
+| Network | Data | Validation loss | Result |
+|---------|------|-----------------|--------|
+| 1 | 4.5M positions from 49,714 `nags_datagen` games by the hand-written-evaluation engine (seed 1, 5000 nodes, engine at `efec5f8`) | 0.00646 | +143 ± 71 Elo at 20000 nodes and +103 ± 56 at 3+0.03 against the hand-written evaluation |
+| 2 | network 1's data plus 3.6M positions from 40,000 more games (seed 2): 8.1M | 0.00643 | +29.9 ± 17.9 against network 1 at 20000 nodes |
+| 3 | network 2's data plus 8.0M positions from ~90,000 games by the network-1 engine (seed 3, engine at `20797e4`): 16.1M | 0.00723 | +258 ± 51 against network 2 and +354 ± 132 against the hand-written evaluation, both at 3+0.03 |
+| 4 (`nets/nags.nnue`) | network 3's data plus 2.7M positions from the network-2 engine (seed 4) and 8.2M from the network-3 engine (seed 5): 26.9M | 0.00780 | +92.3 ± 32.1 against network 3 at 3+0.03; +15.7 ± 11.8 at 20000 nodes against the same network trained without the 8.1M hand-written-evaluation-engine positions |
+
+Validation losses are not comparable across rows once NNUE-engine positions
+enter the validation set (from network 3 on). Labels from games played by
+NNUE engines gave the biggest gains: each round of data from the current
+network, then retraining, has added a lot, and keeping the older data
+helped as well.
