@@ -68,11 +68,13 @@ stack and the AVX2 kernels).
 |---------|------|----------|--------|
 | net 1 | 4.5M positions from 49,714 `nags_datagen` games (seed 1, 5000 nodes, engine at `efec5f8`) | 20 epochs, batch 16384, Adam 1e-3 cosine to 1e-5, λ = 0.75; validation loss 0.00646 | +143 ± 71 Elo at 20000 nodes, +103 ± 56 at 3+0.03 against the hand-written evaluation (`docs/TESTING.md`) |
 | net 2 | net 1's data plus 3.6M positions from 40,000 more games (seed 2): 8.1M positions | as net 1; validation loss 0.00643 | +29.9 ± 17.9 Elo against net 1 at 20000 nodes |
-| `nets/nags.nnue` (net 3) | net 2's data plus 8.0M positions from ~90,000 games played by the engine with net 1 (seed 3, engine at `20797e4`): 16.1M positions | as net 1, 4 threads; validation loss 0.00723 (not comparable: the validation set now includes the NNUE-engine positions) | +258 ± 51 Elo against net 2 and +354 ± 132 against the hand-written evaluation, both at 3+0.03 |
+| net 3 | net 2's data plus 8.0M positions from ~90,000 games played by the engine with net 1 (seed 3, engine at `20797e4`): 16.1M positions | as net 1, 4 threads; validation loss 0.00723 (not comparable: the validation set now includes the NNUE-engine positions) | +258 ± 51 Elo against net 2 and +354 ± 132 against the hand-written evaluation, both at 3+0.03 |
 
-Labels from games played by an NNUE engine were the biggest single gain so
-far: the usual next step is another round of data from the current network,
-then retraining.
+| `nets/nags.nnue` (net 4b) | net 3's data plus 2.7M positions from the net-2 engine (seed 4) and 8.2M from the net-3 engine (seed 5): 26.9M positions | as net 1, 2 threads; validation loss 0.00780 | +92.3 ± 32.1 Elo against net 3 at 3+0.03; +15.7 ± 11.8 at 20000 nodes against net 4a, the same network trained without the 8.1M positions from the hand-written-evaluation engine |
+
+Labels from games played by NNUE engines gave the biggest gains: each round
+of data from the current network, then retraining, has added a lot. Keeping
+the older data (net 4b vs net 4a) also helped.
 * UCI options (`nags_fast`, `nags_enhanced`): `UseNNUE` (default true) and
   `EvalFile` (a network file, or `<embedded>`).
 * The UCI command `eval` prints the static evaluation of the current

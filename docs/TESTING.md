@@ -50,8 +50,8 @@ of writing:
 | Engine | Bench nodes |
 |--------|-------------|
 | `nags_basic` | 2772872 |
-| `nags_fast` | 2896772 |
-| `nags_enhanced` | 5281653 |
+| `nags_fast` | 2860525 |
+| `nags_enhanced` | 5365610 |
 | `nags` | 2863059 |
 
 When search improvements make a run much faster, raise the depth (in the
@@ -234,6 +234,9 @@ in the Test column, with 3 games in parallel on a 4-core VM, openings from
 | Network 2 (8.1M positions) vs network 1; same architecture and speed, so a fixed-node match | SPRT [0, 10], 20000 nodes per move, 1 game at a time | H1 after 1234 games (+569 =202 -463) | +29.9 ± 17.9 | 7361021 |
 | Network 3 (16M positions: network 2's data plus 8.0M from games played by the network-1 engine) vs network 2 | SPRT [0, 10], 3+0.03 | H1 after 214 games (+157 =35 -22) | +258 ± 51 | 5281653 |
 | Network 3 vs the hand-written evaluation (consistency check) | SPRT [0, 30], 3+0.03 | H1 after 78 games (+66 =6 -6) | +354 ± 132 | – |
+| Network 4a (18.8M positions, NNUE-engine games only) vs network 3 | SPRT [0, 10], 20000 nodes, 2 at a time | H1 after 400 games (+204 =79 -117) | +76.8 ± 30.4 | – |
+| Network 4b (26.9M positions, all data) vs network 4a | SPRT [0, 10], 20000 nodes | H1 after 2592 games (+1124 =461 -1007) | +15.7 ± 11.8 | – |
+| Network 4b vs network 3 | SPRT [0, 10], 3+0.03 | H1 after 316 games (+156 =86 -74) | +92.3 ± 32.1 | 5365610 |
 
 Bench values before the singular-extension row are at the old default depth
 (`nags_enhanced` 7); from that row on they are at depth 10. With the network
