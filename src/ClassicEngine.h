@@ -184,7 +184,7 @@ public:
     // takes a few seconds).
     void setDefaultBenchDepth(int depth) { defaultBenchDepth = depth; }
 
-private:
+protected:
     static constexpr int kDefaultHashMB = 64;
     int defaultBenchDepth = 10;
     std::string engineName;

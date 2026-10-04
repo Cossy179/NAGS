@@ -38,7 +38,7 @@ void softmaxInPlace(std::vector<float> &x) {
 // --------------------------------------------------------------------------
 // Evaluators
 
-EvalResult HeuristicEvaluator::evaluate(Board &board, const std::vector<Move> &legal) {
+EvalResult HeuristicEvaluator::evaluate(FastBoard &board, const std::vector<Move> &legal) {
     EvalResult r;
     r.value = cpToValue(eval::quiescence(board, -INF_SCORE, INF_SCORE, 6));
     r.uncertainty = 0.0f;
@@ -74,7 +74,7 @@ void RpcEvaluator::configure(bool on, const std::string &h, int p) {
     port = p;
 }
 
-EvalResult RpcEvaluator::evaluate(Board &board, const std::vector<Move> &legal) {
+EvalResult RpcEvaluator::evaluate(FastBoard &board, const std::vector<Move> &legal) {
     usedNetwork = false;
     auto now = std::chrono::steady_clock::now();
     if (!enabled || now < retryAfter) return fallback.evaluate(board, legal);
@@ -115,47 +115,18 @@ EvalResult RpcEvaluator::evaluate(Board &board, const std::vector<Move> &legal) 
 }
 
 // --------------------------------------------------------------------------
-// Bandit
-
-void BayesianBandit::reset() {
-    for (auto &a : arms) a = ArmStats{};
-}
-
-SearchArm BayesianBandit::select(std::mt19937 &rng) {
-    auto sample = [&](const ArmStats &a) {
-        std::gamma_distribution<double> ga(a.alpha, 1.0), gb(a.beta, 1.0);
-        double x = ga(rng), y = gb(rng);
-        return x / (x + y);
-    };
-    return sample(arms[0]) >= sample(arms[1]) ? SearchArm::DFS : SearchArm::MCTS;
-}
-
-void BayesianBandit::update(SearchArm arm, bool success) {
-    constexpr double kDecay = 0.98;
-    ArmStats &a = arms[static_cast<int>(arm)];
-    a.alpha = 1.0 + (a.alpha - 1.0) * kDecay + (success ? 1.0 : 0.0);
-    a.beta = 1.0 + (a.beta - 1.0) * kDecay + (success ? 0.0 : 1.0);
-    ++a.pulls;
-    if (success) ++a.successes;
-}
-
-// --------------------------------------------------------------------------
 // Controller
 
-NAGSController::NAGSController(TranspositionTable &table)
-    : tt(table), dfs(std::make_unique<SearchWorker<Board>>(&table, &control)), network(heuristic),
-      rng(kSeed) {}
+NAGSController::NAGSController(Searcher<FastBoard> &s) : searcher(s), network(heuristic), rng(kSeed) {}
 
 void NAGSController::newGame() {
-    bandit.reset();
-    dfs->clearHistory();
     lastUncertainty = 0.1f;
     rng.seed(kSeed);
 }
 
-float NAGSController::tacticalRatio(const Board &root) const {
+float NAGSController::tacticalRatio(const FastBoard &root) const {
     // Share of legal moves that capture, promote or give check.
-    Board b = root;
+    FastBoard b = root;
     auto moves = b.generateLegalMoves();
     if (moves.empty()) return 0.0f;
     int tactical = 0;
@@ -166,42 +137,6 @@ float NAGSController::tacticalRatio(const Board &root) const {
         b.unmakeMove();
     }
     return static_cast<float>(tactical) / moves.size();
-}
-
-void NAGSController::reportDfs(int depth) {
-    if (!infoCallback) return;
-    dfs->flushNodes();
-    SearchInfo info;
-    info.depth = depth;
-    info.selDepth = dfs->selectiveDepth();
-    info.score = dfsScore;
-    info.nodes = control.nodes.load(std::memory_order_relaxed);
-    info.timeMs = control.elapsedMs();
-    info.hashfull = tt.hashfull();
-    info.pv = dfsPv;
-    infoCallback(info);
-}
-
-bool NAGSController::runDfsIteration() {
-    int depth = dfsDepth + 1;
-    dfs->preferRootMove(dfsBest);
-    IterationResult r;
-    bool completed = dfs->iterate(depth, dfsScore, r);
-    if (!completed) {
-        if (r.improved && !r.bestMove.isNull()) {
-            dfsBest = r.bestMove;
-            dfsScore = r.score;
-            dfsPv = r.pv;
-            reportDfs(depth);
-        }
-        return false;
-    }
-    dfsDepth = depth;
-    dfsBest = r.bestMove;
-    dfsScore = r.score;
-    dfsPv = r.pv;
-    reportDfs(depth);
-    return true;
 }
 
 void NAGSController::expand(MCTSNode *node, const std::vector<Move> &legal, const EvalResult &e) {
@@ -258,6 +193,7 @@ void NAGSController::simulate() {
             value = node->terminalValue;
         } else {
             EvalResult e = network.evaluate(mctsBoard, legal);
+            mctsUsedNetwork = mctsUsedNetwork || network.lastUsedNetwork();
             expand(node, legal, e);
             value = e.value;
         }
@@ -273,15 +209,10 @@ void NAGSController::simulate() {
     for (int i = 0; i < depth; ++i) mctsBoard.unmakeMove();
 }
 
-void NAGSController::runMctsBatch(int simulations, int64_t sliceMs) {
-    int64_t deadline = control.elapsedMs() + sliceMs;
-    for (int i = 0; i < simulations; ++i) {
-        if (control.stop.load(std::memory_order_relaxed) || control.poll()) return;
-        if (mctsNodes >= kMaxMctsNodes) return;
-        if (i > 0 && control.elapsedMs() >= deadline) return; // keep pulls short so DFS gets its turn
+void NAGSController::runMcts(long long budget, const std::atomic<bool> &stopMcts) {
+    while (mctsSims < budget && mctsNodes < kMaxMctsNodes && !stopMcts.load(std::memory_order_relaxed)) {
         simulate();
         ++mctsSims;
-        control.nodes.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -293,23 +224,13 @@ const MCTSNode *NAGSController::mostVisitedRootChild() const {
     return best;
 }
 
-NagsResult NAGSController::search(const Board &root, const SearchLimits &limits, int64_t timeLeftMs,
-                                  const std::atomic<bool> &stop,
+NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &limits, int64_t timeLeftMs,
+                                  const std::atomic<bool> &stop, const std::atomic<bool> *ponder,
                                   const std::function<void(const SearchInfo &)> &onInfo,
                                   const std::function<void(const std::string &)> &onString) {
     NagsResult result;
-    control.begin(limits, &stop);
-    tt.newSearch();
-    infoCallback = onInfo;
 
-    dfs->setRoot(root);
-    const std::vector<Move> legal = dfs->legalRootMoves();
-    if (legal.empty()) {
-        control.holdBestMove();
-        return result; // checkmate or stalemate: bestmove 0000
-    }
-
-    // ---- Meta-learner: per-move hyperparameter deltas -----------------------
+    // ---- Meta-learner: per-move deltas ----------------------------------------
     network.configure(config.useNN, config.nnHost, config.nnPort);
     meta.configure(config.metaHost, config.metaPort);
     std::string fen = root.getFEN();
@@ -323,107 +244,94 @@ NagsResult NAGSController::search(const Board &root, const SearchLimits &limits,
         deltas.mcts_budget_delta = std::clamp(deltas.mcts_budget_delta + noise(rng), -1.0f, 1.0f);
         deltas.bandit_exploration_delta = std::clamp(deltas.bandit_exploration_delta + noise(rng), -1.0f, 1.0f);
     }
-
-    int dfsCap = limits.depth > 0
-                     ? limits.depth
-                     : std::clamp(config.baseDfsDepth + static_cast<int>(std::lround(deltas.dfs_depth_delta * 4)), 4, MAX_PLY - 8);
     long long mctsBudget = std::clamp<long long>(config.baseMctsBudget + std::lround(deltas.mcts_budget_delta * 1000), 200, 20000);
-    if (limits.infinite) {
-        dfsCap = MAX_PLY - 8;
-        mctsBudget = std::numeric_limits<int>::max();
-    }
+    if (limits.infinite) mctsBudget = std::numeric_limits<int>::max();
     cpuct = std::clamp(config.baseExploration + deltas.bandit_exploration_delta * 0.5f, 0.5f, 2.5f);
 
-    // ---- Initial state: always finish a depth-1 alpha-beta search ----------
-    dfsDepth = 0;
-    dfsScore = 0;
-    dfsBest = legal.front();
-    dfsPv = {dfsBest};
+    // ---- MCTS arm: only with a live network (and not while pondering) -------
+    mctsRoot.reset();
+    mctsBoard = root;
     mctsSims = 0;
     mctsNodes = 1;
-    runDfsIteration();
-
-    mctsBoard = root;
-    mctsRoot = std::make_unique<MCTSNode>();
-    {
+    mctsUsedNetwork = false;
+    std::vector<Move> legal = mctsBoard.generateLegalMoves();
+    bool pondering = ponder && ponder->load();
+    bool runMctsArm = false;
+    if (!legal.empty() && legal.size() > 1 && !pondering && config.useNN) {
         EvalResult rootEval = network.evaluate(mctsBoard, legal);
-        expand(mctsRoot.get(), legal, rootEval);
         lastUncertainty = rootEval.uncertainty;
-    }
-    bool usedNetwork = network.lastUsedNetwork();
-
-    bool forced = legal.size() == 1 && (limits.softMs > 0 || limits.hardMs > 0);
-    int batch = static_cast<int>(std::clamp<long long>(mctsBudget / 20, 16, 400));
-    // Wall-clock cap per MCTS pull: network evaluations can take tens of ms each.
-    // Without a time limit (fixed depth / nodes) pulls are bounded by the
-    // simulation count only, which keeps such searches reproducible.
-    int64_t sliceMs = limits.softMs > 0 ? std::clamp<int64_t>(limits.softMs / 10, 10, 1000)
-                      : limits.infinite ? 100
-                                        : std::numeric_limits<int64_t>::max() / 4;
-
-    // ---- Main loop: the bandit allocates pulls between the two arms --------
-    while (!forced && !control.poll()) {
-        if (!limits.infinite && limits.softMs > 0 && control.elapsedMs() >= limits.softMs) break;
-        bool dfsDone = dfsDepth >= dfsCap || (std::abs(dfsScore) >= MATE_BOUND && dfsDepth >= MATE_SCORE - std::abs(dfsScore) + 4);
-        bool mctsDone = mctsSims >= mctsBudget || mctsNodes >= kMaxMctsNodes;
-        if (limits.depth > 0 && dfsDepth >= limits.depth) break;
-        if (dfsDone && mctsDone) break;
-
-        SearchArm arm = dfsDone ? SearchArm::MCTS : mctsDone ? SearchArm::DFS : bandit.select(rng);
-        bool success;
-        if (arm == SearchArm::DFS) {
-            Move before = dfsBest;
-            int scoreBefore = dfsScore;
-            bool completed = runDfsIteration();
-            success = !sameMove(before, dfsBest) || std::abs(dfsScore - scoreBefore) >= 30;
-            if (!completed) {
-                bandit.update(arm, success);
-                break;
-            }
-        } else {
-            const MCTSNode *topBefore = mostVisitedRootChild();
-            Move moveBefore = topBefore ? topBefore->move : Move{};
-            double qBefore = topBefore ? topBefore->q() : 0.0;
-            runMctsBatch(static_cast<int>(std::min<long long>(batch, mctsBudget - mctsSims)), sliceMs);
-            const MCTSNode *topAfter = mostVisitedRootChild();
-            success = topAfter && (!sameMove(moveBefore, topAfter->move) || std::abs(topAfter->q() - qBefore) >= 0.05);
-            usedNetwork = usedNetwork || network.lastUsedNetwork();
+        if (network.lastUsedNetwork()) {
+            mctsRoot = std::make_unique<MCTSNode>();
+            expand(mctsRoot.get(), legal, rootEval);
+            mctsUsedNetwork = true;
+            runMctsArm = true;
         }
-        bandit.update(arm, success);
     }
 
-    // ---- Final decision ------------------------------------------------------
-    // MCTS may only override alpha-beta when it is guided by the trained
-    // network; with the heuristic evaluator it has no knowledge the
-    // alpha-beta search lacks.
-    Move best = dfsBest;
-    std::string reason = "dfs";
+    // Keep part of the time for verifying an MCTS proposal.
+    // (0 means "no limit", so a positive limit stays at least 1 ms.)
+    SearchLimits abLimits = limits;
+    if (runMctsArm) {
+        if (limits.softMs > 0) abLimits.softMs = std::max<int64_t>(1, limits.softMs * 85 / 100);
+        if (limits.hardMs > 0) abLimits.hardMs = std::max<int64_t>(1, limits.hardMs * 85 / 100);
+    }
+    std::atomic<bool> stopMcts{false};
+    std::thread mctsThread;
+    if (runMctsArm) mctsThread = std::thread([this, mctsBudget, &stopMcts] { runMcts(mctsBudget, stopMcts); });
+
+    // ---- Alpha-beta arm: the full search -------------------------------------
+    auto start = std::chrono::steady_clock::now();
+    SearchResult ab = searcher.search(root, abLimits, stop, onInfo, ponder);
+    stopMcts = true;
+    if (mctsThread.joinable()) mctsThread.join();
+    uint64_t nodes = ab.nodes;
+
+    // ---- Final decision: MCTS proposes, alpha-beta verifies -----------------
+    Move best = ab.bestMove;
+    std::string reason = runMctsArm ? "alpha-beta" : "alpha-beta (no network: MCTS off)";
     const MCTSNode *top = mostVisitedRootChild();
-    if (usedNetwork && top && !sameMove(top->move, dfsBest) && dfsDepth >= 2 && mctsRoot->visits > 0 && top->visits >= 64 &&
-        top->visits * 2 >= mctsRoot->visits && !control.stop.load(std::memory_order_relaxed)) {
-        int verified = 0;
-        if (dfs->scoreRootMove(top->move, dfsDepth, verified) && verified >= dfsScore - 25) {
-            best = top->move;
-            reason = "mcts, verified " + formatScore(verified) + " vs " + formatScore(dfsScore);
-        } else {
-            reason = "dfs, mcts proposal rejected";
+    if (runMctsArm && mctsUsedNetwork && top && !sameMove(top->move, ab.bestMove) && ab.depth >= 2 &&
+        mctsRoot->visits > 0 && top->visits >= 64 && top->visits * 2 >= mctsRoot->visits &&
+        !stop.load(std::memory_order_relaxed)) {
+        int depth = std::clamp(ab.depth + static_cast<int>(std::lround(deltas.dfs_depth_delta)), 1, MAX_PLY - 8);
+        SearchLimits vLimits;
+        if (limits.hardMs > 0) {
+            auto used = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+            vLimits.hardMs = std::max<int64_t>(1, limits.hardMs - used);
         }
+        // Null-window test: is the proposal worth at least the alpha-beta
+        // score minus the margin? Much cheaper than scoring it exactly, and
+        // the main search's TT already holds most of its tree.
+        int threshold = ab.score - config.verifyMargin;
+        int verified = 0;
+        if (std::abs(ab.score) < MATE_BOUND &&
+            searcher.scoreRootMove(root, top->move, depth, vLimits, stop, verified, threshold - 1, threshold)) {
+            if (verified >= threshold) {
+                best = top->move;
+                reason = "mcts, verified >= " + formatScore(threshold) + " (alpha-beta " + formatScore(ab.score) + ")";
+            } else {
+                reason = "alpha-beta, mcts proposal rejected (< " + formatScore(threshold) + ")";
+            }
+        } else if (std::abs(ab.score) >= MATE_BOUND) {
+            reason = "alpha-beta (mate score: no override)";
+        } else {
+            reason = "alpha-beta, no time to verify the mcts proposal";
+        }
+        nodes += searcher.nodesSearched();
     }
 
     result.bestMove = best;
-    result.score = dfsScore;
-    dfs->flushNodes();
-    result.nodes = control.nodes.load(std::memory_order_relaxed);
-    if (sameMove(best, dfsBest) && dfsPv.size() >= 2) result.ponderMove = dfsPv[1];
+    result.score = ab.score;
+    result.nodes = nodes + static_cast<uint64_t>(mctsSims);
+    if (sameMove(best, ab.bestMove)) result.ponderMove = ab.ponderMove;
 
     if (onString) {
         std::ostringstream s;
-        s << "nags dfs_depth " << dfsDepth << " mcts_sims " << mctsSims;
+        s << "nags alpha_beta_depth " << ab.depth << " mcts_sims " << mctsSims;
         if (top) s << " mcts_top " << moveToUciString(top->move) << " visits " << top->visits << " q " << std::fixed
                    << std::setprecision(3) << top->q() << " (" << formatScore(valueToCp(top->q())) << ")";
-        s << " bandit dfs " << bandit.successes(SearchArm::DFS) << "/" << bandit.pulls(SearchArm::DFS) << " mcts "
-          << bandit.successes(SearchArm::MCTS) << "/" << bandit.pulls(SearchArm::MCTS) << " evaluator "
-          << (usedNetwork ? "network" : "heuristic") << " chose " << moveToUciString(best) << " (" << reason << ")";
+        s << " evaluator " << (mctsUsedNetwork ? "network" : "none") << " chose " << moveToUciString(best) << " ("
+          << reason << ")";
         onString(s.str());
 
         // Kept as the last info line so the training pipeline can pair the
@@ -434,9 +342,6 @@ NagsResult NAGSController::search(const Board &root, const SearchLimits &limits,
           << deltas.bandit_exploration_delta << " meta " << (metaUsed ? "on" : "off");
         onString(m.str());
     }
-
-    control.holdBestMove();
     mctsRoot.reset();
-    infoCallback = nullptr;
     return result;
 }

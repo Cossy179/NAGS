@@ -52,7 +52,7 @@ of writing:
 | `nags_basic` | 2772872 |
 | `nags_fast` | 2860525 |
 | `nags_enhanced` | 5365610 |
-| `nags` | 2863059 |
+| `nags` | 5365610 |
 
 When search improvements make a run much faster, raise the depth (in the
 engine's `main` file) and record the new fingerprints.
@@ -238,10 +238,21 @@ in the Test column, with 3 games in parallel on a 4-core VM, openings from
 | Network 4b (26.9M positions, all data) vs network 4a | SPRT [0, 10], 20000 nodes | H1 after 2592 games (+1124 =461 -1007) | +15.7 ± 11.8 | – |
 | Network 4b vs network 3 | SPRT [0, 10], 3+0.03 | H1 after 316 games (+156 =86 -74) | +92.3 ± 32.1 | 5365610 |
 
+`nags` benches like `nags_enhanced` (without the Python services the MCTS
+arm does not run); before `nags` was rebuilt on FastBoard (see below) its
+bench used the ray-based board and the hand-written evaluation.
+
 Bench values before the singular-extension row are at the old default depth
 (`nags_enhanced` 7); from that row on they are at depth 10. With the network
-embedded, `nags_fast` and `nags_enhanced` bench with NNUE; `nags_basic` and
-`nags` (ray-based Board) keep the hand-written evaluation.
+embedded, `nags_fast`, `nags_enhanced` and `nags` bench with NNUE;
+`nags_basic` (ray-based Board) keeps the hand-written evaluation.
+
+### The NAGS hybrid
+
+| Version | Match | Result |
+|---------|-------|--------|
+| Old controller (one thread shared by a bandit between alpha-beta and MCTS, ray-based board, hand-written evaluation; no Python services) vs `nags_enhanced` with network 4 | 60 games, 3+0.03 | +0 =2 -58 |
+| Rebuilt controller without services | `nags_equals_nags_enhanced` test | identical bench node count (5365610 at depth 10) |
 
 The reduction table alone was tested first, at 5+0.05, and stopped
 undecided at +21.2 ± 21.9 after 674 games (LLR 1.29); it was then tested

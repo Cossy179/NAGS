@@ -74,7 +74,8 @@ add_executable(nags_basic src/basic_main.cpp)
 add_executable(nags_fast src/fast_main.cpp)
 # FastBoard + shared transposition table + Lazy SMP threads.
 add_executable(nags_enhanced src/enhanced_main.cpp)
-# NAGS hybrid: alpha-beta + MCTS chosen by a bandit, GNN over RPC, meta-learner.
+# NAGS hybrid: nags_enhanced's alpha-beta plus a GNN-guided MCTS arm (over RPC)
+# whose proposals alpha-beta verifies; meta-learner adjusts it per move.
 add_executable(nags src/main.cpp src/NAGS.cpp)
 # Smoke test client for rpc_server.py.
 add_executable(rpc_client src/rpc_client.cpp)
@@ -135,6 +136,11 @@ if(NAGS_BUILD_TESTS)
     nags_uci_test(${engine}_multipv ${engine} multipv.txt "depth 5 [^ ]+ [^ ]+ multipv 3 .*bestmove")
     nags_uci_test(${engine}_ponder ${engine} ponder.txt "bestmove [a-h][78][a-h][56]")
   endforeach()
+
+  # Without its Python services, nags must search exactly like nags_enhanced.
+  add_test(NAME nags_equals_nags_enhanced
+    COMMAND ${CMAKE_COMMAND} -DENGINE=$<TARGET_FILE:nags> -DENGINE2=$<TARGET_FILE:nags_enhanced> -DDEPTH=6
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/uci/run_bench_equal.cmake)
 
   # The bench node count is the search fingerprint: it must be reproducible.
   foreach(engine nags_basic nags_fast nags_enhanced nags)

@@ -9,8 +9,8 @@ pipeline:
 
 | Component | What it is |
 |-----------|------------|
-| `nags` | Hybrid engine: alpha-beta and MCTS share the time via a Thompson-sampling bandit; MCTS uses the GNN (via `rpc_server.py`) when available; `meta_learner.py` adjusts search hyperparameters per move. |
-| `nags_enhanced` | Alpha-beta on magic bitboards with a shared transposition table and Lazy SMP threads. The strongest pure alpha-beta build. |
+| `nags` | Hybrid engine: `nags_enhanced`'s alpha-beta search, plus an MCTS arm guided by the GNN (via `rpc_server.py`) that runs in parallel and may replace the alpha-beta move after a verification search; `meta_learner.py` adjusts the hybrid per move. Without the services it plays exactly like `nags_enhanced`. |
+| `nags_enhanced` | Alpha-beta on magic bitboards with NNUE evaluation, a shared transposition table and Lazy SMP threads. The strongest pure alpha-beta build. |
 | `nags_fast` | Same search on magic bitboards, without a transposition table. |
 | `nags_basic` | Same search on the simpler ray-based board, without a transposition table. |
 | `rpc_client` | Smoke test for the GNN service. |
@@ -72,22 +72,22 @@ The search runs on its own thread, so `stop`, `isready` and `quit` are handled
 while it thinks. Supported `go` parameters: `wtime btime winc binc movestogo
 movetime depth nodes mate infinite ponder`, plus the non-standard `go perft N`
 (also `perft N`), `d` (print the FEN) and `eval` (static evaluation). The alpha-beta engines support
-pondering (`go ponder`, then `ponderhit` or `stop`); `nags` treats
-`go ponder` as a normal search.
+pondering (`go ponder`, then `ponderhit` or `stop`); `nags` ponders with its
+alpha-beta arm only.
 
 UCI options:
 
 | Option | Engines | Meaning |
 |--------|---------|---------|
 | `Hash` (MB, default 64) | `nags`, `nags_enhanced` | Transposition table size |
-| `Threads` (default 1) | `nags_enhanced` | Lazy SMP search threads |
+| `Threads` (default 1) | `nags`, `nags_enhanced` | Lazy SMP search threads |
 | `Clear Hash` | `nags`, `nags_enhanced` | Empty the transposition table |
 | `Move Overhead` (ms, default 50) | all | Time kept in reserve per move for GUI/network lag |
-| `MultiPV` (default 1) | `nags_basic`, `nags_fast`, `nags_enhanced` | Number of best lines to report |
-| `Ponder` | `nags_basic`, `nags_fast`, `nags_enhanced` | Lets the GUI know it may ponder |
+| `MultiPV` (default 1) | all | Number of best lines to report |
+| `Ponder` | all | Lets the GUI know it may ponder |
 | `SyzygyPath` | all | Directories with Syzygy tablebase files (`:`-separated, `;` on Windows) |
 | `SyzygyProbeLimit` (default 7) | all | Only probe positions with at most this many pieces |
-| `UseNNUE` (default true), `EvalFile` | `nags_fast`, `nags_enhanced` | NNUE evaluation (see `docs/NNUE.md`); the hand-written evaluation is used when no network is available |
+| `UseNNUE` (default true), `EvalFile` | `nags`, `nags_fast`, `nags_enhanced` | NNUE evaluation (see `docs/NNUE.md`); the hand-written evaluation is used when no network is available |
 | `UseNN`, `NNHost`, `NNPort` | `nags` | Use `rpc_server.py` for MCTS priors/values (default `127.0.0.1:5555`) |
 | `UseMetaLearner`, `MetaHost`, `MetaPort` | `nags` | Ask `meta_learner.py` for per-move deltas (default `127.0.0.1:5556`) |
 | `MetaExploration` (0-100) | `nags` | Gaussian noise (std = value/100) added to the deltas; used in self-play |
@@ -102,11 +102,11 @@ progress). `nags` probes inside its alpha-beta arm only. Probing uses
 <http://tablebase.sesse.net/syzygy/>; the tests use the 3-piece tables in
 `tests/data/syzygy`.
 
-`nags` works without the Python services: if they are not running it falls
-back (after a 150 ms connection attempt, retried at most once a minute) to a
-deterministic heuristic evaluator and default hyperparameters. MCTS is only
-allowed to override the alpha-beta move when the trained network is guiding
-it.
+`nags` works without the Python services: if the GNN service does not
+answer (a failed connection is retried at most once a minute) the MCTS arm
+does not run, and `nags` searches exactly like `nags_enhanced` (a test checks
+that their bench node counts are equal). Without the meta-learner it uses
+default hyperparameters.
 
 ## Python services
 

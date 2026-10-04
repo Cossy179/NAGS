@@ -1,25 +1,25 @@
 #pragma once
 
-// NAGS hybrid search controller.
+// NAGS hybrid search controller: "MCTS proposes, alpha-beta verifies".
 //
-// Two search "arms" share the thinking time:
-//   * DFS  - the shared alpha-beta SearchWorker, deepened one iteration per pull;
-//   * MCTS - PUCT tree search whose priors and leaf values come from an
-//            Evaluator (the GNN served by rpc_server.py when it is running,
-//            otherwise a deterministic material/PST + capture-search heuristic).
-// A Thompson-sampling bandit picks the arm for each pull. An arm "succeeds"
-// when the pull changed its recommendation (best move, or a significant value
-// shift) - i.e. it is still producing new information - so time flows to the
-// arm that is learning the most about the position.
+// Two search arms work on each move:
+//   * alpha-beta - the engine's full Searcher (the same search, NNUE
+//     evaluation, time management, threads and tablebases as nags_enhanced);
+//   * MCTS       - PUCT tree search whose priors and leaf values come from the
+//                  GNN served by rpc_server.py, on its own thread.
+// MCTS only runs when the GNN service answers: with the heuristic fallback
+// evaluator it has nothing the alpha-beta search lacks, so without the
+// service nags plays exactly like nags_enhanced.
 //
-// The meta-learner service (meta_learner.py) can adjust the DFS depth cap,
-// the MCTS simulation budget and the PUCT exploration constant per move.
+// Final move: the alpha-beta result, unless MCTS clearly prefers another
+// move and a verification search confirms that move is no worse.
 //
-// Final move: the deepest completed alpha-beta result, unless MCTS strongly
-// prefers another move and a verification search confirms that move is no
-// worse ("MCTS proposes, alpha-beta verifies").
+// The meta-learner service (meta_learner.py) adjusts, per move, the
+// verification depth (dfs_depth_delta), the MCTS simulation budget
+// (mcts_budget_delta) and the PUCT exploration constant
+// (bandit_exploration_delta; the name is kept for the service protocol).
 
-#include "Board.h"
+#include "FastBoard.h"
 #include "MetaClient.h"
 #include "Net.h"
 #include "Search.h"
@@ -33,8 +33,6 @@
 #include <string>
 #include <vector>
 
-enum class SearchArm : int { DFS = 0, MCTS = 1 };
-
 // Value in [-1, 1] from the side to move's point of view and one prior per
 // legal move (same order as the move list passed in, summing to 1).
 struct EvalResult {
@@ -46,12 +44,12 @@ struct EvalResult {
 class Evaluator {
 public:
     virtual ~Evaluator() = default;
-    virtual EvalResult evaluate(Board &board, const std::vector<Move> &legal) = 0;
+    virtual EvalResult evaluate(FastBoard &board, const std::vector<Move> &legal) = 0;
 };
 
 class HeuristicEvaluator : public Evaluator {
 public:
-    EvalResult evaluate(Board &board, const std::vector<Move> &legal) override;
+    EvalResult evaluate(FastBoard &board, const std::vector<Move> &legal) override;
 };
 
 // Queries rpc_server.py; falls back to the heuristic when the server is not
@@ -60,7 +58,7 @@ class RpcEvaluator : public Evaluator {
 public:
     explicit RpcEvaluator(Evaluator &fallback) : fallback(fallback) {}
     void configure(bool enabled, const std::string &host, int port);
-    EvalResult evaluate(Board &board, const std::vector<Move> &legal) override;
+    EvalResult evaluate(FastBoard &board, const std::vector<Move> &legal) override;
     bool lastUsedNetwork() const { return usedNetwork; }
 
 private:
@@ -71,25 +69,6 @@ private:
     LineSocket socket;
     std::chrono::steady_clock::time_point retryAfter{};
     bool usedNetwork = false;
-};
-
-class BayesianBandit {
-public:
-    BayesianBandit() { reset(); }
-    void reset();
-    SearchArm select(std::mt19937 &rng);
-    // Bernoulli update with mild forgetting so the bandit can adapt as the
-    // game changes character.
-    void update(SearchArm arm, bool success);
-    int pulls(SearchArm arm) const { return arms[static_cast<int>(arm)].pulls; }
-    int successes(SearchArm arm) const { return arms[static_cast<int>(arm)].successes; }
-
-private:
-    struct ArmStats {
-        double alpha = 1.0, beta = 1.0;
-        int pulls = 0, successes = 0;
-    };
-    ArmStats arms[2];
 };
 
 struct MCTSNode {
@@ -107,9 +86,9 @@ struct MCTSNode {
 };
 
 struct NagsSettings {
-    int baseDfsDepth = 10;
-    int baseMctsBudget = 2000;
-    float baseExploration = 1.4f;
+    int baseMctsBudget = 2000;    // MCTS simulations per move before meta-learner deltas
+    float baseExploration = 1.4f; // PUCT constant before meta-learner deltas
+    int verifyMargin = 25;        // an MCTS move may score this much below the alpha-beta move
 
     bool useMetaLearner = true;
     std::string metaHost = "127.0.0.1";
@@ -130,51 +109,44 @@ struct NagsResult {
 
 class NAGSController {
 public:
-    explicit NAGSController(TranspositionTable &tt);
+    // Uses (and shares the transposition table of) the engine's alpha-beta searcher.
+    explicit NAGSController(Searcher<FastBoard> &searcher);
 
-    // Resets the bandit, history tables and RNG; searches after newGame() are
-    // reproducible when they have no time limit (used by `bench`).
+    // Resets the RNG and the uncertainty carried between moves.
     void newGame();
     NagsSettings &settings() { return config; }
     const NagsSettings &settings() const { return config; }
 
     // timeLeftMs: our clock (or -1 if unknown); fed to the meta-learner.
-    NagsResult search(const Board &root, const SearchLimits &limits, int64_t timeLeftMs,
-                      const std::atomic<bool> &stop, const std::function<void(const SearchInfo &)> &onInfo,
+    // ponder: the GUI's ponder flag (MCTS does not run while pondering).
+    NagsResult search(const FastBoard &root, const SearchLimits &limits, int64_t timeLeftMs,
+                      const std::atomic<bool> &stop, const std::atomic<bool> *ponder,
+                      const std::function<void(const SearchInfo &)> &onInfo,
                       const std::function<void(const std::string &)> &onString);
 
 private:
-    TranspositionTable &tt;
+    Searcher<FastBoard> &searcher;
     NagsSettings config;
-    SearchControl control;
-    std::unique_ptr<SearchWorker<Board>> dfs;
     HeuristicEvaluator heuristic;
     RpcEvaluator network;
     MetaClient meta;
-    BayesianBandit bandit;
     static constexpr uint32_t kSeed = 0xC0FFEEu;
     std::mt19937 rng;
     float lastUncertainty = 0.1f;
 
-    // Per-search state
-    std::function<void(const SearchInfo &)> infoCallback;
-    int dfsDepth = 0;
-    int dfsScore = 0;
-    Move dfsBest;
-    std::vector<Move> dfsPv;
+    // MCTS state for the current move (used by the MCTS thread only).
     std::unique_ptr<MCTSNode> mctsRoot;
-    Board mctsBoard;
+    FastBoard mctsBoard;
     int mctsSims = 0;
     size_t mctsNodes = 0;
     float cpuct = 1.4f;
+    bool mctsUsedNetwork = false;
     static constexpr size_t kMaxMctsNodes = 2000000; // ~150 MB
 
-    bool runDfsIteration();
-    void reportDfs(int depth);
-    void runMctsBatch(int simulations, int64_t sliceMs);
+    void runMcts(long long budget, const std::atomic<bool> &stopMcts);
     void simulate();
     MCTSNode *selectChild(MCTSNode *node) const;
     void expand(MCTSNode *node, const std::vector<Move> &legal, const EvalResult &eval);
     const MCTSNode *mostVisitedRootChild() const;
-    float tacticalRatio(const Board &root) const;
+    float tacticalRatio(const FastBoard &root) const;
 };

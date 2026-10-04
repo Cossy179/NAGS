@@ -10,14 +10,16 @@ which described code that has since been rewritten.
 src/
   ChessTypes.h      Piece / Color / Move types shared by everything (a1 = 0 ... h8 = 63)
   BitOps.h          portable lsb / msb / popcount (MSVC, GCC, Clang, fallback)
-  Board.h/.cpp      bitboard board with ray-based sliding attacks   (nags, nags_basic)
-  FastBoard.h/.cpp  bitboard board with magic bitboards + mailbox   (nags_fast, nags_enhanced)
-  Eval.h            static evaluation (material, piece-square tables, bishop pair)
+  Board.h/.cpp      bitboard board with ray-based sliding attacks   (nags_basic)
+  FastBoard.h/.cpp  bitboard board with magic bitboards + mailbox   (nags, nags_fast, nags_enhanced)
+  Eval.h            static evaluation: NNUE when active, else material, piece-square tables, bishop pair
+  Nnue.h/.cpp       NNUE network loading, accumulators and evaluation
+  Syzygy.h/.cpp     Syzygy tablebase probing (third_party/fathom)
   TT.h/.cpp         lockless transposition table shared by search threads
   Search.h          iterative-deepening alpha-beta (template over the board type)
   Uci.h/.cpp        UCI front end: worker-thread search, go parsing, time management
-  ClassicEngine.h   UCI engine around Search (nags_basic / nags_fast / nags_enhanced)
-  NAGS.h/.cpp       hybrid controller: bandit over alpha-beta and MCTS, evaluators
+  ClassicEngine.h   UCI engine around Search (all engines; nags adds the hybrid on top)
+  NAGS.h/.cpp       hybrid controller: alpha-beta plus a GNN-guided MCTS arm, evaluators
   Net.h/.cpp        TCP line client with timeouts + minimal JSON helpers
   MetaClient.h/.cpp client for meta_learner.py
   main.cpp          nags (hybrid) entry point
@@ -114,46 +116,54 @@ both boards.
 
 ## The hybrid controller (`NAGS.cpp`)
 
+`nags` is `nags_enhanced` (FastBoard, NNUE, the full search, transposition
+table, threads, tablebases, MultiPV, pondering) with a second search arm.
 Per move:
 
 1. **Meta-learner.** With `UseMetaLearner`, the controller sends the FEN, the
    remaining clock time, the previous root uncertainty and the tactical ratio
    (the share of legal moves that capture, promote or give check). It gets
    back three deltas in [-1, 1]:
-   * DFS depth cap: 10 + 4·delta, unless `go depth` fixes it;
-   * MCTS simulation budget: 2000 + 1000·delta;
-   * PUCT exploration constant: 1.4 + 0.5·delta.
+   * verification depth: the alpha-beta depth + round(delta)
+     (`dfs_depth_delta`);
+   * MCTS simulation budget: 2000 + 1000·delta (`mcts_budget_delta`);
+   * PUCT exploration constant: 1.4 + 0.5·delta
+     (`bandit_exploration_delta`; the name predates the parallel design).
 
    In self-play, `MetaExploration` adds Gaussian noise to the deltas so the
    meta-learner sees varied choices.
-2. **Depth 1.** A depth-1 alpha-beta search always completes first, so there
-   is always a reasonable move.
-3. **Bandit loop.** A Thompson-sampling bandit (Beta posteriors with mild
-   forgetting; statistics persist across moves within a game) picks an arm
-   for each pull:
-   * **DFS:** one more iteration of the shared alpha-beta worker.
-   * **MCTS:** a batch of PUCT simulations, capped by both a simulation count
-     and a wall-clock slice. Leaves are evaluated by the GNN via
-     `rpc_server.py` (one request per leaf: FEN plus legal moves in, value
-     plus priors for those moves out) or by the heuristic evaluator. Each node
-     stores its value from the point of view of the player who moved into it,
-     so selection maximises for the side to move. Checkmate, stalemate and
-     draws are terminal nodes. The tree is capped at about 2M nodes.
-
-   A pull counts as a success if it changed that arm's best move or moved its
-   value estimate noticeably (30 cp for DFS, 0.05 for the MCTS Q-value). So
-   time flows to the arm that is still discovering something about the
-   position.
-4. **Decision.** The engine plays the deepest completed alpha-beta move,
-   unless all of these hold:
+2. **Is the network there?** The root position is sent to `rpc_server.py`.
+   If the GNN does not answer, or the GUI is pondering, or there is only one
+   legal move, MCTS does not run and the move is the alpha-beta search's.
+3. **Both arms in parallel.** The alpha-beta search runs as in
+   `nags_enhanced`, with 85% of the time limits so some time is left for
+   verification. Meanwhile an MCTS thread runs PUCT simulations until the
+   alpha-beta search finishes or the simulation budget is used. Leaves are
+   evaluated by the GNN (one request per leaf: FEN plus legal moves in,
+   value plus priors for those moves out; the heuristic evaluator takes over
+   if the service fails mid-search). Each node stores its value from the
+   point of view of the player who moved into it, so selection maximises for
+   the side to move. Checkmate, stalemate and draws are terminal nodes. The
+   tree is capped at about 2M nodes.
+4. **Decision: MCTS proposes, alpha-beta verifies.** The engine plays the
+   alpha-beta move unless all of these hold:
    * MCTS was guided by the network;
    * at least half the root visits (and at least 64) went to a different move;
-   * a verification search scores that move within 25 cp of the alpha-beta
-     best.
-5. **Reporting.** Standard `info` lines for each completed DFS iteration, an
-   `info string nags ...` summary, and an `info string nags_meta ...` line
-   with the meta-learner inputs and the deltas used. The training pipeline
-   reads the `nags_meta` line to build meta-learner samples.
+   * the alpha-beta score is not a mate score;
+   * a null-window verification search (on the shared transposition table)
+     shows that move is worth at least the alpha-beta score minus 25 cp,
+     within the remaining time.
+5. **Reporting.** Standard `info` lines from the alpha-beta search, an
+   `info string nags ...` summary (MCTS simulations and top move, and why
+   the move was chosen), and an `info string nags_meta ...` line with the
+   meta-learner inputs and the deltas used. The training pipeline reads the
+   `nags_meta` line to build meta-learner samples.
+
+Earlier versions ran both arms on one thread, with a Thompson-sampling bandit
+handing out time slices, and searched on the slower ray-based board with the
+hand-written evaluation. That design scored 1/60 against `nags_enhanced`
+(see `docs/TESTING.md`); the current one gives up nothing when the network
+has nothing to add.
 
 Network failures never stall the engine. Every socket operation has a
 timeout, writes cannot raise SIGPIPE, and a failed connection is retried at

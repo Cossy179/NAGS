@@ -252,11 +252,12 @@ public:
     }
 
     // Score of `m` from the root side's view, searched to depth-1 after the
-    // move with a full window. Used to verify a candidate from another source.
-    // Returns false if aborted.
-    bool scoreRootMove(const Move &m, int depth, int &score) {
+    // move within (alpha, beta) (a full window by default; with a null window
+    // the result is only a bound). Used to verify a candidate from another
+    // source. Returns false if aborted.
+    bool scoreRootMove(const Move &m, int depth, int &score, int alpha = -INF_SCORE, int beta = INF_SCORE) {
         board.makeMove(m);
-        int s = -negamax(std::max(0, depth - 1), -INF_SCORE, INF_SCORE, 1, true);
+        int s = -negamax(std::max(0, depth - 1), -beta, -alpha, 1, beta - alpha > 1);
         board.unmakeMove();
         if (aborted) return false;
         score = s;
@@ -838,6 +839,23 @@ public:
         if (result.pv.size() >= 2) result.ponderMove = result.pv[1];
         return result;
     }
+
+    // Searches root move `m` to `depth` with a full window and returns its
+    // score from the root side's view (to verify a move proposed by another
+    // search). Returns false if stopped or out of time first.
+    bool scoreRootMove(const BoardT &root, const Move &m, int depth, const SearchLimits &limits,
+                       const std::atomic<bool> &externalStop, int &score, int alpha = -INF_SCORE,
+                       int beta = INF_SCORE) {
+        control.begin(limits, &externalStop);
+        SearchWorker<BoardT> &w = *workers[0];
+        w.setRoot(root);
+        bool ok = w.scoreRootMove(m, depth, score, alpha, beta);
+        w.flushNodes();
+        return ok;
+    }
+
+    // Nodes of the last search or scoreRootMove call.
+    uint64_t nodesSearched() const { return control.nodes.load(std::memory_order_relaxed); }
 
 private:
     TranspositionTable *tt;
