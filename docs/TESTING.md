@@ -169,6 +169,34 @@ over months.
 
 ### Results
 
+| Date | Build | Combined estimate (10+0.1) |
+|------|-------|----------------------------|
+| 2026-10-03 | `a8e5c0c` (before Steps 1 and 2: no pruning beyond the TT, hand-written evaluation) | 2329 ± 52 |
+| 2026-10-04 | `af50fc5` (Step 1 search, NNUE network 5) | **2881 ± 34** |
+
+#### 2026-10-04: Step 1 search and NNUE network 5
+
+`nags_enhanced` (1 thread, 64 MB hash, embedded network 5) against
+Stockfish 16 with `UCI_LimitStrength`, 80 games per level at 10+0.1 on the
+same 4-core VM, 3 games at a time:
+
+| Stockfish `UCI_Elo` | Result | Score | Elo difference | Implied rating |
+|---|---|---|---|---|
+| 2600 | +68 =7 −5 | 89% | +370 ± 109 | 2970 ± 109 |
+| 2800 | +27 =25 −28 | 49% | −4 ± 56 | 2796 ± 56 |
+| 3000 | +7 =39 −34 | 33% | −122 ± 62 | 2878 ± 62 |
+| 3190 (the maximum) | +5 =28 −47 | 24% | −203 ± 72 | 2987 ± 72 |
+
+Combined (inverse-variance weighted): **2881 ± 34** on Stockfish's
+`UCI_Elo` scale at 10+0.1, about 550 points above the first calibration.
+The same caveats apply: the levels disagree by more than their error bars
+(2796 at 2800 against 2987 at 3190), which again suggests Stockfish's
+strength-limited levels are not evenly spaced at 10+0.1, so the ± 34
+understates the real uncertainty. A fair summary is "about 2800–3000 on
+this scale".
+
+#### 2026-10-03: first calibration
+
 `nags_enhanced` (1 thread, 64 MB hash) against Stockfish 16 with
 `UCI_LimitStrength`, 60 games per level at 10+0.1 on a 4-core VM:
 
