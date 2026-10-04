@@ -255,6 +255,10 @@ embedded, `nags_fast`, `nags_enhanced` and `nags` bench with NNUE;
 | Rebuilt controller without services | `nags_equals_nags_enhanced` test | identical bench node count (5365610 at depth 10) |
 | Rebuilt controller with an untrained GNN and the meta-learner running, first version | 200 games, 3+0.03, 2 at a time | +2 =16 -182, 172 losses on time: the end of each move waited for the MCTS thread's in-flight network request (up to 3 s), and a 1 ms limit scaled to 85% became 0 ("no limit") |
 | The same after the fix (MCTS only from `MctsMinTime`, pre-search time counted, network waits capped at a tenth of the hard limit) | 100 games, 3+0.03, 2 at a time | +32 =38 -30, +6.9 ± 53.1 (MCTS off at this speed; no time losses) |
+| The same with `MctsMinTime` 0 (MCTS always on, untrained GNN) | 60 games, 10+0.1, 2 at a time | +12 =25 -23, −64 ± 62: the cost of the arm (15% less alpha-beta time, the GNN server competing for CPU, verified proposals up to 25 cp worse) when the network knows nothing |
+
+Whether the hybrid can gain strength depends on a trained GNN, which has not
+been trained yet.
 
 The reduction table alone was tested first, at 5+0.05, and stopped
 undecided at +21.2 ± 21.9 after 674 games (LLR 1.29); it was then tested
