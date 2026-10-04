@@ -58,6 +58,8 @@ class RpcEvaluator : public Evaluator {
 public:
     explicit RpcEvaluator(Evaluator &fallback) : fallback(fallback) {}
     void configure(bool enabled, const std::string &host, int port);
+    // Longest wait for one answer (a slow answer must not overrun the move's time).
+    void setRequestTimeout(int ms) { requestTimeoutMs = ms; }
     EvalResult evaluate(FastBoard &board, const std::vector<Move> &legal) override;
     bool lastUsedNetwork() const { return usedNetwork; }
 
@@ -66,6 +68,7 @@ private:
     bool enabled = true;
     std::string host = "127.0.0.1";
     int port = 5555;
+    int requestTimeoutMs = 3000;
     LineSocket socket;
     std::chrono::steady_clock::time_point retryAfter{};
     bool usedNetwork = false;
@@ -89,6 +92,7 @@ struct NagsSettings {
     int baseMctsBudget = 2000;    // MCTS simulations per move before meta-learner deltas
     float baseExploration = 1.4f; // PUCT constant before meta-learner deltas
     int verifyMargin = 25;        // an MCTS move may score this much below the alpha-beta move
+    int minMctsMs = 1000;         // MCTS only runs when the soft time limit is at least this (or unlimited)
 
     bool useMetaLearner = true;
     std::string metaHost = "127.0.0.1";

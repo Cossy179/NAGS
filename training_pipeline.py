@@ -412,8 +412,9 @@ class TrainingPipeline:
     # -- engines and games ------------------------------------------------------
     def open_nags(self, nn_port: Optional[int], meta_port: Optional[int], meta_exploration: float = 0.0):
         engine = chess.engine.SimpleEngine.popen_uci(str(self.engine_path()))
+        # MctsMinTime 0: run the MCTS arm even at the short self-play move times.
         options = {"UseNN": nn_port is not None, "UseMetaLearner": meta_port is not None,
-                   "MetaExploration": int(round(meta_exploration * 100))}
+                   "MetaExploration": int(round(meta_exploration * 100)), "MctsMinTime": 0}
         if nn_port is not None:
             options["NNPort"] = nn_port
         if meta_port is not None:

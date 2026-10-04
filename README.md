@@ -91,6 +91,7 @@ UCI options:
 | `UseNN`, `NNHost`, `NNPort` | `nags` | Use `rpc_server.py` for MCTS priors/values (default `127.0.0.1:5555`) |
 | `UseMetaLearner`, `MetaHost`, `MetaPort` | `nags` | Ask `meta_learner.py` for per-move deltas (default `127.0.0.1:5556`) |
 | `MetaExploration` (0-100) | `nags` | Gaussian noise (std = value/100) added to the deltas; used in self-play |
+| `MctsMinTime` (ms, default 1000) | `nags` | The MCTS arm only runs when the soft time limit for the move is at least this (0: always) |
 
 **Endgame tablebases.** With `SyzygyPath` set, the search probes the
 win/draw/loss tables after captures and pawn moves, and with the DTZ tables

@@ -132,12 +132,18 @@ Per move:
 
    In self-play, `MetaExploration` adds Gaussian noise to the deltas so the
    meta-learner sees varied choices.
-2. **Is the network there?** The root position is sent to `rpc_server.py`.
-   If the GNN does not answer, or the GUI is pondering, or there is only one
-   legal move, MCTS does not run and the move is the alpha-beta search's.
+2. **Is MCTS worth running?** Not with less soft time than `MctsMinTime`
+   (default 1000 ms: every network evaluation is a round trip to
+   `rpc_server.py`, so short moves get only a handful of simulations), not
+   while the GUI is pondering, and not with a single legal move. Otherwise
+   the root position is sent to `rpc_server.py`; if the GNN does not answer,
+   MCTS does not run either and the move is the alpha-beta search's.
 3. **Both arms in parallel.** The alpha-beta search runs as in
-   `nags_enhanced`, with 85% of the time limits so some time is left for
-   verification. Meanwhile an MCTS thread runs PUCT simulations until the
+   `nags_enhanced`, with the time already used (meta-learner, root
+   evaluation) subtracted from its limits and, when MCTS runs, 85% of the
+   rest, so some time is left for verification. Each network request waits
+   at most a tenth of the hard limit, so a slow answer cannot overrun the
+   move. Meanwhile an MCTS thread runs PUCT simulations until the
    alpha-beta search finishes or the simulation budget is used. Leaves are
    evaluated by the GNN (one request per leaf: FEN plus legal moves in,
    value plus priors for those moves out; the heuristic evaluator takes over

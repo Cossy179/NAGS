@@ -12,7 +12,6 @@
 namespace {
 
 constexpr int kNnConnectTimeoutMs = 150;
-constexpr int kNnRequestTimeoutMs = 3000;
 constexpr int kNnBackoffSeconds = 60;
 
 // Centipawns <-> [-1, 1] value scale shared by the heuristic evaluator and logs.
@@ -93,7 +92,7 @@ EvalResult RpcEvaluator::evaluate(FastBoard &board, const std::vector<Move> &leg
     std::string response;
     std::vector<double> priors;
     double value = 0, uncertainty = 0;
-    if (!socket.request(request, response, kNnRequestTimeoutMs) ||
+    if (!socket.request(request, response, requestTimeoutMs) ||
         !jsonlite::findNumberArray(response, "move_priors", priors) || priors.size() != legal.size() ||
         !jsonlite::findNumber(response, "value", value)) {
         socket.close();
@@ -229,6 +228,7 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
                                   const std::function<void(const SearchInfo &)> &onInfo,
                                   const std::function<void(const std::string &)> &onString) {
     NagsResult result;
+    const auto start = std::chrono::steady_clock::now();
 
     // ---- Meta-learner: per-move deltas ----------------------------------------
     network.configure(config.useNN, config.nnHost, config.nnPort);
@@ -256,8 +256,12 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
     mctsUsedNetwork = false;
     std::vector<Move> legal = mctsBoard.generateLegalMoves();
     bool pondering = ponder && ponder->load();
+    // Each network evaluation is a round trip to rpc_server.py (milliseconds
+    // to tens of milliseconds), so MCTS is pointless with little time.
+    bool enoughTime = limits.softMs == 0 || limits.softMs >= config.minMctsMs;
+    network.setRequestTimeout(limits.hardMs > 0 ? static_cast<int>(std::clamp<int64_t>(limits.hardMs / 10, 20, 3000)) : 3000);
     bool runMctsArm = false;
-    if (!legal.empty() && legal.size() > 1 && !pondering && config.useNN) {
+    if (!legal.empty() && legal.size() > 1 && !pondering && config.useNN && enoughTime) {
         EvalResult rootEval = network.evaluate(mctsBoard, legal);
         lastUncertainty = rootEval.uncertainty;
         if (network.lastUsedNetwork()) {
@@ -268,19 +272,19 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
         }
     }
 
-    // Keep part of the time for verifying an MCTS proposal.
+    // The time used so far (meta-learner, root evaluation) counts against
+    // the move, and with MCTS part of it is kept for verifying a proposal.
     // (0 means "no limit", so a positive limit stays at least 1 ms.)
+    const int64_t used = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    const int share = runMctsArm ? 85 : 100;
     SearchLimits abLimits = limits;
-    if (runMctsArm) {
-        if (limits.softMs > 0) abLimits.softMs = std::max<int64_t>(1, limits.softMs * 85 / 100);
-        if (limits.hardMs > 0) abLimits.hardMs = std::max<int64_t>(1, limits.hardMs * 85 / 100);
-    }
+    if (limits.softMs > 0) abLimits.softMs = std::max<int64_t>(1, (limits.softMs - used) * share / 100);
+    if (limits.hardMs > 0) abLimits.hardMs = std::max<int64_t>(1, (limits.hardMs - used) * share / 100);
     std::atomic<bool> stopMcts{false};
     std::thread mctsThread;
     if (runMctsArm) mctsThread = std::thread([this, mctsBudget, &stopMcts] { runMcts(mctsBudget, stopMcts); });
 
     // ---- Alpha-beta arm: the full search -------------------------------------
-    auto start = std::chrono::steady_clock::now();
     SearchResult ab = searcher.search(root, abLimits, stop, onInfo, ponder);
     stopMcts = true;
     if (mctsThread.joinable()) mctsThread.join();
@@ -288,7 +292,12 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
 
     // ---- Final decision: MCTS proposes, alpha-beta verifies -----------------
     Move best = ab.bestMove;
-    std::string reason = runMctsArm ? "alpha-beta" : "alpha-beta (no network: MCTS off)";
+    std::string reason = "alpha-beta";
+    if (!runMctsArm)
+        reason += !config.useNN || legal.size() <= 1 ? " (MCTS off)"
+                  : pondering                          ? " (pondering: MCTS off)"
+                  : !enoughTime                        ? " (too little time: MCTS off)"
+                                                       : " (no network: MCTS off)";
     const MCTSNode *top = mostVisitedRootChild();
     if (runMctsArm && mctsUsedNetwork && top && !sameMove(top->move, ab.bestMove) && ab.depth >= 2 &&
         mctsRoot->visits > 0 && top->visits >= 64 && top->visits * 2 >= mctsRoot->visits &&
@@ -296,8 +305,8 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
         int depth = std::clamp(ab.depth + static_cast<int>(std::lround(deltas.dfs_depth_delta)), 1, MAX_PLY - 8);
         SearchLimits vLimits;
         if (limits.hardMs > 0) {
-            auto used = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-            vLimits.hardMs = std::max<int64_t>(1, limits.hardMs - used);
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+            vLimits.hardMs = std::max<int64_t>(1, limits.hardMs - elapsed);
         }
         // Null-window test: is the proposal worth at least the alpha-beta
         // score minus the margin? Much cheaper than scoring it exactly, and

@@ -50,9 +50,11 @@ def fake_gnn():
     server.server_close()
 
 
-def _run(port, go):
-    cmds = (f"setoption name NNPort value {port}\nsetoption name UseMetaLearner value false\n"
-            f"position startpos\n{go}\n")
+def _run(port, go, min_time=None):
+    cmds = f"setoption name NNPort value {port}\nsetoption name UseMetaLearner value false\n"
+    if min_time is not None:
+        cmds += f"setoption name MctsMinTime value {min_time}\n"
+    cmds += f"position startpos\n{go}\n"
     start = time.monotonic()
     out = subprocess.run([str(_engine())], input=cmds, capture_output=True, text=True, timeout=60).stdout
     return out, time.monotonic() - start
@@ -60,14 +62,22 @@ def _run(port, go):
 
 @pytest.mark.skipif(_engine() is None, reason="nags not built")
 def test_mcts_arm_runs_and_respects_time(fake_gnn):
-    for movetime in (50, 400):
-        out, elapsed = _run(fake_gnn, f"go movetime {movetime}")
+    # MctsMinTime 0 forces the MCTS arm on even for very short moves.
+    for movetime in (50, 400, 1200):
+        out, elapsed = _run(fake_gnn, f"go movetime {movetime}", min_time=0 if movetime < 1200 else None)
         summary = [l for l in out.splitlines() if l.startswith("info string nags ")]
         assert summary and "evaluator network" in summary[-1], out
         sims = int(summary[-1].split("mcts_sims ")[1].split()[0])
         assert sims > 0
         assert "bestmove" in out
-        assert elapsed < movetime / 1000 + 3.0, f"movetime {movetime} took {elapsed:.1f}s"
+        assert elapsed < movetime / 1000 + 1.5, f"movetime {movetime} took {elapsed:.1f}s"
+
+
+@pytest.mark.skipif(_engine() is None, reason="nags not built")
+def test_no_mcts_with_little_time(fake_gnn):
+    out, elapsed = _run(fake_gnn, "go movetime 300")  # default MctsMinTime 1000
+    assert "too little time: MCTS off" in out and "mcts_sims 0" in out
+    assert elapsed < 1.5
 
 
 @pytest.mark.skipif(_engine() is None, reason="nags not built")

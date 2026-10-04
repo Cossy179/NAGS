@@ -29,6 +29,7 @@ public:
         lines.push_back("option name MetaHost type string default " + s.metaHost);
         lines.push_back("option name MetaPort type spin default " + std::to_string(s.metaPort) + " min 1 max 65535");
         lines.push_back("option name MetaExploration type spin default 0 min 0 max 100");
+        lines.push_back("option name MctsMinTime type spin default " + std::to_string(s.minMctsMs) + " min 0 max 600000");
         return lines;
     }
 
@@ -61,6 +62,9 @@ public:
         } else if (opt == "MetaExploration") {
             if (!uci::parseInt(value, v)) return badValue();
             s.metaExploration = static_cast<float>(std::clamp<long long>(v, 0, 100)) / 100.0f;
+        } else if (opt == "MctsMinTime") {
+            if (!uci::parseInt(value, v)) return badValue();
+            s.minMctsMs = static_cast<int>(std::clamp<long long>(v, 0, 600000));
         } else {
             return ClassicEngine<FastBoard>::setOption(opt, value, message);
         }
