@@ -99,22 +99,40 @@ def parse_chunk(lines):
     return feats[:kept], stm[:kept], score[:kept], result[:kept]
 
 
-def load(paths, cache=None, workers=None):
-    """Parses the data files (or loads the .npz cache made by a previous run)."""
-    if cache and os.path.exists(cache):
-        d = np.load(cache)
-        return d["feats"], d["stm"], d["score"], d["result"]
+def parse_files(paths, workers=None):
+    """Parses nags_datagen text files."""
     lines = []
     for p in paths:
         with open(p) as fh:
             lines.extend(fh.readlines())
     chunk = 200000
     chunks = [lines[i : i + chunk] for i in range(0, len(lines), chunk)]
+    del lines
     if len(chunks) > 1:
         with mp.Pool(workers or os.cpu_count()) as pool:
-            parts = pool.map(parse_chunk, chunks)
-    else:
-        parts = [parse_chunk(c) for c in chunks]
+            return pool.map(parse_chunk, chunks)
+    return [parse_chunk(c) for c in chunks]
+
+
+def load(paths, cache=None, workers=None):
+    """Loads the data: text files are parsed, .npz files (caches written by
+    an earlier run) are read as they are. With `cache`, the combined arrays
+    are saved there, or loaded from it if it already exists."""
+    if cache and os.path.exists(cache):
+        d = np.load(cache)
+        return d["feats"], d["stm"], d["score"], d["result"]
+    parts = []
+    text = []
+    for p in list(paths) + [None]:
+        if p is not None and not p.endswith(".npz"):
+            text.append(p)
+            continue
+        if text:  # keep the files' order
+            parts.extend(parse_files(text, workers))
+            text = []
+        if p is not None:
+            d = np.load(p)
+            parts.append((d["feats"], d["stm"], d["score"], d["result"]))
     feats = np.concatenate([p[0] for p in parts]) if parts else np.zeros((0, MAX_PIECES), np.int16)
     stm = np.concatenate([p[1] for p in parts]) if parts else np.zeros(0, np.int8)
     score = np.concatenate([p[2] for p in parts]) if parts else np.zeros(0, np.int16)
@@ -236,7 +254,7 @@ def quantized_eval(net, fen):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data", nargs="+", required=True, help="nags_datagen output files")
+    ap.add_argument("--data", nargs="+", required=True, help="nags_datagen output files (or .npz caches)")
     ap.add_argument("--cache", help="parsed-data cache (.npz), created if missing")
     ap.add_argument("--out", required=True, help="exported network")
     ap.add_argument("--hidden", type=int, default=256)

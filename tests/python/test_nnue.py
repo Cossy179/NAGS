@@ -63,6 +63,17 @@ def test_train_and_export(tmp_path):
         assert abs(train.quantized_eval(net, fen) - cp) <= 2
 
 
+def test_npz_inputs_equal_text(tmp_path):
+    a, b = tmp_path / "a.txt", tmp_path / "b.txt"
+    _dataset(a, n=50, seed=1)
+    _dataset(b, n=30, seed=2)
+    train.load([str(a)], cache=str(tmp_path / "a.npz"))
+    direct = train.load([str(a), str(b)])
+    mixed = train.load([str(tmp_path / "a.npz"), str(b)])
+    for x, y in zip(direct, mixed):
+        assert np.array_equal(x, y)
+
+
 def test_resume_reproduces_a_full_run(tmp_path):
     data = tmp_path / "d.txt"
     _dataset(data)
