@@ -50,9 +50,9 @@ of writing:
 | Engine | Bench nodes |
 |--------|-------------|
 | `nags_basic` | 2772872 |
-| `nags_fast` | 2860525 |
-| `nags_enhanced` | 5365610 |
-| `nags` | 5365610 |
+| `nags_fast` | 2444123 |
+| `nags_enhanced` | 4496143 |
+| `nags` | 4496143 |
 
 When search improvements make a run much faster, raise the depth (in the
 engine's `main` file) and record the new fingerprints.
@@ -237,6 +237,7 @@ in the Test column, with 3 games in parallel on a 4-core VM, openings from
 | Network 4a (18.8M positions, NNUE-engine games only) vs network 3 | SPRT [0, 10], 20000 nodes, 2 at a time | H1 after 400 games (+204 =79 -117) | +76.8 ± 30.4 | – |
 | Network 4b (26.9M positions, all data) vs network 4a | SPRT [0, 10], 20000 nodes | H1 after 2592 games (+1124 =461 -1007) | +15.7 ± 11.8 | – |
 | Network 4b vs network 3 | SPRT [0, 10], 3+0.03 | H1 after 316 games (+156 =86 -74) | +92.3 ± 32.1 | 5365610 |
+| Network 5 (38.4M positions: network 4's data plus 11.5M from games by the network-4 engine) vs network 4 | SPRT [0, 10], 20000 nodes | H1 after 440 games (+220 =86 -134) | +68.8 ± 28.1 | 4496143 |
 
 `nags` benches like `nags_enhanced` (without the Python services the MCTS
 arm does not run); before `nags` was rebuilt on FastBoard (see below) its
