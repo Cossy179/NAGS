@@ -238,6 +238,7 @@ in the Test column, with 3 games in parallel on a 4-core VM, openings from
 | Network 4b (26.9M positions, all data) vs network 4a | SPRT [0, 10], 20000 nodes | H1 after 2592 games (+1124 =461 -1007) | +15.7 ± 11.8 | – |
 | Network 4b vs network 3 | SPRT [0, 10], 3+0.03 | H1 after 316 games (+156 =86 -74) | +92.3 ± 32.1 | 5365610 |
 | Network 5 (38.4M positions: network 4's data plus 11.5M from games by the network-4 engine) vs network 4 | SPRT [0, 10], 20000 nodes | H1 after 440 games (+220 =86 -134) | +68.8 ± 28.1 | 4496143 |
+| 512-wide network on network 5's data (`NAGS_NNUE_HIDDEN=512` build, validation loss 0.00778 vs 0.00815) vs network 5 (256); the 512 build searches about 25% fewer nodes per second | SPRT [0, 10], 3+0.03 | H0 after 450 games (+122 =144 -184; 1 loss on time by the 512 build) | −48.2 ± 25.4 | – (not adopted) |
 
 `nags` benches like `nags_enhanced` (without the Python services the MCTS
 arm does not run); before `nags` was rebuilt on FastBoard (see below) its

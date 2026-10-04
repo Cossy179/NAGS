@@ -92,6 +92,13 @@ previous default (`docs/TESTING.md`).
 | 4 | network 3's data plus 2.7M positions from the network-2 engine (seed 4) and 8.2M from the network-3 engine (seed 5): 26.9M | 0.00780 | +92.3 ± 32.1 against network 3 at 3+0.03; +15.7 ± 11.8 at 20000 nodes against the same network trained without the 8.1M hand-written-evaluation-engine positions |
 | 5 (`nets/nags.nnue`) | network 4's data plus 11.5M positions from ~137,000 games by the network-4 engine (seed 6): 38.4M (trained in two runs with `--stop-after` / `--resume`, 4 threads) | 0.00815 | +68.8 ± 28.1 against network 4 at 20000 nodes |
 
+A 512-wide network trained on network 5's data reached a lower validation
+loss (0.00778 against 0.00815 on the same held-out positions), but its build
+searches about 25% fewer nodes per second and lost to network 5 by
+−48.2 ± 25.4 Elo at 3+0.03, so 256 stays the default size. It might pay off
+at longer time controls or with faster inference (e.g. AVX2 builds by
+default, or an int8 output layer).
+
 Validation losses are not comparable across rows once NNUE-engine positions
 enter the validation set (from network 3 on). Labels from games played by
 NNUE engines gave the biggest gains: each round of data from the current
