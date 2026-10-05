@@ -94,7 +94,8 @@ previous default (`docs/TESTING.md`).
 | 2 | network 1's data plus 3.6M positions from 40,000 more games (seed 2): 8.1M | 0.00643 | +29.9 ± 17.9 against network 1 at 20000 nodes |
 | 3 | network 2's data plus 8.0M positions from ~90,000 games by the network-1 engine (seed 3, engine at `20797e4`): 16.1M | 0.00723 | +258 ± 51 against network 2 and +354 ± 132 against the hand-written evaluation, both at 3+0.03 |
 | 4 | network 3's data plus 2.7M positions from the network-2 engine (seed 4) and 8.2M from the network-3 engine (seed 5): 26.9M | 0.00780 | +92.3 ± 32.1 against network 3 at 3+0.03; +15.7 ± 11.8 at 20000 nodes against the same network trained without the 8.1M hand-written-evaluation-engine positions |
-| 5 (`nets/nags.nnue`) | network 4's data plus 11.5M positions from ~137,000 games by the network-4 engine (seed 6): 38.4M (trained in two runs with `--stop-after` / `--resume`, 4 threads) | 0.00815 | +68.8 ± 28.1 against network 4 at 20000 nodes |
+| 5 | network 4's data plus 11.5M positions from ~137,000 games by the network-4 engine (seed 6): 38.4M (trained in two runs with `--stop-after` / `--resume`, 4 threads) | 0.00815 | +68.8 ± 28.1 against network 4 at 20000 nodes |
+| 6 (`nets/nags.nnue`) | network 5's data plus 9.3M positions from ~110,000 games by the network-5 engine (seeds 7 and 8): 47.7M. First network with **8 output buckets** (`--buckets 8`, format version 2) | 0.00830 | +101.0 ± 34.2 against network 5 at 3+0.03 (the gain combines the new data and the buckets) |
 
 A 512-wide network trained on network 5's data reached a lower validation
 loss (0.00778 against 0.00815 on the same held-out positions), but its build
