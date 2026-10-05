@@ -50,9 +50,11 @@ public:
     int psqScore() const { return psq; }
     int gamePhase() const { return phase; }
     // NNUE accumulators of the current position, valid while a network is
-    // active. makeMove computes them from the previous position's in one
-    // pass and unmakeMove just drops them.
-    const nnue::Accumulator &accumulator() const { return accStack.back(); }
+    // active. makeMove only records which pieces changed; the accumulators
+    // are computed from the nearest computed position below when first
+    // asked for (many positions are never evaluated: illegal moves, TT
+    // cutoffs, PV nodes), and unmakeMove just drops them.
+    const nnue::Accumulator &accumulator() const;
     // Recomputes them from scratch (after the network changed) and forgets
     // the saved ones.
     void refreshAccumulator();
@@ -112,7 +114,13 @@ private:
     uint64_t hash = 0;
     int psq = 0;
     int phase = 0;
-    std::vector<nnue::Accumulator> accStack = std::vector<nnue::Accumulator>(1); // back(): the current position
+    struct AccEntry {
+        nnue::Accumulator acc;
+        nnue::DirtyPieces dirty; // pieces changed by the move that led to this position
+        bool computed = false;   // acc is valid
+    };
+    // back(): the current position. Mutable: accumulator() fills it in lazily.
+    mutable std::vector<AccEntry> accStack = std::vector<AccEntry>(1);
 
     struct HistoryEntry {
         Move move;

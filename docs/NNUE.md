@@ -51,9 +51,10 @@ settings).
 ## 3. Inference in the engine
 
 `src/Nnue.h` / `src/Nnue.cpp`. FastBoard keeps a stack of accumulators:
-`makeMove` writes the new position's accumulators from the previous ones in
-one pass (adding and removing the moved, captured and castling pieces), and
-`unmakeMove` just drops them. `eval::evaluate` uses the network whenever one
+`makeMove` only records the pieces the move adds and removes, the
+accumulators are computed when an evaluation first needs them (in one pass
+per move from the nearest computed position below), and `unmakeMove` just
+drops them. `eval::evaluate` uses the network whenever one
 is active. The update and evaluation kernels are also compiled for AVX2 and
 chosen at run time with GCC on x86-64 Linux; other builds use the portable
 code. With the test network, `bench` runs at about 0.8× the speed of the

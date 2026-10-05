@@ -11,6 +11,45 @@
 
 namespace {
 
+// Magic multipliers, found once by the search below (same seeds) and stored
+// so that start-up does not have to repeat it.
+constexpr Bitboard kRookMagics[64] = {
+    0x0280086280104000ULL, 0xa440100020044002ULL, 0x110010200041020aULL, 0x4100201001000804ULL,
+    0x0100050010020800ULL, 0x2100084100440002ULL, 0x0080010002000080ULL, 0x4200020444002091ULL,
+    0x0000800080204012ULL, 0x90a0802000400080ULL, 0x0040802000801000ULL, 0x0001801800100080ULL,
+    0x8202000a00208510ULL, 0x2044012010840008ULL, 0x00b0802200802100ULL, 0xc21200104081022cULL,
+    0x00808a0022004100ULL, 0x0002060021044080ULL, 0x0042060021118040ULL, 0x0002020009c01260ULL,
+    0xc008008008040080ULL, 0x0000080104402090ULL, 0x1100010100020004ULL, 0x0060a20000608104ULL,
+    0x2200400080008020ULL, 0x1480200040401000ULL, 0x0100200480100080ULL, 0x0010040040400800ULL,
+    0x8208010100090410ULL, 0x0091000300081400ULL, 0x8600020400183150ULL, 0x0a210042000100acULL,
+    0x0440400020800084ULL, 0x8840042004804080ULL, 0x4000801000802000ULL, 0x1210080080801001ULL,
+    0x3080080005001100ULL, 0x1d80800401800600ULL, 0x0000010204005048ULL, 0x1960008102000044ULL,
+    0x0488384000808000ULL, 0x0800500020004000ULL, 0x0060040200101000ULL, 0x4008001000210100ULL,
+    0x0205000800050011ULL, 0x0500200440080110ULL, 0x1040185041640002ULL, 0x0001000040810002ULL,
+    0x4000304200810200ULL, 0x4020802000401480ULL, 0x3261920082402600ULL, 0x0260420020081200ULL,
+    0x0000800800040080ULL, 0x0480800200040080ULL, 0x0020010882100400ULL, 0x844411104c008200ULL,
+    0x0400402082001502ULL, 0x0040104000208101ULL, 0x0a00090020001041ULL, 0x0046001008402006ULL,
+    0x6006000420100802ULL, 0x0001000804000201ULL, 0x088ac200a1102804ULL, 0x0001000020804201ULL,
+};
+constexpr Bitboard kBishopMagics[64] = {
+    0x0008080104002201ULL, 0x000382180a008043ULL, 0x0004080091040010ULL, 0x05080a0020505020ULL,
+    0x20a2021020821800ULL, 0x0004240440900080ULL, 0x000c012108201804ULL, 0x0008840400a20813ULL,
+    0x00084090020a084aULL, 0x0100080200840901ULL, 0x0020041802304044ULL, 0x000004440881001cULL,
+    0x0020020210004002ULL, 0x1020120110081080ULL, 0x20000080b0082100ULL, 0x8000060a0201041aULL,
+    0x41a0004084418a01ULL, 0x8c4240140c042400ULL, 0x00080a1000282020ULL, 0x1008003420202080ULL,
+    0x080c00421104080aULL, 0x2942802048044000ULL, 0x0294500208021800ULL, 0x0010210482181204ULL,
+    0x8082402031341820ULL, 0xc102030020080200ULL, 0x0004100541010421ULL, 0x0026008008008082ULL,
+    0x8140848004002000ULL, 0x0810004102080200ULL, 0x00040080c1009028ULL, 0x08422280020280a0ULL,
+    0x001002130020144cULL, 0x0044012002888280ULL, 0x00002a0100080801ULL, 0x0206004041040100ULL,
+    0x0040148200010104ULL, 0x0019014900020304ULL, 0x0604080550120308ULL, 0x04220245408e1200ULL,
+    0x20080150100d0824ULL, 0x0082084202811814ULL, 0x0a81004022243000ULL, 0x0203882128000400ULL,
+    0x1000200140408c00ULL, 0x00120a1052000100ULL, 0x8104042800500200ULL, 0x08100202004a0021ULL,
+    0x2004980450040000ULL, 0x0006020092884000ULL, 0x1401085210900120ULL, 0x0428024042020040ULL,
+    0x2000020405040080ULL, 0x9024400801010602ULL, 0x5408024808610000ULL, 0x4020044088810028ULL,
+    0x932a220100884001ULL, 0x0ad0c02401041088ULL, 0x048010110400920aULL, 0x02a0600000840408ULL,
+    0x0400020520142425ULL, 0x0c80002214900082ULL, 0x4070100481080200ULL, 0x2210202204803100ULL,
+};
+
 constexpr Bitboard FILE_A = 0x0101010101010101ULL;
 constexpr Bitboard FILE_H = 0x8080808080808080ULL;
 constexpr Bitboard RANK_1 = 0x00000000000000FFULL;
@@ -82,8 +121,9 @@ uint64_t FastBoard::zSide;
 uint64_t FastBoard::zCastle[16];
 uint64_t FastBoard::zEnpassant[8];
 
-// Finds a magic multiplier for every square by trial and error (fixed seed, so
-// the result is deterministic) and fills the shared attack table.
+// Finds a magic multiplier for every square (the stored one, or by trial and
+// error with a fixed seed if a stored one does not work) and fills the shared
+// attack table.
 void FastBoard::initMagics(Magic *magics, Bitboard *table, bool isRook) {
     std::mt19937_64 rng(isRook ? 0x5DEECE66DULL : 0x2545F4914F6CDD1DULL);
     std::vector<Bitboard> occupancy(4096), reference(4096);
@@ -108,9 +148,11 @@ void FastBoard::initMagics(Magic *magics, Bitboard *table, bool isRook) {
             subset = (subset - m.mask) & m.mask;
         } while (subset);
 
-        for (;;) {
-            Bitboard magic = rng() & rng() & rng();
-            if (popcount((m.mask * magic) >> 56) < 6) continue;
+        const Bitboard stored = isRook ? kRookMagics[sq] : kBishopMagics[sq];
+        for (int tries = 0;; ++tries) {
+            // The stored magic first; the search only runs if it ever fails.
+            Bitboard magic = tries == 0 ? stored : rng() & rng() & rng();
+            if (tries > 0 && popcount((m.mask * magic) >> 56) < 6) continue;
             ++attempt;
             bool ok = true;
             for (int i = 0; i < n && ok; ++i) {
@@ -227,7 +269,28 @@ void FastBoard::removePiece(int sq) {
 
 void FastBoard::refreshAccumulator() {
     accStack.resize(1);
-    nnue::refresh(accStack[0], *this);
+    nnue::refresh(accStack[0].acc, *this);
+    accStack[0].computed = nnue::network() != nullptr;
+}
+
+const nnue::Accumulator &FastBoard::accumulator() const {
+    const size_t top = accStack.size() - 1;
+    if (accStack[top].computed) return accStack[top].acc;
+    const nnue::Network &net = *nnue::network();
+    size_t k = top;
+    while (k > 0 && !accStack[k].computed) --k;
+    if (!accStack[k].computed) {
+        // Nothing below has been computed (e.g. a copy made with just the
+        // current entry): compute the current position from scratch.
+        nnue::refresh(accStack[top].acc, *this);
+        accStack[top].computed = true;
+        return accStack[top].acc;
+    }
+    for (size_t j = k + 1; j <= top; ++j) {
+        nnue::update(accStack[j - 1].acc, accStack[j].acc, net, accStack[j].dirty);
+        accStack[j].computed = true;
+    }
+    return accStack[top].acc;
 }
 
 void FastBoard::movePiece(int from, int to) {
@@ -519,8 +582,9 @@ void FastBoard::makeMove(const Move &m) {
     }
 
     Piece moving = entry.moved;
-    if (const nnue::Network *net = nnue::network()) {
-        nnue::DirtyPieces d;
+    if (nnue::network()) {
+        accStack.emplace_back();
+        nnue::DirtyPieces &d = accStack.back().dirty;
         d.remove(moving, m.from);
         d.add(m.promotion != Piece::None ? m.promotion : moving, m.to);
         if (m.isEnPassant) d.remove(entry.captured, side == Color::White ? m.to - 8 : m.to + 8);
@@ -532,8 +596,6 @@ void FastBoard::makeMove(const Move &m) {
             d.remove(rook, rookFrom);
             d.add(rook, rookTo);
         }
-        accStack.emplace_back();
-        nnue::update(accStack[accStack.size() - 2], accStack.back(), *net, d);
     }
     if (m.isEnPassant) {
         removePiece(side == Color::White ? m.to - 8 : m.to + 8);
@@ -643,8 +705,8 @@ void FastBoard::unmakeMove() {
     pliesFromNull = entry.pliesFromNull;
 
     if (nnue::network()) {
-        // The saved accumulators end at the last refresh; before that they
-        // have to be recomputed.
+        // The saved entries end at the last refresh; before that the
+        // accumulators have to be recomputed.
         if (accStack.size() > 1) accStack.pop_back();
         else refreshAccumulator();
     }
