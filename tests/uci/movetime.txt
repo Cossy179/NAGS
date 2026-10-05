@@ -1,0 +1,4 @@
+setoption name UseNN value false
+setoption name UseMetaLearner value false
+position startpos
+go movetime 300

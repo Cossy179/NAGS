@@ -1,206 +1,158 @@
 # NAGS - Neuro-Adaptive Graph Search
 
-A hybrid chess engine combining traditional alpha-beta search with graph neural networks and adaptive meta-learning.
+A chess engine project that combines classic alpha-beta search with a graph
+neural network (GNN) evaluator, Monte-Carlo tree search and a meta-learner
+that tunes search hyperparameters per move.
 
-## 🏗️ Architecture
+The repository contains four UCI engines, two Python services and a training
+pipeline:
 
-- **C++ UCI Engine**: Bitboard-based move generation with transposition tables
-- **Hybrid Search**: Bayesian bandit selection between DFS (alpha-beta) and MCTS
-- **Graph Neural Network**: PyTorch Geometric-based position evaluation
-- **Meta-Learning**: Online hyperparameter adaptation based on position characteristics
-- **Training Pipeline**: Automated supervised + reinforcement learning with model promotion
+| Component | What it is |
+|-----------|------------|
+| `nags` | Hybrid engine: `nags_enhanced`'s alpha-beta search, plus an MCTS arm guided by the GNN (via `rpc_server.py`) that runs in parallel and may replace the alpha-beta move after a verification search; `meta_learner.py` adjusts the hybrid per move. Without the services it plays exactly like `nags_enhanced`. |
+| `nags_enhanced` | Alpha-beta on magic bitboards with NNUE evaluation, a shared transposition table and Lazy SMP threads. The strongest pure alpha-beta build. |
+| `nags_fast` | Same search on magic bitboards, without a transposition table. |
+| `nags_basic` | Same search on the simpler ray-based board, without a transposition table. |
+| `rpc_client` | Smoke test for the GNN service. |
+| `rpc_server.py` | Serves GNN policy priors / values / uncertainty over TCP. |
+| `meta_learner.py` | Serves (and learns) per-move hyperparameter adjustments. |
+| `training_pipeline.py` | PGN parsing, supervised training, self-play, PPO, match-based evaluation and model promotion. |
 
-## 🚀 Quick Start
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the pieces work and
+fit together.
+The NNUE evaluation and how to train it (including on your own GPU) are in
+[docs/NNUE.md](docs/NNUE.md); how changes are tested and the engine's
+measured strength are in [docs/TESTING.md](docs/TESTING.md).
 
-### Prerequisites
+## Requirements
 
-- **C++**: CMake 3.15+, C++17 compiler (MSVC/GCC/Clang)
-- **Python**: 3.9+ with pip
-- **Optional**: CUDA-capable GPU for training acceleration
+- C++17 compiler (GCC, Clang or MSVC) and CMake 3.15+
+- Python 3.9+ for the services and training (`pip install -r requirements.txt`)
+- Optional: a CUDA GPU for faster training
 
-### Installation
-
-1. **Clone and build C++ engine:**
-   ```bash
-   git clone <repo-url>
-   cd NAGS
-   cmake -B build -DCMAKE_BUILD_TYPE=Release
-   cmake --build build --config Release
-   ```
-
-2. **Install Python dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Test basic functionality:**
-   ```bash
-   # Test UCI engine
-   echo -e "uci\nisready\nposition startpos\ngo depth 3\nquit" | build/Release/nags.exe
-   
-   # Test Python components
-   python -c "from chess_graph import test_graph_dims_and_forward; test_graph_dims_and_forward()"
-   ```
-
-## 🎯 Usage
-
-### As UCI Engine
+## Build
 
 ```bash
-# Basic usage
-build/Release/nags.exe
-
-# UCI commands
-uci                           # Engine identification
-setoption name Hash value 256 # Set hash table size
-setoption name Threads value 4 # Set thread count
-position startpos moves e2e4   # Set position
-go wtime 60000 btime 60000    # Search with time control
-go depth 6                    # Search to fixed depth
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 ```
 
-### Training Pipeline
+Executables end up in `build/` with single-configuration generators (Linux,
+macOS: `build/nags`) and in `build/Release/` with Visual Studio
+(`build\Release\nags.exe`).
+
+## Test
 
 ```bash
-# Full training pipeline
-./run_training.sh full
-
-# Individual steps
-./run_training.sh parse      # Parse PGN to training data
-./run_training.sh supervised # Supervised pre-training
-./run_training.sh selfplay   # Self-play data collection
-./run_training.sh ppo        # PPO reinforcement learning
-./run_training.sh evaluate   # Evaluate against baseline
-
-# Windows
-run_training.bat full
+(cd build && ctest -C Release --output-on-failure)                  # C++: perft, hashing, search, UCI end-to-end
+python -m pytest -q                                                  # Python: graph, network, services, pipeline
 ```
 
-### RPC Services
+Before merging a change that affects playing strength, follow
+[docs/TESTING.md](docs/TESTING.md): check the `bench` fingerprint
+(`build/nags_enhanced bench`), then prove the change in an SPRT match with
+`tools/sprt.py`. `tools/calibrate.py` estimates an absolute rating against
+Stockfish's strength-limited mode.
+
+The C++ tests check move generation against reference perft counts, that the
+incremental Zobrist hash always matches a freshly computed one, search results
+on known positions (mates, perpetual check, stalemate), the time manager, and
+every engine's UCI behaviour (side to move, bad input, `movetime`, threads,
+MultiPV, pondering), and tablebase probing.
+CI runs both suites on Linux, Windows and macOS
+(`.github/workflows/nags-ci.yml`).
+
+## Using the engines
+
+Any UCI GUI (Arena, Cute Chess, BanksiaGUI, ...) can load the executables.
+From a terminal:
 
 ```bash
-# Start neural network evaluator
-python rpc_server.py
-
-# Start meta-learner service  
-python meta_learner.py
-
-# Test RPC client
-build/Release/rpc_client.exe
+printf 'uci\nposition startpos moves e2e4\ngo depth 8\n' | build/nags_enhanced
 ```
 
-## 📊 Components
+The search runs on its own thread, so `stop`, `isready` and `quit` are handled
+while it thinks. Supported `go` parameters: `wtime btime winc binc movestogo
+movetime depth nodes mate infinite ponder`, plus the non-standard `go perft N`
+(also `perft N`), `d` (print the FEN) and `eval` (static evaluation). The alpha-beta engines support
+pondering (`go ponder`, then `ponderhit` or `stop`); `nags` ponders with its
+alpha-beta arm only.
 
-### Core Engine (`src/`)
+UCI options:
 
-- **Board.h/cpp**: Bitboard representation with Zobrist hashing
-- **Search.h/cpp**: Alpha-beta search with quiescence and transposition tables
-- **TT.h/cpp**: Transposition table for position caching
-- **NAGS.h/cpp**: Hybrid search controller with bandit selection
-- **MetaClient.h/cpp**: RPC client for meta-learning queries
+| Option | Engines | Meaning |
+|--------|---------|---------|
+| `Hash` (MB, default 64) | `nags`, `nags_enhanced` | Transposition table size |
+| `Threads` (default 1) | `nags`, `nags_enhanced` | Lazy SMP search threads |
+| `Clear Hash` | `nags`, `nags_enhanced` | Empty the transposition table |
+| `Move Overhead` (ms, default 50) | all | Time kept in reserve per move for GUI/network lag |
+| `MultiPV` (default 1) | all | Number of best lines to report |
+| `Ponder` | all | Lets the GUI know it may ponder |
+| `SyzygyPath` | all | Directories with Syzygy tablebase files (`:`-separated, `;` on Windows) |
+| `SyzygyProbeLimit` (default 7) | all | Only probe positions with at most this many pieces |
+| `UseNNUE` (default true), `EvalFile` | `nags`, `nags_fast`, `nags_enhanced` | NNUE evaluation (see `docs/NNUE.md`); the hand-written evaluation is used when no network is available |
+| `UseNN`, `NNHost`, `NNPort` | `nags` | Use `rpc_server.py` for MCTS priors/values (default `127.0.0.1:5555`) |
+| `UseMetaLearner`, `MetaHost`, `MetaPort` | `nags` | Ask `meta_learner.py` for per-move deltas (default `127.0.0.1:5556`) |
+| `MetaExploration` (0-100) | `nags` | Gaussian noise (std = value/100) added to the deltas; used in self-play |
+| `MctsMinTime` (ms, default 1000) | `nags` | The MCTS arm only runs when the soft time limit for the move is at least this (0: always) |
 
-### Neural Networks
+**Endgame tablebases.** With `SyzygyPath` set, the search probes the
+win/draw/loss tables after captures and pawn moves, and with the DTZ tables
+present a tablebase position at the root is played straight from the tables
+(the move that keeps the result under the fifty-move rule and makes
+progress). `nags` probes inside its alpha-beta arm only. Probing uses
+[Fathom](https://github.com/jdart1/Fathom) (MIT, `third_party/fathom`). The
+3-4-5 piece tables are about 1 GB, for example from
+<http://tablebase.sesse.net/syzygy/>; the tests use the 3-piece tables in
+`tests/data/syzygy`.
 
-- **chess_graph.py**: Graph representation of chess positions
-- **gnn_evaluator.py**: Dual-head transformer (policy + value)
-- **meta_learner.py**: Online hyperparameter adaptation
-- **rpc_server.py**: Neural network inference service
+`nags` works without the Python services: if the GNN service does not
+answer (a failed connection is retried at most once a minute) the MCTS arm
+does not run, and `nags` searches exactly like `nags_enhanced` (a test checks
+that their bench node counts are equal). Without the meta-learner it uses
+default hyperparameters.
 
-### Training Infrastructure
-
-- **training_pipeline.py**: End-to-end training orchestration
-- **run_training.sh/.bat**: Cross-platform training scripts
-- **.github/workflows/nags-ci.yml**: Continuous integration
-
-## 🧠 How It Works
-
-1. **Position Encoding**: Chess positions → graph with nodes (squares, pieces, metadata) and edges (attacks, occupancy, pawn chains)
-
-2. **Neural Evaluation**: 6-layer GNN → dual-head transformer → policy probabilities + position value + uncertainty
-
-3. **Hybrid Search**: Bayesian bandit chooses between:
-   - **DFS**: Traditional alpha-beta with quiescence
-   - **MCTS**: Policy-guided tree search with neural priors
-
-4. **Meta-Learning**: Adapts search hyperparameters (depth, budget, exploration) based on position features and performance history
-
-5. **Training Loop**: 
-   - Supervised pre-training on master games
-   - Self-play reinforcement learning with PPO
-   - Continuous evaluation and model promotion
-
-## 📈 Performance
-
-- **Move Generation**: ~2M+ nodes/second (bitboards + magic attacks)
-- **Search**: Adaptive depth/time allocation via meta-learning
-- **Neural Inference**: Batched evaluation with uncertainty estimation
-- **Training**: Automated pipeline with Elo-based model promotion
-
-## 🔧 Configuration
-
-Edit `training_config.json`:
-
-```json
-{
-  "max_positions": 100000,
-  "batch_size": 32,
-  "learning_rate": 0.001,
-  "epochs": 10,
-  "self_play_games": 100,
-  "elo_threshold": 25,
-  "model_params": {
-    "hidden_dim": 128,
-    "gnn_layers": 6
-  }
-}
-```
-
-## 🧪 Testing
+## Python services
 
 ```bash
-# C++ tests
-cd build && ctest
-
-# Python tests  
-pytest -v
-
-# Integration test
-python -c "from gnn_evaluator import warm_start_and_run_example; print(warm_start_and_run_example())"
-
-# RPC test
-python rpc_server.py &
-build/Release/rpc_client.exe
+python rpc_server.py --model models/production_model.pth   # GNN service on 127.0.0.1:5555
+python meta_learner.py                                      # meta-learner on 127.0.0.1:5556
+build/rpc_client                                            # checks the GNN service end to end
 ```
 
-## 🚀 Deployment
+Both speak newline-delimited JSON over TCP and keep connections open across
+requests (protocols are documented at the top of each file). Without
+`--model`, `rpc_server.py` serves an untrained network and says so in its log.
+`python meta_learner.py --selftest` checks that the meta-learner's training
+works on synthetic data.
 
-### Arena/GUI Integration
+## Training
 
-1. Add `build/Release/nags.exe` as UCI engine
-2. Configure hash size and threads in engine settings
-3. Use time controls or fixed depth for analysis
+The training data, `AJ-CORR-PGN-000.pgn` (about 1 GB), is stored with Git LFS.
+Fetch it first with `git lfs pull`.
 
-### Production Training
+```bash
+./run_training.sh full                 # Windows: run_training.bat full
+./run_training.sh selfplay --games 20  # individual steps; extra options go to training_pipeline.py
+python training_pipeline.py --help
+```
 
-1. Set up nightly CI runs with `nags-ci.yml`
-2. Monitor training logs in `logs/`
-3. Models auto-promote when Elo threshold is exceeded
-4. Notifications sent on successful promotions
+| Step | What it does |
+|------|--------------|
+| `parse` | Extracts (position, move played, game result) samples from the PGN. |
+| `supervised` | Trains the GNN policy (cross-entropy on the played move) and value head (MSE on the result, in [-1, 1] from the side to move's view), with a by-game validation split. |
+| `selfplay` | Plays real `nags` vs `nags` games with the current network (`rpc_server.py` and `meta_learner.py` are started automatically) and records positions, moves, results and meta-learner samples. |
+| `ppo` | Clipped PPO update of the network on the self-play games (advantage = result - old value estimate, legal-move-masked policy). |
+| `evaluate` | Plays a match (paired openings, both colours) against the baseline, estimates Elo with a 95% interval, and promotes the model to `models/production_model.pth` if it beats `elo_threshold`. |
+| `meta` | Trains the meta-learner on the self-play samples (reward = game result). |
 
-## 📝 License
+`training_config.json` holds every setting (directories, engine path, batch
+size, epochs, self-play games and time per move, `model_params`, `ppo_params`,
+evaluation games, time control, opening book, `baseline_engine`, Slack
+webhook). `baseline_engine` is `heuristic` (`nags` without the network, which
+measures whether the network helps), `production` (the current production
+model) or the command of any UCI engine, e.g. `stockfish`.
 
-MIT License - see LICENSE file for details.
+## License
 
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create feature branch: `git checkout -b feature/amazing-feature`
-3. Commit changes: `git commit -m 'Add amazing feature'`
-4. Push to branch: `git push origin feature/amazing-feature`
-5. Open pull request
-
-## 📞 Support
-
-- Issues: GitHub Issues
-- Discussions: GitHub Discussions
-- Email: team@company.com
+MIT, see [LICENSE](LICENSE).

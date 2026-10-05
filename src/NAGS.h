@@ -1,124 +1,156 @@
 #pragma once
 
-#include "Board.h"
+// NAGS hybrid search controller: "MCTS proposes, alpha-beta verifies".
+//
+// Two search arms work on each move:
+//   * alpha-beta - the engine's full Searcher (the same search, NNUE
+//     evaluation, time management, threads and tablebases as nags_enhanced);
+//   * MCTS       - PUCT tree search whose priors and leaf values come from the
+//                  GNN served by rpc_server.py, on its own thread.
+// MCTS only runs when the GNN service answers: with the heuristic fallback
+// evaluator it has nothing the alpha-beta search lacks, so without the
+// service nags plays exactly like nags_enhanced.
+//
+// Final move: the alpha-beta result, unless MCTS clearly prefers another
+// move and a verification search confirms that move is no worse.
+//
+// The meta-learner service (meta_learner.py) adjusts, per move, the
+// verification depth (dfs_depth_delta), the MCTS simulation budget
+// (mcts_budget_delta) and the PUCT exploration constant
+// (bandit_exploration_delta; the name is kept for the service protocol).
+
+#include "FastBoard.h"
+#include "MetaClient.h"
+#include "Net.h"
 #include "Search.h"
 #include "TT.h"
-#include "MetaClient.h"
 
+#include <atomic>
 #include <chrono>
-#include <random>
-#include <vector>
-#include <unordered_map>
+#include <functional>
 #include <memory>
+#include <random>
+#include <string>
+#include <vector>
 
-// Forward declarations
-struct MCTSNode;
-struct EvalResult;
-
-// Bandit arm types
-enum class SearchArm : int { DFS = 0, MCTS = 1 };
-
-// Evaluation result from neural network
+// Value in [-1, 1] from the side to move's point of view and one prior per
+// legal move (same order as the move list passed in, summing to 1).
 struct EvalResult {
-    std::vector<float> policy; // 4096 entries (64x64 from-to)
-    float value;
-    float uncertainty;
+    std::vector<float> priors;
+    float value = 0.0f;
+    float uncertainty = 0.0f;
 };
 
-// MCTS Node
+class Evaluator {
+public:
+    virtual ~Evaluator() = default;
+    virtual EvalResult evaluate(FastBoard &board, const std::vector<Move> &legal) = 0;
+};
+
+class HeuristicEvaluator : public Evaluator {
+public:
+    EvalResult evaluate(FastBoard &board, const std::vector<Move> &legal) override;
+};
+
+// Queries rpc_server.py; falls back to the heuristic when the server is not
+// reachable (and then waits a while before trying again).
+class RpcEvaluator : public Evaluator {
+public:
+    explicit RpcEvaluator(Evaluator &fallback) : fallback(fallback) {}
+    void configure(bool enabled, const std::string &host, int port);
+    // Longest wait for one answer (a slow answer must not overrun the move's time).
+    void setRequestTimeout(int ms) { requestTimeoutMs = ms; }
+    EvalResult evaluate(FastBoard &board, const std::vector<Move> &legal) override;
+    bool lastUsedNetwork() const { return usedNetwork; }
+
+private:
+    Evaluator &fallback;
+    bool enabled = true;
+    std::string host = "127.0.0.1";
+    int port = 5555;
+    int requestTimeoutMs = 3000;
+    LineSocket socket;
+    std::chrono::steady_clock::time_point retryAfter{};
+    bool usedNetwork = false;
+};
+
 struct MCTSNode {
     Move move;
-    MCTSNode* parent = nullptr;
-    std::vector<std::unique_ptr<MCTSNode>> children;
-    
+    MCTSNode *parent = nullptr;
+    std::vector<MCTSNode> children; // allocated once at expansion, never resized
     int visits = 0;
-    float value_sum = 0.0f;
+    double valueSum = 0.0; // from the point of view of the side that played `move`
     float prior = 0.0f;
     bool expanded = false;
-    
-    float q_value() const { return visits > 0 ? value_sum / visits : 0.0f; }
-    float ucb_score(float parent_visits, float c_puct = 1.4f) const {
-        if (visits == 0) return prior * std::sqrt(parent_visits) / (1 + visits);
-        return q_value() + c_puct * prior * std::sqrt(parent_visits) / (1 + visits);
-    }
+    bool terminal = false;
+    float terminalValue = 0.0f; // side to move's view, used when terminal
+
+    double q() const { return visits > 0 ? valueSum / visits : 0.0; }
 };
 
-// Bayesian Bandit for arm selection
-class BayesianBandit {
-public:
-    BayesianBandit();
-    SearchArm select_arm();
-    void update_reward(SearchArm arm, float reward);
-    void log_stats() const;
-    
-private:
-    struct ArmStats {
-        float alpha = 1.0f; // Beta distribution parameters
-        float beta = 1.0f;
-        int pulls = 0;
-        float total_reward = 0.0f;
-    };
-    
-    ArmStats arms[2]; // DFS, MCTS
-    std::mt19937 rng;
-    float sample_beta(float alpha, float beta);
+struct NagsSettings {
+    int baseMctsBudget = 2000;    // MCTS simulations per move before meta-learner deltas
+    float baseExploration = 1.4f; // PUCT constant before meta-learner deltas
+    int verifyMargin = 25;        // an MCTS move may score this much below the alpha-beta move
+    int minMctsMs = 1000;         // MCTS only runs when the soft time limit is at least this (or unlimited)
+
+    bool useMetaLearner = true;
+    std::string metaHost = "127.0.0.1";
+    int metaPort = 5556;
+    float metaExploration = 0.0f; // std-dev of Gaussian noise added to deltas (self-play)
+
+    bool useNN = true;
+    std::string nnHost = "127.0.0.1";
+    int nnPort = 5555;
 };
 
-// Neural Network Interface (stub for RPC)
-class NeuralEvaluator {
-public:
-    NeuralEvaluator();
-    EvalResult evaluate(const Board& board);
-    
-private:
-    // In full implementation, this would manage RPC connections
-    std::mt19937 rng; // For dummy evaluation
+struct NagsResult {
+    Move bestMove;
+    Move ponderMove;
+    int score = 0;
+    uint64_t nodes = 0; // alpha-beta nodes + MCTS simulations
 };
 
-// Main NAGS Controller
 class NAGSController {
 public:
-    NAGSController(Board& board);
-    
-    Move search(const SearchLimits& limits);
-    void stop() { should_stop = true; }
-    
+    // Uses (and shares the transposition table of) the engine's alpha-beta searcher.
+    explicit NAGSController(Searcher<FastBoard> &searcher);
+
+    // Resets the RNG and the uncertainty carried between moves.
+    void newGame();
+    NagsSettings &settings() { return config; }
+    const NagsSettings &settings() const { return config; }
+
+    // timeLeftMs: our clock (or -1 if unknown); fed to the meta-learner.
+    // ponder: the GUI's ponder flag (MCTS does not run while pondering).
+    NagsResult search(const FastBoard &root, const SearchLimits &limits, int64_t timeLeftMs,
+                      const std::atomic<bool> &stop, const std::atomic<bool> *ponder,
+                      const std::function<void(const SearchInfo &)> &onInfo,
+                      const std::function<void(const std::string &)> &onString);
+
 private:
-    Board& board;
-    TranspositionTable tt;
-    BayesianBandit bandit;
-    NeuralEvaluator evaluator;
-    std::unique_ptr<MCTSNode> mcts_root;
-    MetaClient meta_client;
-    
-    bool should_stop = false;
-    int iteration_count = 0;
-    
-    // Meta-learning state
-    float last_uncertainty = 0.1f;
-    int base_dfs_depth = 6;
-    int base_mcts_budget = 1000;
-    float base_exploration = 1.4f;
-    
-    // DFS component
-    Move dfs_probe(int depth);
-    int dfs_search(int depth, int alpha, int beta, int ply);
-    int quiescence(int alpha, int beta, int ply);
-    
-    // MCTS component  
-    void mcts_iteration();
-    MCTSNode* select_node(MCTSNode* node);
-    void expand_node(MCTSNode* node);
-    float simulate(MCTSNode* node);
-    void backpropagate(MCTSNode* node, float value);
-    
-    // Hybrid decision making
-    Move select_best_move();
-    float calculate_reward(SearchArm arm, float value, float uncertainty);
-    float tactical_volatility();
-    
-    // Utilities
-    int eval_position();
-    void order_moves(std::vector<Move>& moves);
-    bool time_up(const SearchLimits& limits, std::chrono::steady_clock::time_point start) const;
+    Searcher<FastBoard> &searcher;
+    NagsSettings config;
+    HeuristicEvaluator heuristic;
+    RpcEvaluator network;
+    MetaClient meta;
+    static constexpr uint32_t kSeed = 0xC0FFEEu;
+    std::mt19937 rng;
+    float lastUncertainty = 0.1f;
+
+    // MCTS state for the current move (used by the MCTS thread only).
+    std::unique_ptr<MCTSNode> mctsRoot;
+    FastBoard mctsBoard;
+    int mctsSims = 0;
+    size_t mctsNodes = 0;
+    float cpuct = 1.4f;
+    bool mctsUsedNetwork = false;
+    static constexpr size_t kMaxMctsNodes = 2000000; // ~150 MB
+
+    void runMcts(long long budget, const std::atomic<bool> &stopMcts);
+    void simulate();
+    MCTSNode *selectChild(MCTSNode *node) const;
+    void expand(MCTSNode *node, const std::vector<Move> &legal, const EvalResult &eval);
+    const MCTSNode *mostVisitedRootChild() const;
+    float tacticalRatio(const FastBoard &root) const;
 };

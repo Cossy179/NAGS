@@ -1,0 +1,4 @@
+setoption name UseNN value false
+setoption name UseMetaLearner value false
+position fen r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 2 3
+go depth 3

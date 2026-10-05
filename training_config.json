@@ -1,17 +1,24 @@
 {
   "data_dir": "data",
-  "model_dir": "models", 
+  "model_dir": "models",
   "logs_dir": "logs",
   "pgn_file": "AJ-CORR-PGN-000.pgn",
+  "engine_path": "",
   "max_positions": 100000,
+  "skip_opening_plies": 10,
   "batch_size": 32,
   "learning_rate": 0.001,
   "epochs": 10,
+  "validation_fraction": 0.05,
   "self_play_games": 100,
   "self_play_time": 0.5,
+  "max_game_plies": 300,
+  "opening_random_plies": 4,
+  "meta_exploration": 0.3,
+  "rpc_mc_samples": 3,
   "elo_threshold": 25,
-  "baseline_engine": "stockfish",
-  "baseline_time": 1.0,
+  "baseline_engine": "heuristic",
+  "seed": 0,
   "model_params": {
     "hidden_dim": 128,
     "gnn_layers": 6,
@@ -22,7 +29,11 @@
     "epochs": 5,
     "clip_ratio": 0.2,
     "value_coef": 0.5,
-    "entropy_coef": 0.01
+    "entropy_coef": 0.01,
+    "learning_rate": 0.0001
+  },
+  "meta_params": {
+    "train_steps": 200
   },
   "evaluation": {
     "num_games": 50,
@@ -30,7 +41,6 @@
     "opening_book": "book.bin"
   },
   "notifications": {
-    "slack_webhook": "",
-    "email_recipients": ["team@company.com"]
+    "slack_webhook": ""
   }
 }

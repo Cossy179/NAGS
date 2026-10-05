@@ -1,43 +1,45 @@
 #pragma once
 
-#include <string>
+// Client for the meta-learner service (meta_learner.py). Requests are
+// newline-delimited JSON over one persistent TCP connection. All calls are
+// bounded by short timeouts, and after a failed connection attempt the
+// client backs off for a while so a missing server costs almost nothing.
+
+#include "Net.h"
+
 #include <chrono>
+#include <string>
 
 struct MetaDeltas {
-    float dfs_depth_delta = 0.0f;      // -1 to +1
-    float mcts_budget_delta = 0.0f;    // -1 to +1  
-    float bandit_exploration_delta = 0.0f; // -1 to +1
+    float dfs_depth_delta = 0.0f;          // -1 .. +1
+    float mcts_budget_delta = 0.0f;        // -1 .. +1
+    float bandit_exploration_delta = 0.0f; // -1 .. +1
 };
 
 class MetaClient {
 public:
-    MetaClient(const std::string& host = "127.0.0.1", int port = 5556);
-    ~MetaClient();
-    
-    // Get hyperparameter adjustments for current position
-    MetaDeltas predict(const std::string& fen, int time_left_ms, 
-                      float last_uncertainty = 0.1f, float tactical_shot_ratio = 0.2f);
-    
-    // Add training sample from completed search
-    bool add_sample(const std::string& fen, int time_left_ms, float last_uncertainty,
-                   float tactical_shot_ratio, const MetaDeltas& chosen_deltas, 
-                   float elo_gain_per_sec);
-    
-    // Trigger training on server
+    MetaClient(std::string host = "127.0.0.1", int port = 5556);
+
+    void configure(const std::string &host, int port);
+
+    // Returns false (and leaves `out` at zero deltas) if the service is unavailable.
+    bool predict(const std::string &fen, int time_left_ms, float last_uncertainty, float tactical_shot_ratio,
+                 MetaDeltas &out);
+
+    // Adds a training sample. `reward` is whatever outcome signal the caller
+    // has (the training pipeline uses game results).
+    bool add_sample(const std::string &fen, int time_left_ms, float last_uncertainty, float tactical_shot_ratio,
+                    const MetaDeltas &chosen_deltas, float reward);
+
     bool train(int steps = 100);
-    
-    bool is_connected() const { return connected; }
-    
+
+    bool is_connected() const { return socket.isOpen(); }
+
 private:
+    bool roundTrip(const std::string &request, std::string &response);
+
     std::string host;
     int port;
-    bool connected = false;
-    
-    // Socket management
-    int create_connection();
-    void close_connection();
-    std::string send_request(const std::string& json_request);
-    
-    // Current connection (reused)
-    int sock = -1;
+    LineSocket socket;
+    std::chrono::steady_clock::time_point retryAfter{};
 };
