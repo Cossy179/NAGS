@@ -20,6 +20,9 @@ pipeline:
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the pieces work and
 fit together.
+The NNUE evaluation and how to train it (including on your own GPU) are in
+[docs/NNUE.md](docs/NNUE.md); how changes are tested and the engine's
+measured strength are in [docs/TESTING.md](docs/TESTING.md).
 
 ## Requirements
 

@@ -81,6 +81,61 @@ on a network) and `tests/python/test_nnue.py` (features, export, and exact
 agreement between the engine's `eval` and the trainer's integer reference
 `quantized_eval`).
 
+## Running it on your own machine (GPU training)
+
+Training is by far the slowest step on a CPU; an NVIDIA GPU with CUDA does it
+many times faster. Data generation and test matches run on the CPU, so more
+cores help those. `tools/nnue/run_round.py` runs a whole round with one
+command.
+
+**Setup (Windows; Linux is the same with `build/` paths):**
+
+1. Install Git, CMake 3.15+, Visual Studio 2022 (or its Build Tools) with
+   "Desktop development with C++", Python 3.10–3.12, and a current NVIDIA
+   driver.
+2. Clone and build:
+   ```
+   git clone https://github.com/Cossy179/NAGS.git
+   cd NAGS
+   cmake -B build
+   cmake --build build --config Release --parallel
+   ```
+   The engines land in `build\Release\`. `build\Release\nags_enhanced.exe bench`
+   should print the node count listed in `docs/TESTING.md`.
+3. Python with the CUDA build of PyTorch (take the exact install command for
+   your CUDA version from pytorch.org, for example):
+   ```
+   python -m venv .venv
+   .venv\Scripts\activate
+   pip install torch --index-url https://download.pytorch.org/whl/cu124
+   pip install numpy chess
+   python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+   ```
+   The last line should print `True` and the GPU's name.
+
+**First, build up data.** The training data is not in the repository (it is
+large and easy to regenerate). A network trained on a few million positions
+is weaker than the built-in one, so generate several batches first, each
+with a new seed, until you have 40–50M positions (about 90 positions per
+game):
+```
+build\Release\nags_datagen.exe --out data\selfplay_101.txt --games 150000 --threads 11 --seed 101
+```
+(`--threads`: one less than your CPU's thread count.)
+
+**Then run rounds:**
+```
+python tools\nnue\run_round.py --games 150000 --threads 11 --seed 102
+```
+This generates new games, trains on every `data\selfplay*.txt` (on the GPU,
+`--device auto`), and plays the new network against the built-in one
+(SPRT [0, 10] at 3+0.03). If the new one wins it is copied to
+`nets\nags.nnue`: rebuild, check `bench`, record the match in
+`docs/TESTING.md` and commit. `--skip-datagen` trains on the existing data
+only; `--skip-test` stops after training. `train.py --device cuda` keeps the
+whole data set in GPU memory when it fits and otherwise builds each batch on
+the CPU.
+
 ## Networks
 
 All networks so far use the architecture and training settings above (20

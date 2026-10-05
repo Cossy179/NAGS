@@ -194,28 +194,32 @@ def batches(n, size, shuffle, rng):
         yield order[i : i + size]
 
 
-def tensors(feats, stm, score, result, idx, lam, buckets=1):
-    """Batch tensors: white/black features, side to move, output bucket, target."""
-    white = torch.from_numpy(feats[idx].astype(np.int64))
+def tensors(feats, stm, score, result, idx, lam, buckets=1, device="cpu"):
+    """Batch tensors on `device`: white/black features, side to move, output
+    bucket, target. The data may be numpy arrays or torch tensors (on the CPU
+    or the GPU); idx selects the positions."""
+    feats, stm, score, result = (torch.as_tensor(x) for x in (feats, stm, score, result))
+    idx = torch.as_tensor(idx, device=feats.device)
+    white = feats[idx].to(device=device, dtype=torch.int64)
     bucket = bucket_of((white != PAD).sum(dim=1), buckets)
     black = mirror(white)
     black[white == PAD] = PAD
-    s = torch.from_numpy(stm[idx].astype(np.int64))
+    s = stm[idx].to(device=device, dtype=torch.int64)
     sign = 1.0 - 2.0 * s.float()  # +1 White to move, -1 Black
-    sc = torch.from_numpy(score[idx].astype(np.float32)) * sign
-    res = torch.from_numpy(result[idx]).float()
+    sc = score[idx].to(device=device, dtype=torch.float32) * sign
+    res = result[idx].to(device=device, dtype=torch.float32)
     res = torch.where(s.bool(), 1.0 - res, res)
     target = lam * torch.sigmoid(sc / SCALE) + (1.0 - lam) * res
     return white, black, s, bucket, target
 
 
-def evaluate_loss(model, data, idx, lam, size=65536):
+def evaluate_loss(model, data, idx, lam, size=65536, device="cpu"):
     model.eval()
     total, count = 0.0, 0
     with torch.no_grad():
         for start in range(0, len(idx), size):
             part = idx[start : start + size]
-            w, b, s, k, t = tensors(*data, part, lam, model.buckets)
+            w, b, s, k, t = tensors(*data, part, lam, model.buckets, device)
             p = torch.sigmoid(model(w, b, s, k))
             total += float(((p - t) ** 2).sum())
             count += len(part)
@@ -224,10 +228,10 @@ def evaluate_loss(model, data, idx, lam, size=65536):
 
 
 def export(model, path):
-    ft_w = model.ft.weight.detach()[:FEATURES].numpy()  # [768, H]
-    ft_b = model.ft_bias.detach().numpy()
-    out_w = model.out.weight.detach().numpy()  # [B, 2H]
-    out_b = model.out.bias.detach().numpy()  # [B]
+    ft_w = model.ft.weight.detach()[:FEATURES].cpu().numpy()  # [768, H]
+    ft_b = model.ft_bias.detach().cpu().numpy()
+    out_w = model.out.weight.detach().cpu().numpy()  # [B, 2H]
+    out_b = model.out.bias.detach().cpu().numpy()  # [B]
     q = lambda a, s: np.clip(np.round(a * s), -32767, 32767).astype("<i2")
     with open(path, "wb") as fh:
         fh.write(MAGIC)
@@ -292,7 +296,8 @@ def main(argv=None):
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--lambda", dest="lam", type=float, default=0.75, help="weight of the search score in the target")
     ap.add_argument("--val", type=float, default=0.01, help="fraction held out for validation")
-    ap.add_argument("--threads", type=int, default=0)
+    ap.add_argument("--threads", type=int, default=0, help="CPU threads (CPU training)")
+    ap.add_argument("--device", default="auto", help="auto (CUDA if available), cpu or cuda")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--resume", action="store_true",
                     help="continue from <out>.ckpt (saved after every epoch) with the same data and settings")
@@ -302,6 +307,11 @@ def main(argv=None):
 
     if args.threads:
         torch.set_num_threads(args.threads)
+    if args.device == "auto":
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        sys.exit("CUDA is not available: install the CUDA build of PyTorch (see docs/NNUE.md) or use --device cpu")
+    device = torch.device(args.device)
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
 
@@ -311,20 +321,30 @@ def main(argv=None):
     print(f"{n} positions loaded in {time.time() - t0:.0f}s", flush=True)
     if n == 0:
         sys.exit("no positions")
+    # On a GPU the whole data set stays in GPU memory when it fits (batches
+    # are then gathered on the GPU); otherwise batches are built on the CPU.
+    data_device = torch.device("cpu")
+    if device.type == "cuda":
+        free, _ = torch.cuda.mem_get_info(device)
+        if sum(x.nbytes for x in data) < free // 2:
+            data_device = device
+        print(f"training on {torch.cuda.get_device_name(device)}, data in "
+              f"{'GPU' if data_device.type == 'cuda' else 'CPU'} memory", flush=True)
+    data = tuple(torch.from_numpy(x).to(data_device) for x in data)
     perm = rng.permutation(n)
     n_val = max(1, int(n * args.val)) if n > 100 else 0
     val_idx, train_idx = perm[:n_val], perm[n_val:]
 
     if not 1 <= args.buckets <= MAX_BUCKETS:
         sys.exit(f"--buckets must be 1-{MAX_BUCKETS}")
-    model = Nnue(args.hidden, args.buckets)
+    model = Nnue(args.hidden, args.buckets).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     steps = args.epochs * math.ceil(len(train_idx) / args.batch)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, steps), eta_min=args.lr * 0.01)
     ckpt_path = args.out + ".ckpt"
     first_epoch = 1
     if args.resume and os.path.exists(ckpt_path):
-        ckpt = torch.load(ckpt_path, weights_only=False)
+        ckpt = torch.load(ckpt_path, weights_only=False, map_location=device)
         if (ckpt["positions"] != n or ckpt["hidden"] != args.hidden or ckpt["epochs"] != args.epochs
                 or ckpt.get("buckets", 1) != args.buckets):
             sys.exit(f"{ckpt_path} was made with different data, network size, buckets or --epochs")
@@ -339,7 +359,7 @@ def main(argv=None):
         t = time.time()
         total, count = 0.0, 0
         for idx in batches(len(train_idx), args.batch, True, rng):
-            w, b, s, k, target = tensors(*data, train_idx[idx], args.lam, args.buckets)
+            w, b, s, k, target = tensors(*data, train_idx[idx], args.lam, args.buckets, device)
             loss = ((torch.sigmoid(model(w, b, s, k)) - target) ** 2).mean()
             opt.zero_grad()
             loss.backward()
@@ -350,7 +370,7 @@ def main(argv=None):
             count += len(idx)
         msg = f"epoch {epoch:3d}  train {total / count:.6f}"
         if n_val:
-            msg += f"  val {evaluate_loss(model, data, val_idx, args.lam):.6f}"
+            msg += f"  val {evaluate_loss(model, data, val_idx, args.lam, device=device):.6f}"
         print(f"{msg}  ({time.time() - t:.0f}s)", flush=True)
         export(model, args.out)
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(),
