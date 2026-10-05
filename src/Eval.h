@@ -143,7 +143,7 @@ void materialAndPhase(const BoardT &b, int &score, int &phase) {
 template <class BoardT>
 int evaluate(const BoardT &b) {
     if constexpr (HasNnue<BoardT>::value) {
-        if (nnue::network()) return nnue::evaluate(b.accumulator(), b.sideToMove());
+        if (nnue::network()) return nnue::evaluate(b.accumulator(), b.sideToMove(), b.occupancy());
     }
     int score, phase; // phase: 24 = all pieces on the board, 0 = bare kings and pawns
     if constexpr (HasIncrementalEval<BoardT>::value) {

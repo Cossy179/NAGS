@@ -41,26 +41,36 @@ def test_features():
     assert sorted(black.tolist()) == sorted(f)  # the start position is symmetric
 
 
-def test_train_and_export(tmp_path):
+@pytest.mark.parametrize("buckets", [1, 8])
+def test_train_and_export(tmp_path, buckets):
     data = tmp_path / "d.txt"
     _dataset(data)
     out = tmp_path / "n.nnue"
-    train.main(["--data", str(data), "--out", str(out), "--epochs", "2", "--hidden", "16", "--batch", "64", "--threads", "1"])
-    assert out.stat().st_size == 16 + 2 * (768 * 16 + 16 + 32) + 4
+    train.main(["--data", str(data), "--out", str(out), "--epochs", "2", "--hidden", "16", "--batch", "64",
+                "--threads", "1", "--buckets", str(buckets)])
+    header = 16 if buckets == 1 else 20  # version 2 adds the bucket count
+    assert out.stat().st_size == header + 2 * (768 * 16 + 16 + buckets * 32) + 4 * buckets
     net = train.read_net(out)
+    assert net[2].shape == (buckets, 32)
     # The quantized evaluation tracks the float network closely.
-    model = train.Nnue(16)
+    model = train.Nnue(16, buckets)
     with torch.no_grad():
         model.ft.weight[:768] = torch.from_numpy(net[0] / train.QA).float()
         model.ft_bias[:] = torch.from_numpy(net[1] / train.QA).float()
-        model.out.weight[0] = torch.from_numpy(net[2] / train.QB).float()
-        model.out.bias[0] = net[3] / (train.QA * train.QB)
+        model.out.weight[:] = torch.from_numpy(net[2] / train.QB).float()
+        model.out.bias[:] = torch.from_numpy(net[3] / (train.QA * train.QB)).float()
     for fen in FENS:
         feats, stm, _, _ = train.parse_chunk([f"{fen} | 0 | 0.5"])
-        w, b, s, _ = train.tensors(feats, stm, np.zeros(1, np.int16), np.zeros(1, np.float32), np.array([0]), 1.0)
+        w, b, s, k, _ = train.tensors(feats, stm, np.zeros(1, np.int16), np.zeros(1, np.float32), np.array([0]), 1.0,
+                                      buckets)
         with torch.no_grad():
-            cp = float(model(w, b, s)) * train.SCALE
+            cp = float(model(w, b, s, k)) * train.SCALE
         assert abs(train.quantized_eval(net, fen) - cp) <= 2
+
+
+def test_buckets_by_piece_count():
+    assert [train.bucket_of(p, 8) for p in (2, 5, 8, 9, 16, 17, 32)] == [0, 1, 1, 2, 3, 4, 7]
+    assert train.bucket_of(32, 1) == 0
 
 
 def test_npz_inputs_equal_text(tmp_path):
@@ -94,11 +104,13 @@ def _engine():
 
 
 @pytest.mark.skipif(_engine() is None, reason="nags_enhanced not built")
-def test_engine_matches_reference(tmp_path):
+@pytest.mark.parametrize("buckets", [1, 8])
+def test_engine_matches_reference(tmp_path, buckets):
     data = tmp_path / "d.txt"
     _dataset(data)
     out = tmp_path / "n.nnue"
-    train.main(["--data", str(data), "--out", str(out), "--epochs", "2", "--hidden", "256", "--batch", "64", "--threads", "1", "--lr", "0.01"])
+    train.main(["--data", str(data), "--out", str(out), "--epochs", "2", "--hidden", "256", "--batch", "64",
+                "--threads", "1", "--lr", "0.01", "--buckets", str(buckets)])
     net = train.read_net(out)
     cmds = f"setoption name EvalFile value {out}\n" + "".join(f"position fen {f}\neval\n" for f in FENS)
     lines = subprocess.run([str(_engine())], input=cmds, capture_output=True, text=True, timeout=60).stdout.splitlines()

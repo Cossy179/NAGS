@@ -39,6 +39,9 @@ Network: 768 inputs per perspective (colour relative to the side whose
 perspective it is × 6 piece types × 64 squares, mirrored for Black), one
 768 → 256 feature transformer shared by both perspectives, a clipped ReLU,
 and one output from the two accumulators concatenated (side to move first).
+With `--buckets N` (up to 8) there are N output layers, picked by the number
+of pieces on the board (bucket = (pieces − 1) · N / 32), so the opening,
+middlegame and endgame get their own final weights at almost no cost.
 The target is `λ·sigmoid(score/400) + (1 − λ)·result` for the side to move
 (`--lambda`, default 0.75), with a squared error on `sigmoid(output)`.
 Training uses Adam with a cosine learning-rate schedule and holds out 1% of

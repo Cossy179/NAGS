@@ -24,12 +24,20 @@ namespace nnue {
 constexpr int kFeatures = 768;
 constexpr int kHidden = NAGS_NNUE_HIDDEN; // networks of another size are rejected when loaded
 constexpr int QA = 255, QB = 64, SCALE = 400;
+constexpr int kMaxBuckets = 8;
+
+// Output bucket for a position with `pieces` pieces (1 bucket: always 0).
+inline int bucketOf(int pieces, int buckets) {
+    int b = (pieces - 1) * buckets / 32;
+    return b < 0 ? 0 : b >= buckets ? buckets - 1 : b;
+}
 
 struct Network {
     alignas(64) int16_t ftWeights[kFeatures * kHidden];
     alignas(64) int16_t ftBias[kHidden];
-    alignas(64) int16_t outWeights[2 * kHidden];
-    int32_t outBias;
+    alignas(64) int16_t outWeights[kMaxBuckets][2 * kHidden]; // [bucket][us | them]
+    int32_t outBias[kMaxBuckets];
+    int buckets; // output layers in use, chosen by the number of pieces
 };
 
 struct Accumulator {
@@ -89,7 +97,8 @@ void refresh(Accumulator &acc, const BoardT &b) {
     }
 }
 
-// Centipawns from the side to move's point of view (with the active network).
-int evaluate(const Accumulator &acc, Color stm);
+// Centipawns from the side to move's point of view (with the active
+// network); `occupied` selects the output bucket by piece count.
+int evaluate(const Accumulator &acc, Color stm, uint64_t occupied);
 
 } // namespace nnue

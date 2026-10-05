@@ -1,5 +1,7 @@
 #include "Nnue.h"
 
+#include "BitOps.h"
+
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -9,11 +11,12 @@
 extern const unsigned char kNagsEmbeddedNet[];
 extern const unsigned long kNagsEmbeddedNetSize;
 
-// The two hot kernels are also compiled for AVX2 and picked at run time
+// The two hot kernels are also compiled for x86-64-v3 (AVX2, POPCNT, ...)
+// and picked at run time
 // where the toolchain supports it (GCC, x86-64 Linux); elsewhere the
 // portable build is used.
 #if defined(__GNUC__) && !defined(__clang__) && defined(__x86_64__) && defined(__linux__)
-#define NAGS_NNUE_KERNEL __attribute__((target_clones("avx2", "default")))
+#define NAGS_NNUE_KERNEL __attribute__((target_clones("arch=x86-64-v3", "default")))
 #else
 #define NAGS_NNUE_KERNEL
 #endif
@@ -33,24 +36,36 @@ T readLe(const unsigned char *p) {
 }
 
 bool parse(const unsigned char *data, size_t size, Network &net, std::string &error) {
-    const size_t expected = 16 + 2 * (kFeatures * kHidden + kHidden + 2 * kHidden) + 4;
     if (size < 16 || std::memcmp(data, "NAGSNNUE", 8) != 0) {
         error = "not a NAGS NNUE file";
         return false;
     }
-    if (readLe<uint32_t>(data + 8) != 1 || readLe<uint32_t>(data + 12) != kHidden) {
-        error = "unsupported network version or size";
+    // Version 1: one output layer. Version 2: a bucket count follows.
+    const uint32_t version = readLe<uint32_t>(data + 8);
+    size_t header = 16;
+    int buckets = 1;
+    if (version == 2 && size >= 20) {
+        buckets = static_cast<int>(readLe<uint32_t>(data + 16));
+        header = 20;
+    }
+    if ((version != 1 && version != 2) || readLe<uint32_t>(data + 12) != kHidden || buckets < 1 ||
+        buckets > kMaxBuckets) {
+        error = "unsupported network version or size (this build expects hidden size " + std::to_string(kHidden) + ")";
         return false;
     }
+    const size_t expected = header + 2 * (static_cast<size_t>(kFeatures) * kHidden + kHidden) +
+                            static_cast<size_t>(buckets) * (2 * 2 * kHidden + 4);
     if (size != expected) {
         error = "network file has the wrong size";
         return false;
     }
-    const unsigned char *p = data + 16;
+    net.buckets = buckets;
+    const unsigned char *p = data + header;
     for (int i = 0; i < kFeatures * kHidden; ++i, p += 2) net.ftWeights[i] = static_cast<int16_t>(readLe<uint16_t>(p));
     for (int i = 0; i < kHidden; ++i, p += 2) net.ftBias[i] = static_cast<int16_t>(readLe<uint16_t>(p));
-    for (int i = 0; i < 2 * kHidden; ++i, p += 2) net.outWeights[i] = static_cast<int16_t>(readLe<uint16_t>(p));
-    net.outBias = static_cast<int32_t>(readLe<uint32_t>(p));
+    for (int k = 0; k < buckets; ++k)
+        for (int i = 0; i < 2 * kHidden; ++i, p += 2) net.outWeights[k][i] = static_cast<int16_t>(readLe<uint16_t>(p));
+    for (int k = 0; k < buckets; ++k, p += 4) net.outBias[k] = static_cast<int32_t>(readLe<uint32_t>(p));
     return true;
 }
 
@@ -92,17 +107,19 @@ void addFeature(Accumulator &acc, const Network &net, Piece p, int sq) {
 }
 
 NAGS_NNUE_KERNEL
-int evaluate(const Accumulator &acc, Color stm) {
+int evaluate(const Accumulator &acc, Color stm, uint64_t occupied) {
     const Network &net = *network();
+    const int k = net.buckets == 1 ? 0 : bucketOf(popcount(occupied), net.buckets);
+    const int16_t *w = net.outWeights[k];
     const int16_t *us = acc.v[colorIndex(stm)];
     const int16_t *them = acc.v[colorIndex(stm) ^ 1];
     int32_t sum = 0;
     for (int i = 0; i < kHidden; ++i) {
         int16_t a = us[i] < 0 ? 0 : us[i] > QA ? static_cast<int16_t>(QA) : us[i];
         int16_t b = them[i] < 0 ? 0 : them[i] > QA ? static_cast<int16_t>(QA) : them[i];
-        sum += a * net.outWeights[i] + b * net.outWeights[kHidden + i];
+        sum += a * w[i] + b * w[kHidden + i];
     }
-    return static_cast<int>((static_cast<int64_t>(sum) + net.outBias) * SCALE / (QA * QB));
+    return static_cast<int>((static_cast<int64_t>(sum) + net.outBias[k]) * SCALE / (QA * QB));
 }
 
 NAGS_NNUE_KERNEL
