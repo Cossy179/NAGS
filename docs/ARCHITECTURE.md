@@ -69,10 +69,13 @@ either.
   "Improving" (the static evaluation is higher than two plies earlier)
   tightens reverse futility pruning, and when not improving late-move
   pruning keeps half as many quiet moves and reductions are one ply deeper.
+  Quiet moves with a history score below −4096·depth are pruned (depth ≤ 3)
+  and reductions shrink (or grow) by one ply per 8192 of history.
 * Move ordering: transposition-table move, then winning/equal captures by
   MVV/LVA (with promotions), killer moves, the countermove, losing captures
   (negative static exchange evaluation), and quiet moves by a history table
-  with a malus for quiet moves that failed to cut off.
+  with a malus for quiet moves that failed to cut off (bonus
+  min(150·depth − 100, 1500), with values kept within ±16384).
 * Quiescence search over captures and promotions with delta pruning and
   without losing captures (SEE < 0). When in check, all evasions are
   searched and there is no stand-pat. Results go to the transposition table

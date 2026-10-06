@@ -553,11 +553,13 @@ private:
             const Move m = moves[n];
             if (excluding && sameMove(m, excluded)) continue;
             bool quiet = !eval::isNoisy(board, m);
+            const int histScore = quiet ? history[colorIndex(us)][m.from][m.to] : 0;
             // Shallow quiet-move pruning. Only once a legal move has been
             // searched, so checkmate / stalemate detection is unaffected.
             if (!isPv && !inCheck && quiet && i > 0 && depth <= 3 && std::abs(alpha) < MATE_BOUND) {
                 if (quietsTried >= (3 + depth * depth) / (improving ? 1 : 2)) continue; // late-move pruning
                 if (staticEval + 120 * depth <= alpha) continue; // futility pruning
+                if (histScore < -4096 * depth) continue;          // history pruning
             }
             // Singular extension: if every other move fails low against a
             // margin below the TT score, the TT move is singular and gets one
@@ -583,7 +585,7 @@ private:
                 int reduction = 0;
                 if (depth >= 3 && i >= 2 && quiet && !inCheck && !givesCheck &&
                     !sameMove(m, killers[ply][0]) && !sameMove(m, killers[ply][1])) {
-                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1);
+                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1) - histScore / 8192;
                     reduction = std::clamp(reduction, 0, depth - 2);
                 }
                 score = -negamax(depth - 1 + extension - reduction, -alpha - 1, -alpha, ply + 1, false);
@@ -612,7 +614,7 @@ private:
                             // Reward the cutoff move and penalise the quiet
                             // moves tried before it; values decay towards
                             // zero as they approach the bound.
-                            int bonus = std::min(depth * depth, 1200);
+                            int bonus = std::min(150 * depth - 100, 1500);
                             auto &table = history[colorIndex(board.sideToMove())];
                             updateHistory(table[m.from][m.to], bonus);
                             for (int q = 0; q < quietsSearched.size(); ++q)

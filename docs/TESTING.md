@@ -49,10 +49,10 @@ of writing:
 
 | Engine | Bench nodes |
 |--------|-------------|
-| `nags_basic` | 1550179 |
-| `nags_fast` | 1346327 |
-| `nags_enhanced` | 2146785 |
-| `nags` | 2146785 |
+| `nags_basic` | 1574649 |
+| `nags_fast` | 1334801 |
+| `nags_enhanced` | 2047814 |
+| `nags` | 2047814 |
 
 When search improvements make a run much faster, raise the depth (in the
 engine's `main` file) and record the new fingerprints.
@@ -296,6 +296,7 @@ in the Test column, with 3 games in parallel on a 4-core VM, openings from
 | Continuation history (quiet-move history after the previous move and the one before, in move ordering and history updates) | SPRT [0, 10], 3+0.03 | H0 after 914 games (+258 =358 -298) | −15.2 ± 16.1 | – (not adopted) |
 | Internal iterative reduction (depth ≥ 4 without a TT move: one ply less) and "improving" (static eval above two plies earlier: reverse futility margin 80·(depth − improving); otherwise late-move pruning after half as many quiet moves and one more ply of reduction) | SPRT [0, 10], 3+0.03 | H1 after 772 games (+269 =299 -204) | +29.3 ± 17.7 | 2146785 |
 | Correction history (per side to move and pawn structure, a running average of search score − static eval, added to the evaluation; needs a pawn hash in FastBoard) | SPRT [0, 10], 3+0.03 | H0 after 1664 games (+484 =660 -520; 1 loss on time by the candidate) | −7.5 ± 12.6 | – (not adopted) |
+| History bonus min(150·depth − 100, 1500) instead of min(depth², 1200) (the old bonus left most scores under ±1000), with history pruning of quiet moves (depth ≤ 3, history < −4096·depth) and history-adjusted reductions (−history/8192 plies) | SPRT [0, 10], 3+0.03 | H1 after 1078 games (+353 =444 -281; 1 loss on time by the baseline) | +23.2 ± 15.3 | 2047814 |
 
 `nags` benches like `nags_enhanced` (without the Python services the MCTS
 arm does not run); before `nags` was rebuilt on FastBoard (see below) its
