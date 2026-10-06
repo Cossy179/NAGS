@@ -3,7 +3,8 @@
 // Iterative-deepening alpha-beta search shared by every engine. Templated on
 // the board type (Board or FastBoard). Features: principal variation search,
 // aspiration windows, check and singular extensions, reverse futility and
-// null-move pruning, late-move pruning/reductions, futility pruning, SEE,
+// null-move pruning, late-move pruning/reductions, futility pruning, internal
+// iterative reduction, an "improving" flag, SEE,
 // killer/countermove/history move ordering, quiescence search (with check
 // evasions and the TT), repetition / fifty-move draws, optional transposition table and
 // Lazy SMP helper threads, MultiPV, pondering and Syzygy tablebases. See
@@ -283,6 +284,10 @@ private:
     Move killers[MAX_PLY][2];
     int history[2][64][64];
     Move counterMoves[12][64]; // [piece that moved][its target square]
+    // Static evaluation at each ply (kNoEval when in check), for "improving":
+    // whether the side to move stands better than two plies earlier.
+    static constexpr int kNoEval = -1000000;
+    int evalStack[MAX_PLY + 1];
     Move pvTable[MAX_PLY][MAX_PLY];
     int pvLength[MAX_PLY] = {};
     uint64_t nodes = 0;
@@ -391,6 +396,7 @@ private:
     // Searches root moves [first, end) (MultiPV skips the lines already found).
     int rootSearch(int depth, int alpha, int beta, IterationResult &out, size_t first = 0) {
         pvLength[0] = 0;
+        evalStack[0] = board.inCheck() ? kNoEval : eval::evaluate(board);
         int bestScore = -INF_SCORE;
         int originalAlpha = alpha;
         for (size_t i = first; i < rootMoves.size(); ++i) {
@@ -490,13 +496,20 @@ private:
             }
         }
 
-        // Static evaluation for the pruning decisions below (not needed at PV
-        // nodes or in check, where nothing is pruned).
-        const int staticEval = (!isPv && !inCheck) ? eval::evaluate(board) : 0;
+        // Internal iterative reduction: without a TT move this node was not
+        // searched before (or failed low everywhere); search it a ply less.
+        if (tt && depth >= 4 && ttMove.isNull() && !excluding) --depth;
+
+        // Static evaluation for the pruning decisions below (a singular
+        // extension search reuses its node's).
+        const int staticEval = inCheck ? kNoEval : excluding ? evalStack[ply] : eval::evaluate(board);
+        evalStack[ply] = staticEval;
+        const bool improving = !inCheck && (ply < 2 || evalStack[ply - 2] == kNoEval || staticEval > evalStack[ply - 2]);
 
         // Reverse futility pruning: at shallow depth, a static evaluation that
         // beats beta by a depth-scaled margin is assumed to hold.
-        if (!isPv && !inCheck && !excluding && depth <= 6 && std::abs(beta) < MATE_BOUND && staticEval - 80 * depth >= beta)
+        if (!isPv && !inCheck && !excluding && depth <= 6 && std::abs(beta) < MATE_BOUND &&
+            staticEval - 80 * (depth - improving) >= beta)
             return staticEval;
 
         // Null-move pruning: if the side to move could pass and a reduced
@@ -543,7 +556,7 @@ private:
             // Shallow quiet-move pruning. Only once a legal move has been
             // searched, so checkmate / stalemate detection is unaffected.
             if (!isPv && !inCheck && quiet && i > 0 && depth <= 3 && std::abs(alpha) < MATE_BOUND) {
-                if (quietsTried >= 3 + depth * depth) continue;  // late-move pruning
+                if (quietsTried >= (3 + depth * depth) / (improving ? 1 : 2)) continue; // late-move pruning
                 if (staticEval + 120 * depth <= alpha) continue; // futility pruning
             }
             // Singular extension: if every other move fails low against a
@@ -570,7 +583,7 @@ private:
                 int reduction = 0;
                 if (depth >= 3 && i >= 2 && quiet && !inCheck && !givesCheck &&
                     !sameMove(m, killers[ply][0]) && !sameMove(m, killers[ply][1])) {
-                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0);
+                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1);
                     reduction = std::clamp(reduction, 0, depth - 2);
                 }
                 score = -negamax(depth - 1 + extension - reduction, -alpha - 1, -alpha, ply + 1, false);

@@ -64,7 +64,11 @@ either.
 * Pruning and reductions (outside PV nodes and check where it matters):
   reverse futility pruning (depth ≤ 6), null-move pruning (R = 3 + depth/6),
   late-move pruning and futility pruning of quiet moves (depth ≤ 3),
-  logarithmic late-move reductions, mate distance pruning.
+  logarithmic late-move reductions, mate distance pruning, and internal
+  iterative reduction (one ply less at depth ≥ 4 without a TT move).
+  "Improving" (the static evaluation is higher than two plies earlier)
+  tightens reverse futility pruning, and when not improving late-move
+  pruning keeps half as many quiet moves and reductions are one ply deeper.
 * Move ordering: transposition-table move, then winning/equal captures by
   MVV/LVA (with promotions), killer moves, the countermove, losing captures
   (negative static exchange evaluation), and quiet moves by a history table
