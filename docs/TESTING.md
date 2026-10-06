@@ -172,7 +172,30 @@ over months.
 | Date | Build | Combined estimate (10+0.1) |
 |------|-------|----------------------------|
 | 2026-10-03 | `a8e5c0c` (before Steps 1 and 2: no pruning beyond the TT, hand-written evaluation) | 2329 ± 52 |
-| 2026-10-04 | `af50fc5` (Step 1 search, NNUE network 5) | **2881 ± 34** |
+| 2026-10-04 | `af50fc5` (Step 1 search, NNUE network 5) | 2881 ± 34 |
+| 2026-10-06 | `3619db2` (NNUE network 7: 8 output buckets, 56.5M positions) | **2944 ± 34** |
+
+#### 2026-10-06: NNUE network 7
+
+Same setup as the 2026-10-04 run (`nags_enhanced`, 1 thread, 64 MB hash,
+embedded network 7; 80 games per level at 10+0.1, 3 games at a time). The
+2600 level was dropped: the previous build already scored 89% there, which
+says little about the rating.
+
+| Stockfish `UCI_Elo` | Result | Score | Elo difference | Implied rating | Previous build's score |
+|---|---|---|---|---|---|
+| 2800 | +35 =21 −24 | 57% | +48 ± 59 | 2848 ± 59 | 49% |
+| 3000 | +16 =35 −29 | 42% | −57 ± 56 | 2943 ± 56 | 33% |
+| 3190 (the maximum) | +9 =29 −42 | 29% | −152 ± 59 | 3038 ± 59 | 24% |
+
+Combined (inverse-variance weighted): **2944 ± 34** on Stockfish's
+`UCI_Elo` scale at 10+0.1. On the same three levels the 2026-10-04 build
+combines to 2871, so networks 6 and 7 together are worth about +70 here,
+about half of what self-play measured (+101 and +27.4); self-play matches
+against the previous network usually overstate gains against other
+engines. The levels again disagree in the same direction (2848 at 2800,
+3038 at 3190), so "about 2850–3050 on this scale" is a fair summary. No game
+was lost on time.
 
 #### 2026-10-04: Step 1 search and NNUE network 5
 
