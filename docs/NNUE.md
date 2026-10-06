@@ -199,6 +199,21 @@ searches about 25% fewer nodes per second and lost to network 5 by
 at longer time controls or with faster inference (e.g. AVX2 builds by
 default, or an int8 output layer).
 
+King buckets and SCReLU (format version 3) are supported but not yet in the
+default network. A first check on a small data set (network 6's 8.9M
+newest positions, 6 epochs, 8 output buckets, all three trained alike):
+
+| Design | Validation loss | Match |
+|--------|-----------------|-------|
+| 768 → 256, clipped ReLU | 0.01021 | – |
+| 4 king buckets (mirrored, factorised) + SCReLU | 0.01012 | −6.9 ± 12.5 against the first (SPRT [0, 10] at 3+0.03, H0 after 2158 games) |
+| SCReLU only | 0.01023 | – |
+
+The king-bucket network fits these positions better but did not play
+better: with four times the input weights it overfits so little data
+(training loss 0.0074 against 0.0094). Whether it pays off needs a test at
+a few hundred million positions.
+
 Validation losses are not comparable across rows once NNUE-engine positions
 enter the validation set (from network 3 on). Labels from games played by
 NNUE engines gave the biggest gains: each round of data from the current
