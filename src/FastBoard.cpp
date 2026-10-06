@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <iostream>
 #include <random>
 #include <sstream>
@@ -267,30 +268,76 @@ void FastBoard::removePiece(int sq) {
     phase -= phaseValue[static_cast<int>(p) - 1];
 }
 
+void FastBoard::setKingSquares(AccEntry &e) const {
+    e.kingSq[0] = static_cast<uint8_t>(lsb(pieces[0][KING]));
+    e.kingSq[1] = static_cast<uint8_t>(lsb(pieces[1][KING]));
+}
+
 void FastBoard::refreshAccumulator() {
     accStack.resize(1);
-    nnue::refresh(accStack[0].acc, *this);
-    accStack[0].computed = nnue::network() != nullptr;
+    refreshCache.entries.clear();
+    AccEntry &e = accStack[0];
+    const bool active = nnue::network() != nullptr;
+    if (active && pieces[0][KING] && pieces[1][KING]) {
+        setKingSquares(e);
+        nnue::refresh(e.acc, *this);
+    }
+    e.computed[0] = e.computed[1] = active;
+}
+
+// Brings the cached accumulator for (perspective, kstate) up to date with the
+// current pieces and copies it into the current position.
+void FastBoard::refreshPerspective(int perspective, int kstate) const {
+    const nnue::Network &net = *nnue::network();
+    auto &entries = refreshCache.entries;
+    if (entries.empty()) {
+        entries.resize(static_cast<size_t>(2 * nnue::kingStates(net)));
+        for (RefreshEntry &r : entries) {
+            for (int i = 0; i < nnue::kHidden; ++i) r.acc[i] = net.ftBias[i];
+            for (auto &side : r.pieces) for (Bitboard &b : side) b = 0;
+        }
+    }
+    RefreshEntry &r = entries[static_cast<size_t>(perspective * nnue::kingStates(net) + kstate)];
+    for (int c = 0; c < 2; ++c) {
+        for (int t = 0; t < 6; ++t) {
+            const Piece p = makePiece(c == 0 ? Color::White : Color::Black, t);
+            for (Bitboard add = pieces[c][t] & ~r.pieces[c][t]; add; add &= add - 1)
+                nnue::addFeature(r.acc, net, nnue::featureIndex(perspective, p, lsb(add), kstate));
+            for (Bitboard sub = r.pieces[c][t] & ~pieces[c][t]; sub; sub &= sub - 1)
+                nnue::subFeature(r.acc, net, nnue::featureIndex(perspective, p, lsb(sub), kstate));
+            r.pieces[c][t] = pieces[c][t];
+        }
+    }
+    std::memcpy(accStack.back().acc.v[perspective], r.acc, sizeof(r.acc));
 }
 
 const nnue::Accumulator &FastBoard::accumulator() const {
     const size_t top = accStack.size() - 1;
-    if (accStack[top].computed) return accStack[top].acc;
+    AccEntry &cur = accStack[top];
+    if (cur.computed[0] && cur.computed[1]) return cur.acc;
     const nnue::Network &net = *nnue::network();
-    size_t k = top;
-    while (k > 0 && !accStack[k].computed) --k;
-    if (!accStack[k].computed) {
-        // Nothing below has been computed (e.g. a copy made with just the
-        // current entry): compute the current position from scratch.
-        nnue::refresh(accStack[top].acc, *this);
-        accStack[top].computed = true;
-        return accStack[top].acc;
+    for (int persp = 0; persp < 2; ++persp) {
+        if (cur.computed[persp]) continue;
+        // Walk back to a computed position with the same king state; the
+        // moves since then can be applied incrementally.
+        const int kstate = nnue::kingState(net, persp, cur.kingSq[persp]);
+        size_t k = top;
+        while (k > 0 && !accStack[k].computed[persp] &&
+               nnue::kingState(net, persp, accStack[k - 1].kingSq[persp]) == kstate)
+            --k;
+        if (accStack[k].computed[persp]) {
+            for (size_t j = k + 1; j <= top; ++j) {
+                nnue::update(accStack[j - 1].acc.v[persp], accStack[j].acc.v[persp], net, accStack[j].dirty, persp, kstate);
+                accStack[j].computed[persp] = true;
+            }
+        } else {
+            // The king changed feature set on the way (or nothing below was
+            // computed, e.g. in a copy made with just the current entry).
+            refreshPerspective(persp, kstate);
+            cur.computed[persp] = true;
+        }
     }
-    for (size_t j = k + 1; j <= top; ++j) {
-        nnue::update(accStack[j - 1].acc, accStack[j].acc, net, accStack[j].dirty);
-        accStack[j].computed = true;
-    }
-    return accStack[top].acc;
+    return cur.acc;
 }
 
 void FastBoard::movePiece(int from, int to) {
@@ -638,6 +685,7 @@ void FastBoard::makeMove(const Move &m) {
     if (side == Color::Black) ++fullmoveNumber;
     side = opposite(side);
     hash ^= zSide;
+    if (nnue::network()) setKingSquares(accStack.back());
     ++pliesFromNull;
 }
 

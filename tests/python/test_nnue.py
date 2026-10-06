@@ -41,21 +41,34 @@ def test_features():
     assert sorted(black.tolist()) == sorted(f)  # the start position is symmetric
 
 
-@pytest.mark.parametrize("buckets", [1, 8])
-def test_train_and_export(tmp_path, buckets):
+DESIGNS = [  # (output buckets, king buckets, activation)
+    (1, "none", "crelu"),
+    (8, "none", "crelu"),
+    (1, "mirror", "crelu"),
+    (8, "4", "screlu"),
+    (4, "16", "screlu"),
+]
+
+
+@pytest.mark.parametrize("buckets,king,activation", DESIGNS)
+def test_train_and_export(tmp_path, buckets, king, activation):
     data = tmp_path / "d.txt"
     _dataset(data)
     out = tmp_path / "n.nnue"
     train.main(["--data", str(data), "--out", str(out), "--epochs", "2", "--hidden", "16", "--batch", "64",
-                "--threads", "1", "--buckets", str(buckets)])
-    header = 16 if buckets == 1 else 20  # version 2 adds the bucket count
-    assert out.stat().st_size == header + 2 * (768 * 16 + 16 + buckets * 32) + 4 * buckets
+                "--threads", "1", "--buckets", str(buckets), "--king-buckets", king, "--activation", activation])
+    kb = train.king_config(king)[0]
+    plain = king == "none" and activation == "crelu"
+    header = (16 if buckets == 1 else 20) if plain else 92
+    assert out.stat().st_size == header + 2 * (kb * 768 * 16 + 16 + buckets * 32) + 4 * buckets
     net = train.read_net(out)
-    assert net[2].shape == (buckets, 32)
+    assert net[2].shape == (buckets, 32) and net[0].shape == (kb * 768, 16)
+    assert net[4]["screlu"] == (activation == "screlu") and net[4]["king_buckets"] == kb
     # The quantized evaluation tracks the float network closely.
-    model = train.Nnue(16, buckets)
+    model = train.Nnue(16, buckets, king, activation == "screlu")
     with torch.no_grad():
-        model.ft.weight[:768] = torch.from_numpy(net[0] / train.QA).float()
+        model.ft.weight.zero_()
+        model.ft.weight[: kb * 768] = torch.from_numpy(net[0] / train.QA).float()
         model.ft_bias[:] = torch.from_numpy(net[1] / train.QA).float()
         model.out.weight[:] = torch.from_numpy(net[2] / train.QB).float()
         model.out.bias[:] = torch.from_numpy(net[3] / (train.QA * train.QB)).float()
@@ -66,6 +79,26 @@ def test_train_and_export(tmp_path, buckets):
         with torch.no_grad():
             cp = float(model(w, b, s, k)) * train.SCALE
         assert abs(train.quantized_eval(net, fen) - cp) <= 2
+
+
+def test_king_buckets():
+    kb = train.KingBuckets("4")
+    assert (kb.count, kb.mirror, kb.factor) == (4, True, True)
+    feats, _, _, _ = train.parse_chunk([f"{FENS[2]} | 0 | 0.5"])  # White king g1, Black king g8
+    white = torch.from_numpy(feats).long()
+    rows = kb(white)
+    assert rows.shape == (1, 64)
+    # g1 -> mirrored to b1 -> bucket 0; the white pawn on a3 becomes h3.
+    assert 0 * 768 + 0 * 384 + 0 * 64 + 23 in rows[0, :32].tolist()
+    # Factor rows: the same mirrored features after the 4 bucket sets.
+    assert 4 * 768 + 23 in rows[0, 32:].tolist()
+    # The Black perspective sees its king on g1 as well (flipped vertically).
+    black = train.mirror(white)
+    black[white == train.PAD] = train.PAD
+    assert 5 * 64 + 1 in kb(black)[0, :32].tolist()
+    assert train.KingBuckets("none")(white) is white
+    with pytest.raises(ValueError):
+        train.king_config("1,2,3")
 
 
 def test_buckets_by_piece_count():
@@ -104,13 +137,14 @@ def _engine():
 
 
 @pytest.mark.skipif(_engine() is None, reason="nags_enhanced not built")
-@pytest.mark.parametrize("buckets", [1, 8])
-def test_engine_matches_reference(tmp_path, buckets):
+@pytest.mark.parametrize("buckets,king,activation", DESIGNS)
+def test_engine_matches_reference(tmp_path, buckets, king, activation):
     data = tmp_path / "d.txt"
     _dataset(data)
     out = tmp_path / "n.nnue"
     train.main(["--data", str(data), "--out", str(out), "--epochs", "2", "--hidden", "256", "--batch", "64",
-                "--threads", "1", "--lr", "0.01", "--buckets", str(buckets)])
+                "--threads", "1", "--lr", "0.01", "--buckets", str(buckets), "--king-buckets", king,
+                "--activation", activation])
     net = train.read_net(out)
     cmds = f"setoption name EvalFile value {out}\n" + "".join(f"position fen {f}\neval\n" for f in FENS)
     lines = subprocess.run([str(_engine())], input=cmds, capture_output=True, text=True, timeout=60).stdout.splitlines()

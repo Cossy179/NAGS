@@ -35,33 +35,56 @@ T readLe(const unsigned char *p) {
     return v;
 }
 
+// Formats (little endian; see tools/nnue/train.py):
+//   1: hidden size, one output layer
+//   2: hidden size, output bucket count
+//   3: hidden size, output buckets, king buckets, flags (bit 0 SCReLU, bit 1
+//      mirroring), the king-square layout (64 bytes); feature weights for
+//      every king bucket
 bool parse(const unsigned char *data, size_t size, Network &net, std::string &error) {
     if (size < 16 || std::memcmp(data, "NAGSNNUE", 8) != 0) {
         error = "not a NAGS NNUE file";
         return false;
     }
-    // Version 1: one output layer. Version 2: a bucket count follows.
     const uint32_t version = readLe<uint32_t>(data + 8);
     size_t header = 16;
-    int buckets = 1;
+    int buckets = 1, kingBuckets = 1;
+    uint32_t flags = 0;
+    uint8_t layout[64] = {};
     if (version == 2 && size >= 20) {
         buckets = static_cast<int>(readLe<uint32_t>(data + 16));
         header = 20;
+    } else if (version == 3 && size >= 92) {
+        buckets = static_cast<int>(readLe<uint32_t>(data + 16));
+        kingBuckets = static_cast<int>(readLe<uint32_t>(data + 20));
+        flags = readLe<uint32_t>(data + 24);
+        std::memcpy(layout, data + 28, 64);
+        header = 92;
     }
-    if ((version != 1 && version != 2) || readLe<uint32_t>(data + 12) != kHidden || buckets < 1 ||
-        buckets > kMaxBuckets) {
+    if (version < 1 || version > 3 || readLe<uint32_t>(data + 12) != kHidden || buckets < 1 ||
+        buckets > kMaxBuckets || kingBuckets < 1 || kingBuckets > kMaxKingBuckets || flags > 3) {
         error = "unsupported network version or size (this build expects hidden size " + std::to_string(kHidden) + ")";
         return false;
     }
-    const size_t expected = header + 2 * (static_cast<size_t>(kFeatures) * kHidden + kHidden) +
-                            static_cast<size_t>(buckets) * (2 * 2 * kHidden + 4);
+    for (int sq = 0; sq < 64; ++sq)
+        if (layout[sq] >= kingBuckets) {
+            error = "bad king bucket layout";
+            return false;
+        }
+    const size_t ftCount = static_cast<size_t>(kingBuckets) * kFeatures * kHidden;
+    const size_t expected = header + 2 * (ftCount + kHidden) + static_cast<size_t>(buckets) * (2 * 2 * kHidden + 4);
     if (size != expected) {
         error = "network file has the wrong size";
         return false;
     }
     net.buckets = buckets;
+    net.kingBuckets = kingBuckets;
+    net.screlu = flags & 1;
+    net.mirror = flags & 2;
+    std::memcpy(net.kingLayout, layout, 64);
+    net.ftWeights.resize(ftCount);
     const unsigned char *p = data + header;
-    for (int i = 0; i < kFeatures * kHidden; ++i, p += 2) net.ftWeights[i] = static_cast<int16_t>(readLe<uint16_t>(p));
+    for (size_t i = 0; i < ftCount; ++i, p += 2) net.ftWeights[i] = static_cast<int16_t>(readLe<uint16_t>(p));
     for (int i = 0; i < kHidden; ++i, p += 2) net.ftBias[i] = static_cast<int16_t>(readLe<uint16_t>(p));
     for (int k = 0; k < buckets; ++k)
         for (int i = 0; i < 2 * kHidden; ++i, p += 2) net.outWeights[k][i] = static_cast<int16_t>(readLe<uint16_t>(p));
@@ -98,12 +121,14 @@ bool load(const std::string &path, std::string &error) {
     return true;
 }
 
-void addFeature(Accumulator &acc, const Network &net, Piece p, int sq) {
-    for (int persp = 0; persp < 2; ++persp) {
-        const int16_t *w = net.ftWeights + featureIndex(persp, p, sq) * kHidden;
-        int16_t *a = acc.v[persp];
-        for (int i = 0; i < kHidden; ++i) a[i] = static_cast<int16_t>(a[i] + w[i]);
-    }
+void addFeature(int16_t *a, const Network &net, int feature) {
+    const int16_t *w = net.ftWeights.data() + static_cast<size_t>(feature) * kHidden;
+    for (int i = 0; i < kHidden; ++i) a[i] = static_cast<int16_t>(a[i] + w[i]);
+}
+
+void subFeature(int16_t *a, const Network &net, int feature) {
+    const int16_t *w = net.ftWeights.data() + static_cast<size_t>(feature) * kHidden;
+    for (int i = 0; i < kHidden; ++i) a[i] = static_cast<int16_t>(a[i] - w[i]);
 }
 
 NAGS_NNUE_KERNEL
@@ -113,35 +138,47 @@ int evaluate(const Accumulator &acc, Color stm, uint64_t occupied) {
     const int16_t *w = net.outWeights[k];
     const int16_t *us = acc.v[colorIndex(stm)];
     const int16_t *them = acc.v[colorIndex(stm) ^ 1];
-    int32_t sum = 0;
-    for (int i = 0; i < kHidden; ++i) {
-        int16_t a = us[i] < 0 ? 0 : us[i] > QA ? static_cast<int16_t>(QA) : us[i];
-        int16_t b = them[i] < 0 ? 0 : them[i] > QA ? static_cast<int16_t>(QA) : them[i];
-        sum += a * w[i] + b * w[kHidden + i];
+    int64_t total;
+    if (net.screlu) {
+        // clamp(x)^2 * w as (clamp(x) * w) * clamp(x): the first product fits
+        // in 16 bits because the trainer keeps |w| <= 127.
+        int32_t sum = 0;
+        for (int i = 0; i < kHidden; ++i) {
+            int16_t a = us[i] < 0 ? 0 : us[i] > QA ? static_cast<int16_t>(QA) : us[i];
+            int16_t b = them[i] < 0 ? 0 : them[i] > QA ? static_cast<int16_t>(QA) : them[i];
+            sum += static_cast<int16_t>(a * w[i]) * a + static_cast<int16_t>(b * w[kHidden + i]) * b;
+        }
+        total = sum / QA;
+    } else {
+        int32_t sum = 0;
+        for (int i = 0; i < kHidden; ++i) {
+            int16_t a = us[i] < 0 ? 0 : us[i] > QA ? static_cast<int16_t>(QA) : us[i];
+            int16_t b = them[i] < 0 ? 0 : them[i] > QA ? static_cast<int16_t>(QA) : them[i];
+            sum += a * w[i] + b * w[kHidden + i];
+        }
+        total = sum;
     }
-    return static_cast<int>((static_cast<int64_t>(sum) + net.outBias[k]) * SCALE / (QA * QB));
+    return static_cast<int>((total + net.outBias[k]) * SCALE / (QA * QB));
 }
 
 NAGS_NNUE_KERNEL
-void update(const Accumulator &prev, Accumulator &next, const Network &net, const DirtyPieces &d) {
-    for (int persp = 0; persp < 2; ++persp) {
-        const int16_t *in = prev.v[persp];
-        int16_t *out = next.v[persp];
-        const int16_t *a0 = net.ftWeights + featureIndex(persp, d.addPiece[0], d.addSquare[0]) * kHidden;
-        const int16_t *r0 = net.ftWeights + featureIndex(persp, d.removePiece[0], d.removeSquare[0]) * kHidden;
-        if (d.adds == 1 && d.removes == 1) { // quiet move
-            for (int i = 0; i < kHidden; ++i) out[i] = static_cast<int16_t>(in[i] + a0[i] - r0[i]);
-            continue;
-        }
-        const int16_t *r1 = net.ftWeights + featureIndex(persp, d.removePiece[1], d.removeSquare[1]) * kHidden;
-        if (d.adds == 1) { // capture
-            for (int i = 0; i < kHidden; ++i) out[i] = static_cast<int16_t>(in[i] + a0[i] - r0[i] - r1[i]);
-            continue;
-        }
-        const int16_t *a1 = net.ftWeights + featureIndex(persp, d.addPiece[1], d.addSquare[1]) * kHidden;
-        for (int i = 0; i < kHidden; ++i) // castling
-            out[i] = static_cast<int16_t>(in[i] + a0[i] + a1[i] - r0[i] - r1[i]);
+void update(const int16_t *in, int16_t *out, const Network &net, const DirtyPieces &d, int persp, int kstate) {
+    const int16_t *w = net.ftWeights.data();
+    auto row = [&](Piece p, int sq) { return w + static_cast<size_t>(featureIndex(persp, p, sq, kstate)) * kHidden; };
+    const int16_t *a0 = row(d.addPiece[0], d.addSquare[0]);
+    const int16_t *r0 = row(d.removePiece[0], d.removeSquare[0]);
+    if (d.adds == 1 && d.removes == 1) { // quiet move
+        for (int i = 0; i < kHidden; ++i) out[i] = static_cast<int16_t>(in[i] + a0[i] - r0[i]);
+        return;
     }
+    const int16_t *r1 = row(d.removePiece[1], d.removeSquare[1]);
+    if (d.adds == 1) { // capture
+        for (int i = 0; i < kHidden; ++i) out[i] = static_cast<int16_t>(in[i] + a0[i] - r0[i] - r1[i]);
+        return;
+    }
+    const int16_t *a1 = row(d.addPiece[1], d.addSquare[1]);
+    for (int i = 0; i < kHidden; ++i) // castling
+        out[i] = static_cast<int16_t>(in[i] + a0[i] + a1[i] - r0[i] - r1[i]);
 }
 
 void useEmbedded() {

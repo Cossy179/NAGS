@@ -42,6 +42,20 @@ and one output from the two accumulators concatenated (side to move first).
 With `--buckets N` (up to 8) there are N output layers, picked by the number
 of pieces on the board (bucket = (pieces − 1) · N / 32), so the opening,
 middlegame and endgame get their own final weights at almost no cost.
+
+Two more options change the design (format version 3; the engine reads all
+versions):
+
+* `--king-buckets 4|8|16|mirror` gives each perspective several 768-feature
+  sets, chosen by its own king's square, and mirrors its board left-right
+  when that king is on files e–h (`mirror` only mirrors). The layouts are in
+  `KING_LAYOUTS` in `train.py`; 32 comma-separated numbers give a custom one.
+  During training a shared factor set is added to every bucket, so what the
+  buckets have in common is learned from all positions; it is folded into
+  the buckets on export. More buckets need more data.
+* `--activation screlu` squares the clipped ReLU (SCReLU), which usually
+  evaluates better at the same size and speed.
+
 The target is `λ·sigmoid(score/400) + (1 − λ)·result` for the side to move
 (`--lambda`, default 0.75), with a squared error on `sigmoid(output)`.
 Training uses Adam with a cosine learning-rate schedule and holds out 1% of
@@ -57,8 +71,11 @@ settings).
 `makeMove` only records the pieces the move adds and removes, the
 accumulators are computed when an evaluation first needs them (in one pass
 per move from the nearest computed position below), and `unmakeMove` just
-drops them. `eval::evaluate` uses the network whenever one
-is active. The update and evaluation kernels are also compiled for AVX2 and
+drops them. With king buckets a perspective whose king changes feature set
+is recomputed instead, from a per-board cache that keeps one accumulator per
+perspective and king bucket together with the pieces it was computed for,
+so only the difference to the current pieces is applied. `eval::evaluate`
+uses the network whenever one is active. The update and evaluation kernels are also compiled for AVX2 and
 chosen at run time with GCC on x86-64 Linux; other builds use the portable
 code. With the test network, `bench` runs at about 0.8× the speed of the
 hand-written evaluation (portable build; about 0.5× before the accumulator
