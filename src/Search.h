@@ -4,7 +4,7 @@
 // the board type (Board or FastBoard). Features: principal variation search,
 // aspiration windows, check and singular extensions, reverse futility and
 // null-move pruning, late-move pruning/reductions, futility pruning, internal
-// iterative reduction, an "improving" flag, SEE,
+// iterative reduction, an "improving" flag, SEE (ordering and pruning),
 // killer/countermove/history/continuation-history move ordering, quiescence search (with check
 // evasions and the TT), repetition / fifty-move draws, optional transposition table and
 // Lazy SMP helper threads, MultiPV, pondering and Syzygy tablebases. See
@@ -601,6 +601,11 @@ private:
                 if (staticEval + 120 * depth <= alpha) continue; // futility pruning
                 if (histScore < -4096 * depth) continue;          // history pruning
             }
+            // SEE pruning: at low depth, skip moves that lose material by
+            // force (more for captures, which win some of it back).
+            if (!isPv && !inCheck && i > 0 && depth <= 8 && std::abs(alpha) < MATE_BOUND && !sameMove(m, ttMove) &&
+                eval::see(board, m) < (quiet ? -60 * depth : -20 * depth * depth))
+                continue;
             // Singular extension: if every other move fails low against a
             // margin below the TT score, the TT move is singular and gets one
             // more ply. If even the alternatives beat beta, cut (multi-cut).
