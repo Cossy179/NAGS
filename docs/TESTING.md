@@ -51,8 +51,8 @@ of writing:
 |--------|-------------|
 | `nags_basic` | 2772872 |
 | `nags_fast` | 2456904 |
-| `nags_enhanced` | 4780523 |
-| `nags` | 4780523 |
+| `nags_enhanced` | 4318033 |
+| `nags` | 4318033 |
 
 When search improvements make a run much faster, raise the depth (in the
 engine's `main` file) and record the new fingerprints.
@@ -292,6 +292,7 @@ in the Test column, with 3 games in parallel on a 4-core VM, openings from
 | 512-wide network on network 5's data (`NAGS_NNUE_HIDDEN=512` build, validation loss 0.00778 vs 0.00815) vs network 5 (256); the 512 build searches about 25% fewer nodes per second | SPRT [0, 10], 3+0.03 | H0 after 450 games (+122 =144 -184; 1 loss on time by the 512 build) | −48.2 ± 25.4 | – (not adopted) |
 | Network 6: 8 output buckets by piece count, 47.7M positions (network 5's data plus 9.3M from games by the network-5 engine) vs network 5 | SPRT [0, 10], 3+0.03 | H1 after 304 games (+155 =80 -69) | +101.0 ± 34.2 | 5692115 |
 | Network 7: 56.5M positions (network 6's data plus 8.86M from ~104,000 games by the network-6 engine), 8 buckets, vs network 6 | SPRT [0, 10], 3+0.03 | H1 after 1042 games (+388 =348 -306) | +27.4 ± 16.9 | 4780523 |
+| Transposition table in quiescence search (probe with cutoffs at non-PV nodes, TT move first, TT score as a better stand-pat, results stored at depth 0) | SPRT [0, 10], 3+0.03 | H1 after 1066 games (+360 =416 -290; 1 loss on time by the baseline) | +22.8 ± 15.2 | 4318033 |
 
 `nags` benches like `nags_enhanced` (without the Python services the MCTS
 arm does not run); before `nags` was rebuilt on FastBoard (see below) its

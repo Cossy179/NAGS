@@ -5,7 +5,7 @@
 // aspiration windows, check and singular extensions, reverse futility and
 // null-move pruning, late-move pruning/reductions, futility pruning, SEE,
 // killer/countermove/history move ordering, quiescence search (with check
-// evasions), repetition / fifty-move draws, optional transposition table and
+// evasions and the TT), repetition / fifty-move draws, optional transposition table and
 // Lazy SMP helper threads, MultiPV, pondering and Syzygy tablebases. See
 // docs/ARCHITECTURE.md and, for the tested gain of each, docs/TESTING.md.
 //
@@ -633,18 +633,47 @@ private:
         return best;
     }
 
+    // Captures and promotions only (every evasion when in check). Results go
+    // to the TT at depth 0; non-PV nodes take cutoffs from it.
     int quiescence(int alpha, int beta, int ply) {
         if (checkStop()) return 0;
         ++nodes;
         selDepth = std::max(selDepth, ply);
         if (ply >= MAX_PLY - 1) return eval::evaluate(board);
 
+        const bool isPv = beta - alpha > 1;
+        const uint64_t key = board.zobrist();
+        Move ttMove;
+        TTHit hit;
+        bool ttHit = false;
+        if (tt && tt->probe(key, hit)) {
+            ttHit = true;
+            ttMove = hit.move;
+            if (!isPv) {
+                int s = scoreFromTT(hit.score, ply);
+                if (hit.bound == Bound::Exact || (hit.bound == Bound::Lower && s >= beta) ||
+                    (hit.bound == Bound::Upper && s <= alpha))
+                    return s;
+            }
+        }
+
         bool inCheck = board.inCheck();
         int best = -INF_SCORE;
         int stand = 0;
+        const int originalAlpha = alpha;
         if (!inCheck) {
             stand = eval::evaluate(board);
-            if (stand >= beta) return stand;
+            // A TT score whose bound points the right way is a better estimate.
+            if (ttHit && std::abs(hit.score) < TB_BOUND) {
+                int s = hit.score;
+                if (hit.bound == Bound::Exact || (hit.bound == Bound::Lower && s > stand) ||
+                    (hit.bound == Bound::Upper && s < stand))
+                    stand = s;
+            }
+            if (stand >= beta) {
+                if (tt && !ttHit) tt->store(key, 0, Bound::Lower, scoreToTT(stand, ply), Move{});
+                return stand;
+            }
             if (stand > alpha) alpha = stand;
             best = stand;
         }
@@ -652,11 +681,14 @@ private:
         // In check every evasion must be considered (no stand-pat).
         MoveList moves;
         board.generatePseudoLegalMoves(moves, !inCheck);
+        // The TT move only counts if this generator produced it (a quiet TT
+        // move is not searched outside check).
         int scores[MoveList::kCapacity];
-        for (int k = 0; k < moves.size(); ++k) scores[k] = moveScore(moves[k], Move{}, MAX_PLY);
+        for (int k = 0; k < moves.size(); ++k) scores[k] = moveScore(moves[k], ttMove, MAX_PLY);
 
         const Color us = board.sideToMove();
         int legal = 0;
+        Move bestMove;
         for (int n = 0; n < moves.size(); ++n) {
             pickNext(moves, scores, n);
             const Move m = moves[n];
@@ -676,11 +708,16 @@ private:
                 best = score;
                 if (score > alpha) {
                     alpha = score;
+                    bestMove = m;
                     if (alpha >= beta) break;
                 }
             }
         }
         if (inCheck && legal == 0) return -MATE_SCORE + ply; // checkmate
+        if (tt) {
+            Bound bound = best >= beta ? Bound::Lower : (best > originalAlpha ? Bound::Exact : Bound::Upper);
+            tt->store(key, 0, bound, scoreToTT(best, ply), bestMove);
+        }
         return best;
     }
 };

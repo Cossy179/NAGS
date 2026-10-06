@@ -71,7 +71,9 @@ either.
   with a malus for quiet moves that failed to cut off.
 * Quiescence search over captures and promotions with delta pruning and
   without losing captures (SEE < 0). When in check, all evasions are
-  searched and there is no stand-pat.
+  searched and there is no stand-pat. Results go to the transposition table
+  at depth 0; non-PV nodes take cutoffs from it, its move is tried first,
+  and a stored score bounded on the right side replaces the stand-pat.
 * Time management: no new iteration after a soft limit that grows when the
   best move just changed or the score dropped and shrinks when the best move
   is stable; a hard limit aborts the search.
