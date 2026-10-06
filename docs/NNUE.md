@@ -28,12 +28,29 @@ with the search score in centipawns and the result (1.0 / 0.5 / 0.0), both
 from White's point of view. Output is appended, so several runs (use a
 different `--seed`) can go into one file.
 
+With an output name ending in `.bin` each position is a 32-byte binary
+record instead (occupancy, 4-bit piece codes, score, result, side to move;
+the layout is at the top of `src/datagen_main.cpp`). That is about half the
+size of text and loads in seconds, so it is the format to use for large
+data sets. `tools/nnue/pack.py` converts existing text files (or `.npz`
+caches): `python tools/nnue/pack.py "data/selfplay*.txt"` writes a `.bin`
+next to each.
+
 ## 2. Training: `tools/nnue/train.py`
 
 ```bash
 python tools/nnue/train.py --data data/selfplay.txt --cache data/selfplay.npz \
     --epochs 30 --out nets/nags.nnue
+python tools/nnue/train.py --data "data/*.bin" --epochs 30 --out nets/nags.nnue
 ```
+
+Text input is parsed into memory (`--cache` saves the parsed arrays as
+`.npz`). Binary input (`.bin`, which cannot be mixed with text) is kept in
+GPU memory when it fits; otherwise it is read from disk in groups of 1M-
+position chunks, in a new random order every epoch, shuffled within each
+group and loaded while the previous group trains, so data sets much larger
+than memory train at full speed. Its validation set is the last 1% of the
+records (at most 1M). Wildcards in `--data` are expanded by the trainer.
 
 Network: 768 inputs per perspective (colour relative to the side whose
 perspective it is × 6 piece types × 64 squares, mirrored for Black), one
@@ -133,25 +150,30 @@ command.
 **First, build up data.** The training data is not in the repository (it is
 large and easy to regenerate). A network trained on a few million positions
 is weaker than the built-in one, so generate several batches first, each
-with a new seed, until you have 40–50M positions (about 90 positions per
-game):
+with a new seed (about 90 positions per game, 32 bytes each). For the
+current design 40–50M positions are enough; bigger designs (king buckets, a
+wider layer) need 200M or more:
 ```
-build\Release\nags_datagen.exe --out data\selfplay_101.txt --games 150000 --threads 11 --seed 101
+build\Release\nags_datagen.exe --out data\selfplay_101.bin --games 150000 --threads 11 --seed 101
 ```
-(`--threads`: one less than your CPU's thread count.)
+(`--threads`: one less than your CPU's thread count.) In PowerShell, a loop
+over seeds runs unattended, e.g. 15 batches of about 13.5M positions:
+```
+foreach ($s in 101..115) { build\Release\nags_datagen.exe --out data\selfplay_$s.bin --games 150000 --threads 11 --seed $s }
+```
 
 **Then run rounds:**
 ```
 python tools\nnue\run_round.py --games 150000 --threads 11 --seed 102
 ```
-This generates new games, trains on every `data\selfplay*.txt` (on the GPU,
-`--device auto`), and plays the new network against the built-in one
-(SPRT [0, 10] at 3+0.03). If the new one wins it is copied to
+This generates new games, trains on every `data\selfplay*.bin` (on the GPU,
+`--device auto`; older `selfplay*.txt` files are converted to `.bin` once),
+and plays the new network against the built-in one (SPRT [0, 10] at
+3+0.03). `--king-buckets` and `--activation` choose the network design, e.g.
+`--king-buckets 4 --activation screlu`. If the new one wins it is copied to
 `nets\nags.nnue`: rebuild, check `bench`, record the match in
 `docs/TESTING.md` and commit. `--skip-datagen` trains on the existing data
-only; `--skip-test` stops after training. `train.py --device cuda` keeps the
-whole data set in GPU memory when it fits and otherwise builds each batch on
-the CPU.
+only; `--skip-test` stops after training.
 
 ## Networks
 

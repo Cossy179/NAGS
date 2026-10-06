@@ -2,10 +2,10 @@
 """One NNUE round on your own machine: generate data, train, test.
 
 1. nags_datagen plays games with the current engine (CPU, all threads) and
-   appends positions to <data-dir>/selfplay_<seed>.txt.
-2. tools/nnue/train.py trains a new network on every selfplay*.txt in the
-   data directory (each file is parsed once into a .npz cache next to it),
-   on the GPU when PyTorch has CUDA.
+   appends positions to <data-dir>/selfplay_<seed>.bin (binary records).
+2. tools/nnue/train.py trains a new network on every selfplay*.bin in the
+   data directory, on the GPU when PyTorch has CUDA. Older selfplay*.txt
+   files are converted to .bin once (tools/nnue/pack.py) and then used too.
 3. tools/sprt.py plays the new network against the engine's built-in one.
    If it wins (H1), the network is copied to nets/nags.nnue; rebuild the
    engines and commit it.
@@ -13,7 +13,8 @@
     python tools/nnue/run_round.py --games 100000 --threads 11 --seed 101
 
 Use a new --seed every round so no games repeat. --skip-datagen trains on
-the existing data only; --skip-test stops after training.
+the existing data only; --skip-test stops after training. --king-buckets
+and --activation choose the network design (see train.py).
 """
 
 import argparse
@@ -48,6 +49,8 @@ def main(argv=None):
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--buckets", type=int, default=8)
     ap.add_argument("--hidden", type=int, default=256, help="must match the engine build (NAGS_NNUE_HIDDEN)")
+    ap.add_argument("--king-buckets", default="none", help="input buckets by king square (see train.py)")
+    ap.add_argument("--activation", default="crelu", choices=["crelu", "screlu"])
     ap.add_argument("--device", default="auto", help="training device: auto, cpu or cuda")
     ap.add_argument("--tc", default="3+0.03", help="time control of the test match")
     ap.add_argument("--skip-datagen", action="store_true")
@@ -60,27 +63,26 @@ def main(argv=None):
     net = data_dir / f"net_{stamp}.nnue"
 
     if not args.skip_datagen:
-        out = data_dir / f"selfplay_{args.seed}.txt"
+        out = data_dir / f"selfplay_{args.seed}.bin"
         if run([find_binary("nags_datagen"), "--out", out, "--games", args.games, "--threads", args.threads,
                 "--nodes", args.nodes, "--seed", args.seed]) != 0:
             sys.exit("data generation failed")
 
-    texts = sorted(data_dir.glob("selfplay*.txt"))
-    if not texts:
-        sys.exit(f"no selfplay*.txt files in {data_dir}")
     sys.path.insert(0, str(ROOT / "tools" / "nnue"))
+    import pack  # noqa: E402
     import train  # noqa: E402
 
-    caches = []
-    for t in texts:
-        cache = t.with_suffix(".npz")
-        if not cache.exists() or cache.stat().st_mtime < t.stat().st_mtime:
-            print(f"parsing {t.name}", flush=True)
-            cache.unlink(missing_ok=True)
-            train.load([str(t)], cache=str(cache))
-        caches.append(str(cache))
-    train.main(["--data", *caches, "--out", str(net), "--epochs", str(args.epochs), "--buckets", str(args.buckets),
-                "--hidden", str(args.hidden), "--device", args.device])
+    for t in sorted(data_dir.glob("selfplay*.txt")):
+        b = t.with_suffix(".bin")
+        if not b.exists() or b.stat().st_mtime < t.stat().st_mtime:
+            print(f"converting {t.name} to {b.name}", flush=True)
+            pack.pack(str(t), str(b))
+    files = sorted(data_dir.glob("selfplay*.bin"))
+    if not files:
+        sys.exit(f"no selfplay*.bin or selfplay*.txt files in {data_dir}")
+    train.main(["--data", *map(str, files), "--out", str(net), "--epochs", str(args.epochs),
+                "--buckets", str(args.buckets), "--hidden", str(args.hidden), "--device", args.device,
+                "--king-buckets", args.king_buckets, "--activation", args.activation])
 
     if args.skip_test:
         print(f"trained {net}")

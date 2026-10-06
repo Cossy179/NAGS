@@ -41,12 +41,21 @@ Export (little endian), read by src/Nnue.cpp:
 Networks without king buckets, mirroring or SCReLU are written as version 1
 (one output bucket) or 2.
 
+Training data: nags_datagen text files (parsed, optionally cached as .npz)
+or its 32-byte binary records (.bin; see src/datagen_main.cpp, and
+tools/nnue/pack.py to convert text files). Binary data is held in GPU memory
+when it fits and otherwise streamed from disk in shuffled chunks, so data
+sets much larger than memory train at full speed.
+
 Usage:
 
     python tools/nnue/train.py --data data/selfplay.txt --epochs 30 --out nets/nags.nnue
+    python tools/nnue/train.py --data "data/*.bin" --epochs 30 --out nets/nags.nnue
 """
 
 import argparse
+import concurrent.futures
+import glob
 import math
 import multiprocessing as mp
 import os
@@ -232,6 +241,197 @@ def load(paths, cache=None, workers=None):
     return feats, stm, score, result
 
 
+RECORD_BYTES = 32
+
+
+def encode(feats, stm, score, result):
+    """Positions as parsed (White-perspective features with PAD, side to move,
+    White's score and result) -> binary records, uint8 [N, 32]."""
+    n = len(feats)
+    f = feats.astype(np.int64)
+    valid = f != PAD
+    sq = np.where(valid, f % 64, 64)
+    order = np.argsort(sq, axis=1, kind="stable")
+    sq = np.take_along_axis(sq, order, axis=1)
+    f = np.take_along_axis(f, order, axis=1)
+    valid = sq < 64
+    codes = np.where(valid, (f // 384) * 6 + (f % 384) // 64, 0).astype(np.uint8)
+    occ = np.zeros(n, np.uint64)
+    for j in range(MAX_PIECES):
+        occ |= np.where(valid[:, j], np.left_shift(np.uint64(1), np.minimum(sq[:, j], 63).astype(np.uint64)),
+                        np.uint64(0))
+    rec = np.zeros((n, RECORD_BYTES), np.uint8)
+    rec[:, :8] = occ.astype("<u8").view(np.uint8).reshape(n, 8)
+    rec[:, 8:24] = codes[:, 0::2] | (codes[:, 1::2] << 4)
+    rec[:, 24:26] = np.asarray(score, "<i2").view(np.uint8).reshape(n, 2)
+    rec[:, 26] = np.round(np.asarray(result) * 2).astype(np.uint8)
+    rec[:, 27] = np.asarray(stm, np.uint8)
+    return rec
+
+
+def decode(rec):
+    """Binary records (uint8 tensor [N, 32] on any device) -> White-perspective
+    features [N, 32] (PAD-filled), side to move, White's score and result."""
+    n, dev = rec.shape[0], rec.device
+    rec = rec.long()
+    bits = ((rec[:, :8].unsqueeze(2) >> torch.arange(8, device=dev)) & 1).reshape(n, 64)
+    occupied = bits.bool()
+    order = bits.cumsum(1) - 1  # piece number of each occupied square
+    nib = torch.stack([rec[:, 8:24] & 15, rec[:, 8:24] >> 4], dim=2).reshape(n, 32)
+    code = nib.gather(1, order.clamp(0, MAX_PIECES - 1))
+    f = (code // 6) * 384 + (code % 6) * 64 + torch.arange(64, device=dev)
+    feats = torch.full((n, MAX_PIECES + 1), PAD, dtype=torch.long, device=dev)
+    feats.scatter_(1, torch.where(occupied, order, MAX_PIECES), torch.where(occupied, f, PAD))
+    score = rec[:, 24] | (rec[:, 25] << 8)
+    score = torch.where(score >= 32768, score - 65536, score)
+    return feats[:, :MAX_PIECES], rec[:, 27], score, rec[:, 26].float() / 2
+
+
+def expand_paths(paths):
+    """Expands wildcards (Windows shells pass them through unexpanded)."""
+    out = []
+    for p in paths:
+        if any(c in p for c in "*?["):
+            matches = sorted(glob.glob(p))
+            if not matches:
+                sys.exit(f"no files match {p}")
+            out.extend(matches)
+        else:
+            out.append(p)
+    return out
+
+
+class ArrayData:
+    """Parsed positions held in memory (text files and .npz caches)."""
+
+    def __init__(self, data, val, rng, device):
+        self.n = len(data[0])
+        self.device = device
+        # On a GPU the whole data set stays in GPU memory when it fits
+        # (batches are then gathered on the GPU); otherwise batches are built
+        # on the CPU.
+        data_device = torch.device("cpu")
+        if device.type == "cuda":
+            free, _ = torch.cuda.mem_get_info(device)
+            if sum(x.nbytes for x in data) < free // 2:
+                data_device = device
+            print(f"training on {torch.cuda.get_device_name(device)}, data in "
+                  f"{'GPU' if data_device.type == 'cuda' else 'CPU'} memory", flush=True)
+        self.data = tuple(torch.from_numpy(x).to(data_device) for x in data)
+        perm = rng.permutation(self.n)
+        n_val = max(1, int(self.n * val)) if self.n > 100 else 0
+        self.val_idx, self.train_idx = perm[:n_val], perm[n_val:]
+        self.n_val = n_val
+
+    def steps(self, batch):
+        return math.ceil(len(self.train_idx) / batch)
+
+    def train_batches(self, rng, batch, lam, buckets):
+        for idx in batches(len(self.train_idx), batch, True, rng):
+            yield tensors(*self.data, self.train_idx[idx], lam, buckets, self.device)
+
+    def val_loss(self, model, lam):
+        return evaluate_loss(model, self.data, self.val_idx, lam, device=self.device)
+
+
+class BinData:
+    """Binary record files. The last records (up to 1M) are held out for
+    validation. The rest is kept in GPU memory when it fits, and otherwise
+    read from disk in groups of chunks (in a new random order every epoch,
+    shuffled within each group, the next group loading while the current one
+    trains)."""
+
+    CHUNK = 1 << 20  # records (32 MB)
+    GROUP = 8        # chunks shuffled together
+
+    def __init__(self, paths, val, device):
+        self.device = device
+        self.maps = []
+        for p in paths:
+            size = os.path.getsize(p)
+            if size % RECORD_BYTES:
+                sys.exit(f"{p}: the size is not a multiple of {RECORD_BYTES} bytes")
+            if size:
+                self.maps.append(np.memmap(p, np.uint8, "r", shape=(size // RECORD_BYTES, RECORD_BYTES)))
+        self.n = sum(len(m) for m in self.maps)
+        self.n_val = min(max(1, int(self.n * val)), 1 << 20) if self.n > 100 else 0
+        self.n_train = self.n - self.n_val
+        # Training and validation ranges as (file, start, end) pieces.
+        self.chunks, self.val_parts = [], []
+        offset = 0
+        for i, m in enumerate(self.maps):
+            lo, hi = offset, offset + len(m)
+            for s in range(lo, min(hi, self.n_train), self.CHUNK):
+                self.chunks.append((i, s - lo, min(hi, self.n_train, s + self.CHUNK) - lo))
+            if hi > self.n_train:
+                self.val_parts.append((i, max(lo, self.n_train) - lo, len(m)))
+            offset = hi
+        self.resident = None
+        if device.type == "cuda":
+            free, _ = torch.cuda.mem_get_info(device)
+            if self.n * RECORD_BYTES < free - (2 << 30):
+                self.resident = torch.empty((self.n_train, RECORD_BYTES), dtype=torch.uint8, device=device)
+                pos = 0
+                for i, s, e in self.chunks:
+                    self.resident[pos : pos + e - s] = torch.from_numpy(np.array(self.maps[i][s:e])).to(device)
+                    pos += e - s
+            print(f"training on {torch.cuda.get_device_name(device)}, data "
+                  f"{'in GPU memory' if self.resident is not None else 'streamed from disk'}", flush=True)
+
+    def steps(self, batch):
+        return math.ceil(self.n_train / batch)
+
+    def _read(self, chunks):
+        return np.concatenate([self.maps[i][s:e] for i, s, e in chunks])
+
+    def _records(self, rng, batch):
+        """Batches of records covering the training range once."""
+        if self.resident is not None:
+            order = torch.from_numpy(rng.permutation(self.n_train)).to(self.device)
+            for i in range(0, self.n_train, batch):
+                yield self.resident[order[i : i + batch]]
+            return
+        chunk_order = rng.permutation(len(self.chunks))
+        groups = [[self.chunks[c] for c in chunk_order[g : g + self.GROUP]]
+                  for g in range(0, len(chunk_order), self.GROUP)]
+        perms = [rng.permutation(sum(e - s for _, s, e in grp)) for grp in groups]
+        leftover = None
+        with concurrent.futures.ThreadPoolExecutor(1) as pool:
+            pending = pool.submit(self._read, groups[0]) if groups else None
+            for g in range(len(groups)):
+                block = pending.result()
+                pending = pool.submit(self._read, groups[g + 1]) if g + 1 < len(groups) else None
+                block = torch.from_numpy(block).to(self.device)[torch.from_numpy(perms[g]).to(self.device)]
+                if leftover is not None:
+                    block = torch.cat([leftover, block])
+                full = len(block) // batch * batch
+                for i in range(0, full, batch):
+                    yield block[i : i + batch]
+                leftover = block[full:] if full < len(block) else None
+        if leftover is not None:
+            yield leftover
+
+    def train_batches(self, rng, batch, lam, buckets):
+        for rec in self._records(rng, batch):
+            feats, stm, score, result = decode(rec)
+            yield tensors(feats, stm, score, result, torch.arange(len(rec), device=rec.device), lam, buckets,
+                          self.device)
+
+    def val_loss(self, model, lam, size=65536):
+        model.eval()
+        total = 0.0
+        with torch.no_grad():
+            for i, s, e in self.val_parts:
+                for start in range(s, e, size):
+                    rec = torch.from_numpy(np.array(self.maps[i][start : min(e, start + size)])).to(self.device)
+                    feats, stm, score, result = decode(rec)
+                    w, b, st, k, t = tensors(feats, stm, score, result, torch.arange(len(rec), device=rec.device), lam,
+                                             model.buckets, self.device)
+                    total += float(((torch.sigmoid(model(w, b, st, k)) - t) ** 2).sum())
+        model.train()
+        return total / max(1, self.n_val)
+
+
 class Nnue(torch.nn.Module):
     def __init__(self, hidden=256, buckets=1, king_buckets="none", screlu=False):
         super().__init__()
@@ -408,8 +608,9 @@ def quantized_eval(net, fen):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data", nargs="+", required=True, help="nags_datagen output files (or .npz caches)")
-    ap.add_argument("--cache", help="parsed-data cache (.npz), created if missing")
+    ap.add_argument("--data", nargs="+", required=True,
+                    help="nags_datagen output: text files (or .npz caches) or .bin files; wildcards are expanded")
+    ap.add_argument("--cache", help="parsed-data cache for text input (.npz), created if missing")
     ap.add_argument("--out", required=True, help="exported network")
     ap.add_argument("--hidden", type=int, default=256)
     ap.add_argument("--buckets", type=int, default=1, help=f"output buckets by piece count (1-{MAX_BUCKETS})")
@@ -440,25 +641,19 @@ def main(argv=None):
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
 
+    paths = expand_paths(args.data)
+    binary = [p.endswith(".bin") for p in paths]
+    if any(binary) and not all(binary):
+        sys.exit("--data: .bin files cannot be mixed with other inputs (convert those with tools/nnue/pack.py)")
     t0 = time.time()
-    data = load(args.data, args.cache)
-    n = len(data[0])
+    if binary and all(binary):
+        source = BinData(paths, args.val, device)
+    else:
+        source = ArrayData(load(paths, args.cache), args.val, rng, device)
+    n = source.n
     print(f"{n} positions loaded in {time.time() - t0:.0f}s", flush=True)
     if n == 0:
         sys.exit("no positions")
-    # On a GPU the whole data set stays in GPU memory when it fits (batches
-    # are then gathered on the GPU); otherwise batches are built on the CPU.
-    data_device = torch.device("cpu")
-    if device.type == "cuda":
-        free, _ = torch.cuda.mem_get_info(device)
-        if sum(x.nbytes for x in data) < free // 2:
-            data_device = device
-        print(f"training on {torch.cuda.get_device_name(device)}, data in "
-              f"{'GPU' if data_device.type == 'cuda' else 'CPU'} memory", flush=True)
-    data = tuple(torch.from_numpy(x).to(data_device) for x in data)
-    perm = rng.permutation(n)
-    n_val = max(1, int(n * args.val)) if n > 100 else 0
-    val_idx, train_idx = perm[:n_val], perm[n_val:]
 
     if not 1 <= args.buckets <= MAX_BUCKETS:
         sys.exit(f"--buckets must be 1-{MAX_BUCKETS}")
@@ -468,7 +663,7 @@ def main(argv=None):
         sys.exit(f"--king-buckets: {e}")
     model = Nnue(args.hidden, args.buckets, args.king_buckets, args.activation == "screlu").to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    steps = args.epochs * math.ceil(len(train_idx) / args.batch)
+    steps = args.epochs * source.steps(args.batch)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, steps), eta_min=args.lr * 0.01)
     ckpt_path = args.out + ".ckpt"
     first_epoch = 1
@@ -488,19 +683,18 @@ def main(argv=None):
     for epoch in range(first_epoch, last_epoch + 1):
         t = time.time()
         total, count = 0.0, 0
-        for idx in batches(len(train_idx), args.batch, True, rng):
-            w, b, s, k, target = tensors(*data, train_idx[idx], args.lam, args.buckets, device)
+        for w, b, s, k, target in source.train_batches(rng, args.batch, args.lam, args.buckets):
             loss = ((torch.sigmoid(model(w, b, s, k)) - target) ** 2).mean()
             opt.zero_grad()
             loss.backward()
             opt.step()
             sched.step()
             model.clip()
-            total += loss.item() * len(idx)
-            count += len(idx)
+            total += loss.item() * len(target)
+            count += len(target)
         msg = f"epoch {epoch:3d}  train {total / count:.6f}"
-        if n_val:
-            msg += f"  val {evaluate_loss(model, data, val_idx, args.lam, device=device):.6f}"
+        if source.n_val:
+            msg += f"  val {source.val_loss(model, args.lam):.6f}"
         print(f"{msg}  ({time.time() - t:.0f}s)", flush=True)
         export(model, args.out)
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(),

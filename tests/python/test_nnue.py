@@ -11,6 +11,7 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools" / "nnue"))
+import pack  # noqa: E402
 import train  # noqa: E402
 
 FENS = [
@@ -115,6 +116,76 @@ def test_npz_inputs_equal_text(tmp_path):
     mixed = train.load([str(tmp_path / "a.npz"), str(b)])
     for x, y in zip(direct, mixed):
         assert np.array_equal(x, y)
+
+
+def _sorted(feats):
+    return np.sort(np.asarray(feats), axis=1)
+
+
+def test_binary_records_round_trip(tmp_path):
+    lines = [f"{fen} | {s} | {r}\n" for fen, s, r in zip(FENS, [12, -340, 0, 31999, -32000], ["1.0", "0.5", "0.0", "1.0", "0.5"])]
+    feats, stm, score, result = train.parse_chunk(lines)
+    rec = train.encode(feats, stm, score, result)
+    assert rec.shape == (5, 32)
+    f2, s2, sc2, r2 = train.decode(torch.from_numpy(rec))
+    assert np.array_equal(_sorted(f2.numpy()), _sorted(feats))
+    assert np.array_equal(s2.numpy(), stm) and np.array_equal(sc2.numpy(), score) and np.array_equal(r2.numpy(), result)
+    # The converter writes the same records.
+    src = tmp_path / "d.txt"
+    src.write_text("".join(lines))
+    pack.main([str(src)])
+    assert (tmp_path / "d.bin").read_bytes() == rec.tobytes()
+
+
+def test_streamed_epoch_covers_every_record_once(tmp_path, monkeypatch):
+    data = tmp_path / "d.txt"
+    _dataset(data, n=1000, seed=3)
+    pack.main([str(data)])
+    monkeypatch.setattr(train.BinData, "CHUNK", 37)
+    monkeypatch.setattr(train.BinData, "GROUP", 3)
+    src = train.BinData([str(tmp_path / "d.bin")] * 2, 0.05, torch.device("cpu"))  # the same file twice
+    assert (src.n, src.n_val, src.n_train) == (2000, 100, 1900)
+    rng = np.random.default_rng(0)
+    rows = torch.cat(list(src._records(rng, 64)))
+    assert len(rows) == 1900 and src.steps(64) == 30
+    raw = np.fromfile(tmp_path / "d.bin", np.uint8).reshape(-1, 32)
+    expected = np.concatenate([raw, raw])[:1900]
+    key = lambda a: sorted(map(bytes, a))
+    assert key(rows.numpy()) == key(expected)
+
+
+def test_train_from_binary(tmp_path):
+    data = tmp_path / "d.txt"
+    _dataset(data)
+    pack.main([str(data)])
+    common = ["--epochs", "3", "--hidden", "8", "--batch", "64", "--threads", "1"]
+    train.main(["--data", str(tmp_path / "*.bin"), "--out", str(tmp_path / "full.nnue")] + common)
+    train.main(["--data", str(tmp_path / "d.bin"), "--out", str(tmp_path / "split.nnue"), "--stop-after", "1"] + common)
+    train.main(["--data", str(tmp_path / "d.bin"), "--out", str(tmp_path / "split.nnue"), "--resume"] + common)
+    assert (tmp_path / "full.nnue").read_bytes() == (tmp_path / "split.nnue").read_bytes()
+    with pytest.raises(SystemExit):
+        train.main(["--data", str(tmp_path / "d.bin"), str(data), "--out", str(tmp_path / "x.nnue")] + common)
+
+
+def _datagen():
+    for c in (ROOT / "build" / "nags_datagen", ROOT / "build" / "Release" / "nags_datagen.exe"):
+        if c.exists():
+            return c
+    return None
+
+
+@pytest.mark.skipif(_datagen() is None, reason="nags_datagen not built")
+def test_datagen_binary_equals_text(tmp_path):
+    args = ["--games", "4", "--threads", "1", "--nodes", "300", "--seed", "5"]
+    subprocess.run([str(_datagen()), "--out", str(tmp_path / "g.txt")] + args, check=True, capture_output=True)
+    subprocess.run([str(_datagen()), "--out", str(tmp_path / "g.bin")] + args, check=True, capture_output=True)
+    text = train.parse_chunk((tmp_path / "g.txt").read_text().splitlines())
+    assert len(text[0]) > 20
+    rec = np.fromfile(tmp_path / "g.bin", np.uint8).reshape(-1, 32)
+    binary = train.decode(torch.from_numpy(rec))
+    assert np.array_equal(_sorted(binary[0].numpy()), _sorted(text[0]))
+    for a, b in zip(binary[1:], text[1:]):
+        assert np.array_equal(a.numpy(), b)
 
 
 def test_resume_reproduces_a_full_run(tmp_path):

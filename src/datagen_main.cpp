@@ -7,7 +7,18 @@
 //   <fen> | <score> | <result>
 //
 // with the search score in centipawns and the game result (1.0 / 0.5 / 0.0),
-// both from White's point of view.
+// both from White's point of view. With an output file ending in ".bin" each
+// position is a 32-byte record instead (about half the size, and much faster
+// to load), all little endian:
+//
+//   uint64 occupancy        bit i = square i (a1 = 0, h8 = 63)
+//   uint8  pieces[16]       4-bit piece codes (P N B R Q K p n b r q k =
+//                           0..11) of the occupied squares in ascending
+//                           order, low nibble first
+//   int16  score            centipawns, White's point of view
+//   uint8  result           0 = Black won, 1 = draw, 2 = White won
+//   uint8  side to move     0 = White, 1 = Black
+//   uint8  reserved[4]      0
 //
 //   nags_datagen --out data/selfplay.txt --games 10000 --threads 3 --nodes 5000
 
@@ -16,6 +27,8 @@
 #include "TT.h"
 #include "Uci.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -33,6 +46,7 @@ namespace {
 
 struct Options {
     std::string out;
+    bool binary = false; // 32-byte records (the output name ends in ".bin")
     long long games = 1000;
     int threads = 1;
     uint64_t nodes = 5000;
@@ -43,9 +57,30 @@ struct Options {
 };
 
 struct Record {
-    std::string fen;
-    int score; // White's point of view
+    std::string fen;                  // text output
+    std::array<unsigned char, 32> bin; // binary output (without the result)
+    int score;                        // White's point of view
 };
+
+// The binary record of a position, except for the result byte.
+std::array<unsigned char, 32> packPosition(const FastBoard &b, int score) {
+    std::array<unsigned char, 32> r{};
+    const uint64_t occ = b.occupancy();
+    for (int i = 0; i < 8; ++i) r[i] = static_cast<unsigned char>((occ >> (8 * i)) & 0xFF);
+    int n = 0;
+    for (int sq = 0; sq < 64; ++sq) {
+        Piece p = b.pieceAt(sq);
+        if (p == Piece::None) continue;
+        int code = pieceTypeOf(p) + (colorOf(p) == Color::White ? 0 : 6);
+        r[8 + n / 2] = static_cast<unsigned char>(r[8 + n / 2] | (code << (4 * (n % 2))));
+        ++n;
+    }
+    const uint16_t s = static_cast<uint16_t>(static_cast<int16_t>(std::clamp(score, -32000, 32000)));
+    r[24] = static_cast<unsigned char>(s & 0xFF);
+    r[25] = static_cast<unsigned char>(s >> 8);
+    r[27] = b.sideToMove() == Color::White ? 0 : 1;
+    return r;
+}
 
 std::mutex outMutex;
 std::atomic<long long> gamesStarted{0}, gamesDone{0}, positionsWritten{0};
@@ -61,7 +96,11 @@ bool parseArgs(int argc, char **argv, Options &o) {
         if (i + 1 >= argc) { usage(); return false; }
         std::string v = argv[++i];
         long long n = 0;
-        if (a == "--out") { o.out = v; continue; }
+        if (a == "--out") {
+            o.out = v;
+            o.binary = v.size() >= 4 && v.compare(v.size() - 4, 4, ".bin") == 0;
+            continue;
+        }
         if (!uci::parseInt(v, n) || n < 0) { std::cerr << "invalid value for " << a << "\n"; return false; }
         if (a == "--games") o.games = n;
         else if (a == "--threads") o.threads = static_cast<int>(std::max(1LL, n));
@@ -134,7 +173,8 @@ bool playGame(const Options &o, std::mt19937_64 &rng, Searcher<FastBoard> &searc
         // Training positions: not in check, a quiet best move, and no mate
         // or tablebase score (those say little about the evaluation).
         if (!board.inCheck() && isQuiet(board, r.bestMove) && std::abs(r.score) < TB_BOUND)
-            records.push_back({board.getFEN(), whiteScore});
+            records.push_back(o.binary ? Record{{}, packPosition(board, whiteScore), whiteScore}
+                                       : Record{board.getFEN(), {}, whiteScore});
         board.makeMove(r.bestMove);
     }
 }
@@ -149,8 +189,16 @@ void worker(const Options &o, int id, std::ofstream &out) {
         while (!playGame(o, rng, searcher, tt, records, result)) {
         }
         std::ostringstream buf;
-        const char *res = result == 1.0 ? "1.0" : result == 0.0 ? "0.0" : "0.5";
-        for (const Record &rec : records) buf << rec.fen << " | " << rec.score << " | " << res << '\n';
+        if (o.binary) {
+            const unsigned char res = result == 1.0 ? 2 : result == 0.0 ? 0 : 1;
+            for (Record &rec : records) {
+                rec.bin[26] = res;
+                buf.write(reinterpret_cast<const char *>(rec.bin.data()), static_cast<std::streamsize>(rec.bin.size()));
+            }
+        } else {
+            const char *res = result == 1.0 ? "1.0" : result == 0.0 ? "0.0" : "0.5";
+            for (const Record &rec : records) buf << rec.fen << " | " << rec.score << " | " << res << '\n';
+        }
         {
             std::lock_guard<std::mutex> lock(outMutex);
             out << buf.str();
@@ -166,7 +214,7 @@ void worker(const Options &o, int id, std::ofstream &out) {
 int main(int argc, char **argv) {
     Options o;
     if (!parseArgs(argc, argv, o)) return 2;
-    std::ofstream out(o.out, std::ios::app);
+    std::ofstream out(o.out, o.binary ? std::ios::app | std::ios::binary : std::ios::app);
     if (!out) {
         std::cerr << "cannot open " << o.out << "\n";
         return 1;
