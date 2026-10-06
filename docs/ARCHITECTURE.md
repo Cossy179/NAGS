@@ -75,7 +75,10 @@ either.
   MVV/LVA (with promotions), killer moves, the countermove, losing captures
   (negative static exchange evaluation), and quiet moves by a history table
   with a malus for quiet moves that failed to cut off (bonus
-  min(150·depth − 100, 1500), with values kept within ±16384).
+  min(150·depth − 100, 1500), with values kept within ±16384), plus
+  continuation history: the same for (piece, target) pairs following the
+  move one and two plies earlier. Their sum orders quiet moves and drives
+  history pruning and reductions.
 * Quiescence search over captures and promotions with delta pruning and
   without losing captures (SEE < 0). When in check, all evasions are
   searched and there is no stand-pat. Results go to the transposition table

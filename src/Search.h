@@ -5,7 +5,7 @@
 // aspiration windows, check and singular extensions, reverse futility and
 // null-move pruning, late-move pruning/reductions, futility pruning, internal
 // iterative reduction, an "improving" flag, SEE,
-// killer/countermove/history move ordering, quiescence search (with check
+// killer/countermove/history/continuation-history move ordering, quiescence search (with check
 // evasions and the TT), repetition / fifty-move draws, optional transposition table and
 // Lazy SMP helper threads, MultiPV, pondering and Syzygy tablebases. See
 // docs/ARCHITECTURE.md and, for the tested gain of each, docs/TESTING.md.
@@ -194,6 +194,7 @@ public:
         for (auto &k : killers) k[0] = k[1] = Move{};
         for (auto &side : history) for (auto &from : side) for (auto &v : from) v = 0;
         for (auto &piece : counterMoves) for (auto &mv : piece) mv = Move{};
+        for (int i = 0; i < 12 * 64; ++i) for (auto &p : contHist[i]) for (auto &v : p) v = 0;
     }
 
     // Searches the root to `depth` (with an aspiration window around
@@ -257,6 +258,7 @@ public:
     // the result is only a bound). Used to verify a candidate from another
     // source. Returns false if aborted.
     bool scoreRootMove(const Move &m, int depth, int &score, int alpha = -INF_SCORE, int beta = INF_SCORE) {
+        setPlyMove(0, m);
         board.makeMove(m);
         int s = -negamax(std::max(0, depth - 1), -beta, -alpha, 1, beta - alpha > 1);
         board.unmakeMove();
@@ -284,6 +286,15 @@ private:
     Move killers[MAX_PLY][2];
     int history[2][64][64];
     Move counterMoves[12][64]; // [piece that moved][its target square]
+    // Continuation history: how well a quiet move (piece, target) did right
+    // after a given move (piece, target) one or two plies earlier.
+    using ContTable = int16_t[12][64];
+    std::unique_ptr<ContTable[]> contHist = std::make_unique<ContTable[]>(12 * 64); // [prev piece * 64 + prev to]
+    struct PlyMove {
+        int piece = -1; // 0..11 (moving piece), -1 for none or a null move
+        int to = 0;
+    };
+    PlyMove plyMoves[MAX_PLY + 1]; // the move played at each ply
     // Static evaluation at each ply (kNoEval when in check), for "improving":
     // whether the side to move stands better than two plies earlier.
     static constexpr int kNoEval = -1000000;
@@ -316,7 +327,8 @@ private:
 
     // Order: TT move, winning/equal captures and promotions (MVV/LVA), killers
     // and the countermove, losing captures (negative SEE), quiet moves by history.
-    int moveScore(const Move &m, const Move &ttMove, int ply, const Move &counter = Move{}) const {
+    int moveScore(const Move &m, const Move &ttMove, int ply, const Move &counter = Move{},
+                  const ContTable *cont1 = nullptr, const ContTable *cont2 = nullptr) const {
         if (!ttMove.isNull() && sameMove(m, ttMove)) return 1 << 30;
         if (eval::isNoisy(board, m)) {
             int victim = eval::capturedValue(board, m);
@@ -330,7 +342,23 @@ private:
             if (sameMove(m, killers[ply][1])) return (1 << 23) + 1;
             if (!counter.isNull() && sameMove(m, counter)) return 1 << 23;
         }
-        return history[colorIndex(board.sideToMove())][m.from][m.to];
+        int score = history[colorIndex(board.sideToMove())][m.from][m.to];
+        if (cont1 || cont2) {
+            const int piece = static_cast<int>(board.pieceAt(m.from)) - 1;
+            if (cont1) score += (*cont1)[piece][m.to];
+            if (cont2) score += (*cont2)[piece][m.to];
+        }
+        return score;
+    }
+
+    // Continuation table for the move played `back` plies before `ply`.
+    ContTable *contFor(int ply, int back) const {
+        if (ply < back) return nullptr;
+        const PlyMove &pm = plyMoves[ply - back];
+        return pm.piece < 0 ? nullptr : &contHist[pm.piece * 64 + pm.to];
+    }
+    void setPlyMove(int ply, const Move &m) {
+        plyMoves[ply] = {m.isNull() ? -1 : static_cast<int>(board.pieceAt(m.from)) - 1, m.isNull() ? 0 : m.to};
     }
 
     // Quiet move that refuted the opponent's previous move last time.
@@ -362,6 +390,9 @@ private:
         return table[std::min(depth, 63)][std::min(moveNumber, 63)];
     }
     static void updateHistory(int &h, int bonus) { h += bonus - h * std::abs(bonus) / kHistoryMax; }
+    static void updateContHistory(int16_t &h, int bonus) {
+        h = static_cast<int16_t>(h + bonus - h * std::abs(bonus) / kHistoryMax);
+    }
     static constexpr int kHistoryMax = 16384;
 
     bool hasNonPawnMaterial(Color c) const {
@@ -401,6 +432,7 @@ private:
         int originalAlpha = alpha;
         for (size_t i = first; i < rootMoves.size(); ++i) {
             const Move m = rootMoves[i];
+            setPlyMove(0, m);
             board.makeMove(m);
             int score;
             if (i == first) {
@@ -519,6 +551,7 @@ private:
         if (!isPv && !inCheck && !excluding && depth >= 3 && !board.lastMoveWasNull() && std::abs(beta) < MATE_BOUND &&
             hasNonPawnMaterial(board.sideToMove()) && staticEval >= beta) {
             int reduction = 3 + depth / 6;
+            plyMoves[ply] = PlyMove{};
             board.makeNullMove();
             int score = -negamax(depth - 1 - reduction, -beta, -beta + 1, ply + 1, false);
             board.unmakeNullMove();
@@ -532,8 +565,9 @@ private:
         board.generatePseudoLegalMoves(moves);
         const Move prevMove = board.lastMove();
         const Move counter = counterMoveFor(prevMove);
+        ContTable *cont1 = contFor(ply, 1), *cont2 = contFor(ply, 2);
         int scores[MoveList::kCapacity];
-        for (int k = 0; k < moves.size(); ++k) scores[k] = moveScore(moves[k], ttMove, ply, counter);
+        for (int k = 0; k < moves.size(); ++k) scores[k] = moveScore(moves[k], ttMove, ply, counter, cont1, cont2);
 
         const Color us = board.sideToMove();
         int originalAlpha = alpha;
@@ -553,7 +587,13 @@ private:
             const Move m = moves[n];
             if (excluding && sameMove(m, excluded)) continue;
             bool quiet = !eval::isNoisy(board, m);
-            const int histScore = quiet ? history[colorIndex(us)][m.from][m.to] : 0;
+            int histScore = 0;
+            if (quiet) {
+                histScore = history[colorIndex(us)][m.from][m.to];
+                const int piece = static_cast<int>(board.pieceAt(m.from)) - 1;
+                if (cont1) histScore += (*cont1)[piece][m.to];
+                if (cont2) histScore += (*cont2)[piece][m.to];
+            }
             // Shallow quiet-move pruning. Only once a legal move has been
             // searched, so checkmate / stalemate detection is unaffected.
             if (!isPv && !inCheck && quiet && i > 0 && depth <= 3 && std::abs(alpha) < MATE_BOUND) {
@@ -572,6 +612,7 @@ private:
                 if (s < singularBeta) extension = 1;
                 else if (singularBeta >= beta) return singularBeta;
             }
+            setPlyMove(ply, m);
             board.makeMove(m);
             if (board.inCheck(us)) { // illegal: leaves our own king in check
                 board.unmakeMove();
@@ -619,6 +660,14 @@ private:
                             updateHistory(table[m.from][m.to], bonus);
                             for (int q = 0; q < quietsSearched.size(); ++q)
                                 updateHistory(table[quietsSearched[q].from][quietsSearched[q].to], -bonus);
+                            for (ContTable *cont : {cont1, cont2}) {
+                                if (!cont) continue;
+                                updateContHistory((*cont)[static_cast<int>(board.pieceAt(m.from)) - 1][m.to], bonus);
+                                for (int q = 0; q < quietsSearched.size(); ++q) {
+                                    const Move &qm = quietsSearched[q];
+                                    updateContHistory((*cont)[static_cast<int>(board.pieceAt(qm.from)) - 1][qm.to], -bonus);
+                                }
+                            }
                             if (!prevMove.isNull()) {
                                 Piece p = board.pieceAt(prevMove.to);
                                 if (p != Piece::None) counterMoves[static_cast<int>(p) - 1][prevMove.to] = m;
