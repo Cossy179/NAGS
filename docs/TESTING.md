@@ -303,6 +303,7 @@ in the Test column, with 3 games in parallel on a 4-core VM, openings from
 | Continuation history again, on top of the new history bonus (also counted in history pruning and reductions) | SPRT [0, 10], 3+0.03 | H1 after 2396 games (+741 =1004 -651) | +13.1 ± 10.2 | 2067267 |
 | SEE pruning in the main search (depth ≤ 8, not at PV nodes or in check, after the first legal move, not the TT move: quiet moves with SEE < −60·depth, captures with SEE < −20·depth²) | SPRT [0, 10], 3+0.03 | H1 after 294 games (+120 =118 -56) | +76.9 ± 30.1 | 1947402 |
 | Null-move reduction 3 + depth/3 + min((eval − beta)/200, 3) and razoring (depth ≤ 3, eval + 250·depth ≤ alpha: quiescence decides), together | SPRT [0, 10], 3+0.03 | H0 after 292 games (+56 =117 -119) | −76.2 ± 29.8 | – (not adopted) |
+| Time management by the best move's share of the root nodes (soft limit × clamp((1.6 − share) · 1.15, 0.6, 1.8) from depth 6) | SPRT [0, 10], 3+0.03 (resumed once) | no decision after 5032 games (+1473 =2155 -1404), LLR −0.19; stopped | +4.8 ± 6.8 | – (not adopted) |
 
 `nags` benches like `nags_enhanced` (without the Python services the MCTS
 arm does not run); before `nags` was rebuilt on FastBoard (see below) its
