@@ -3,9 +3,10 @@
 // Iterative-deepening alpha-beta search shared by every engine. Templated on
 // the board type (Board or FastBoard). Features: principal variation search,
 // aspiration windows, check and singular extensions, reverse futility and
-// null-move pruning, late-move pruning/reductions, futility pruning, SEE,
-// killer/countermove/history move ordering, quiescence search (with check
-// evasions), repetition / fifty-move draws, optional transposition table and
+// null-move pruning, late-move pruning/reductions, futility pruning, internal
+// iterative reduction, an "improving" flag, SEE (ordering and pruning),
+// killer/countermove/history/continuation-history move ordering, quiescence search (with check
+// evasions and the TT), repetition / fifty-move draws, optional transposition table and
 // Lazy SMP helper threads, MultiPV, pondering and Syzygy tablebases. See
 // docs/ARCHITECTURE.md and, for the tested gain of each, docs/TESTING.md.
 //
@@ -193,6 +194,7 @@ public:
         for (auto &k : killers) k[0] = k[1] = Move{};
         for (auto &side : history) for (auto &from : side) for (auto &v : from) v = 0;
         for (auto &piece : counterMoves) for (auto &mv : piece) mv = Move{};
+        for (int i = 0; i < 12 * 64; ++i) for (auto &p : contHist[i]) for (auto &v : p) v = 0;
     }
 
     // Searches the root to `depth` (with an aspiration window around
@@ -256,6 +258,7 @@ public:
     // the result is only a bound). Used to verify a candidate from another
     // source. Returns false if aborted.
     bool scoreRootMove(const Move &m, int depth, int &score, int alpha = -INF_SCORE, int beta = INF_SCORE) {
+        setPlyMove(0, m);
         board.makeMove(m);
         int s = -negamax(std::max(0, depth - 1), -beta, -alpha, 1, beta - alpha > 1);
         board.unmakeMove();
@@ -283,6 +286,19 @@ private:
     Move killers[MAX_PLY][2];
     int history[2][64][64];
     Move counterMoves[12][64]; // [piece that moved][its target square]
+    // Continuation history: how well a quiet move (piece, target) did right
+    // after a given move (piece, target) one or two plies earlier.
+    using ContTable = int16_t[12][64];
+    std::unique_ptr<ContTable[]> contHist = std::make_unique<ContTable[]>(12 * 64); // [prev piece * 64 + prev to]
+    struct PlyMove {
+        int piece = -1; // 0..11 (moving piece), -1 for none or a null move
+        int to = 0;
+    };
+    PlyMove plyMoves[MAX_PLY + 1]; // the move played at each ply
+    // Static evaluation at each ply (kNoEval when in check), for "improving":
+    // whether the side to move stands better than two plies earlier.
+    static constexpr int kNoEval = -1000000;
+    int evalStack[MAX_PLY + 1];
     Move pvTable[MAX_PLY][MAX_PLY];
     int pvLength[MAX_PLY] = {};
     uint64_t nodes = 0;
@@ -311,7 +327,8 @@ private:
 
     // Order: TT move, winning/equal captures and promotions (MVV/LVA), killers
     // and the countermove, losing captures (negative SEE), quiet moves by history.
-    int moveScore(const Move &m, const Move &ttMove, int ply, const Move &counter = Move{}) const {
+    int moveScore(const Move &m, const Move &ttMove, int ply, const Move &counter = Move{},
+                  const ContTable *cont1 = nullptr, const ContTable *cont2 = nullptr) const {
         if (!ttMove.isNull() && sameMove(m, ttMove)) return 1 << 30;
         if (eval::isNoisy(board, m)) {
             int victim = eval::capturedValue(board, m);
@@ -325,7 +342,23 @@ private:
             if (sameMove(m, killers[ply][1])) return (1 << 23) + 1;
             if (!counter.isNull() && sameMove(m, counter)) return 1 << 23;
         }
-        return history[colorIndex(board.sideToMove())][m.from][m.to];
+        int score = history[colorIndex(board.sideToMove())][m.from][m.to];
+        if (cont1 || cont2) {
+            const int piece = static_cast<int>(board.pieceAt(m.from)) - 1;
+            if (cont1) score += (*cont1)[piece][m.to];
+            if (cont2) score += (*cont2)[piece][m.to];
+        }
+        return score;
+    }
+
+    // Continuation table for the move played `back` plies before `ply`.
+    ContTable *contFor(int ply, int back) const {
+        if (ply < back) return nullptr;
+        const PlyMove &pm = plyMoves[ply - back];
+        return pm.piece < 0 ? nullptr : &contHist[pm.piece * 64 + pm.to];
+    }
+    void setPlyMove(int ply, const Move &m) {
+        plyMoves[ply] = {m.isNull() ? -1 : static_cast<int>(board.pieceAt(m.from)) - 1, m.isNull() ? 0 : m.to};
     }
 
     // Quiet move that refuted the opponent's previous move last time.
@@ -357,6 +390,9 @@ private:
         return table[std::min(depth, 63)][std::min(moveNumber, 63)];
     }
     static void updateHistory(int &h, int bonus) { h += bonus - h * std::abs(bonus) / kHistoryMax; }
+    static void updateContHistory(int16_t &h, int bonus) {
+        h = static_cast<int16_t>(h + bonus - h * std::abs(bonus) / kHistoryMax);
+    }
     static constexpr int kHistoryMax = 16384;
 
     bool hasNonPawnMaterial(Color c) const {
@@ -391,10 +427,12 @@ private:
     // Searches root moves [first, end) (MultiPV skips the lines already found).
     int rootSearch(int depth, int alpha, int beta, IterationResult &out, size_t first = 0) {
         pvLength[0] = 0;
+        evalStack[0] = board.inCheck() ? kNoEval : eval::evaluate(board);
         int bestScore = -INF_SCORE;
         int originalAlpha = alpha;
         for (size_t i = first; i < rootMoves.size(); ++i) {
             const Move m = rootMoves[i];
+            setPlyMove(0, m);
             board.makeMove(m);
             int score;
             if (i == first) {
@@ -490,13 +528,20 @@ private:
             }
         }
 
-        // Static evaluation for the pruning decisions below (not needed at PV
-        // nodes or in check, where nothing is pruned).
-        const int staticEval = (!isPv && !inCheck) ? eval::evaluate(board) : 0;
+        // Internal iterative reduction: without a TT move this node was not
+        // searched before (or failed low everywhere); search it a ply less.
+        if (tt && depth >= 4 && ttMove.isNull() && !excluding) --depth;
+
+        // Static evaluation for the pruning decisions below (a singular
+        // extension search reuses its node's).
+        const int staticEval = inCheck ? kNoEval : excluding ? evalStack[ply] : eval::evaluate(board);
+        evalStack[ply] = staticEval;
+        const bool improving = !inCheck && (ply < 2 || evalStack[ply - 2] == kNoEval || staticEval > evalStack[ply - 2]);
 
         // Reverse futility pruning: at shallow depth, a static evaluation that
         // beats beta by a depth-scaled margin is assumed to hold.
-        if (!isPv && !inCheck && !excluding && depth <= 6 && std::abs(beta) < MATE_BOUND && staticEval - 80 * depth >= beta)
+        if (!isPv && !inCheck && !excluding && depth <= 6 && std::abs(beta) < MATE_BOUND &&
+            staticEval - 80 * (depth - improving) >= beta)
             return staticEval;
 
         // Null-move pruning: if the side to move could pass and a reduced
@@ -506,6 +551,7 @@ private:
         if (!isPv && !inCheck && !excluding && depth >= 3 && !board.lastMoveWasNull() && std::abs(beta) < MATE_BOUND &&
             hasNonPawnMaterial(board.sideToMove()) && staticEval >= beta) {
             int reduction = 3 + depth / 6;
+            plyMoves[ply] = PlyMove{};
             board.makeNullMove();
             int score = -negamax(depth - 1 - reduction, -beta, -beta + 1, ply + 1, false);
             board.unmakeNullMove();
@@ -519,8 +565,9 @@ private:
         board.generatePseudoLegalMoves(moves);
         const Move prevMove = board.lastMove();
         const Move counter = counterMoveFor(prevMove);
+        ContTable *cont1 = contFor(ply, 1), *cont2 = contFor(ply, 2);
         int scores[MoveList::kCapacity];
-        for (int k = 0; k < moves.size(); ++k) scores[k] = moveScore(moves[k], ttMove, ply, counter);
+        for (int k = 0; k < moves.size(); ++k) scores[k] = moveScore(moves[k], ttMove, ply, counter, cont1, cont2);
 
         const Color us = board.sideToMove();
         int originalAlpha = alpha;
@@ -540,12 +587,25 @@ private:
             const Move m = moves[n];
             if (excluding && sameMove(m, excluded)) continue;
             bool quiet = !eval::isNoisy(board, m);
+            int histScore = 0;
+            if (quiet) {
+                histScore = history[colorIndex(us)][m.from][m.to];
+                const int piece = static_cast<int>(board.pieceAt(m.from)) - 1;
+                if (cont1) histScore += (*cont1)[piece][m.to];
+                if (cont2) histScore += (*cont2)[piece][m.to];
+            }
             // Shallow quiet-move pruning. Only once a legal move has been
             // searched, so checkmate / stalemate detection is unaffected.
             if (!isPv && !inCheck && quiet && i > 0 && depth <= 3 && std::abs(alpha) < MATE_BOUND) {
-                if (quietsTried >= 3 + depth * depth) continue;  // late-move pruning
+                if (quietsTried >= (3 + depth * depth) / (improving ? 1 : 2)) continue; // late-move pruning
                 if (staticEval + 120 * depth <= alpha) continue; // futility pruning
+                if (histScore < -4096 * depth) continue;          // history pruning
             }
+            // SEE pruning: at low depth, skip moves that lose material by
+            // force (more for captures, which win some of it back).
+            if (!isPv && !inCheck && i > 0 && depth <= 8 && std::abs(alpha) < MATE_BOUND && !sameMove(m, ttMove) &&
+                eval::see(board, m) < (quiet ? -60 * depth : -20 * depth * depth))
+                continue;
             // Singular extension: if every other move fails low against a
             // margin below the TT score, the TT move is singular and gets one
             // more ply. If even the alternatives beat beta, cut (multi-cut).
@@ -557,6 +617,7 @@ private:
                 if (s < singularBeta) extension = 1;
                 else if (singularBeta >= beta) return singularBeta;
             }
+            setPlyMove(ply, m);
             board.makeMove(m);
             if (board.inCheck(us)) { // illegal: leaves our own king in check
                 board.unmakeMove();
@@ -570,7 +631,7 @@ private:
                 int reduction = 0;
                 if (depth >= 3 && i >= 2 && quiet && !inCheck && !givesCheck &&
                     !sameMove(m, killers[ply][0]) && !sameMove(m, killers[ply][1])) {
-                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0);
+                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1) - histScore / 8192;
                     reduction = std::clamp(reduction, 0, depth - 2);
                 }
                 score = -negamax(depth - 1 + extension - reduction, -alpha - 1, -alpha, ply + 1, false);
@@ -599,11 +660,19 @@ private:
                             // Reward the cutoff move and penalise the quiet
                             // moves tried before it; values decay towards
                             // zero as they approach the bound.
-                            int bonus = std::min(depth * depth, 1200);
+                            int bonus = std::min(150 * depth - 100, 1500);
                             auto &table = history[colorIndex(board.sideToMove())];
                             updateHistory(table[m.from][m.to], bonus);
                             for (int q = 0; q < quietsSearched.size(); ++q)
                                 updateHistory(table[quietsSearched[q].from][quietsSearched[q].to], -bonus);
+                            for (ContTable *cont : {cont1, cont2}) {
+                                if (!cont) continue;
+                                updateContHistory((*cont)[static_cast<int>(board.pieceAt(m.from)) - 1][m.to], bonus);
+                                for (int q = 0; q < quietsSearched.size(); ++q) {
+                                    const Move &qm = quietsSearched[q];
+                                    updateContHistory((*cont)[static_cast<int>(board.pieceAt(qm.from)) - 1][qm.to], -bonus);
+                                }
+                            }
                             if (!prevMove.isNull()) {
                                 Piece p = board.pieceAt(prevMove.to);
                                 if (p != Piece::None) counterMoves[static_cast<int>(p) - 1][prevMove.to] = m;
@@ -633,18 +702,47 @@ private:
         return best;
     }
 
+    // Captures and promotions only (every evasion when in check). Results go
+    // to the TT at depth 0; non-PV nodes take cutoffs from it.
     int quiescence(int alpha, int beta, int ply) {
         if (checkStop()) return 0;
         ++nodes;
         selDepth = std::max(selDepth, ply);
         if (ply >= MAX_PLY - 1) return eval::evaluate(board);
 
+        const bool isPv = beta - alpha > 1;
+        const uint64_t key = board.zobrist();
+        Move ttMove;
+        TTHit hit;
+        bool ttHit = false;
+        if (tt && tt->probe(key, hit)) {
+            ttHit = true;
+            ttMove = hit.move;
+            if (!isPv) {
+                int s = scoreFromTT(hit.score, ply);
+                if (hit.bound == Bound::Exact || (hit.bound == Bound::Lower && s >= beta) ||
+                    (hit.bound == Bound::Upper && s <= alpha))
+                    return s;
+            }
+        }
+
         bool inCheck = board.inCheck();
         int best = -INF_SCORE;
         int stand = 0;
+        const int originalAlpha = alpha;
         if (!inCheck) {
             stand = eval::evaluate(board);
-            if (stand >= beta) return stand;
+            // A TT score whose bound points the right way is a better estimate.
+            if (ttHit && std::abs(hit.score) < TB_BOUND) {
+                int s = hit.score;
+                if (hit.bound == Bound::Exact || (hit.bound == Bound::Lower && s > stand) ||
+                    (hit.bound == Bound::Upper && s < stand))
+                    stand = s;
+            }
+            if (stand >= beta) {
+                if (tt && !ttHit) tt->store(key, 0, Bound::Lower, scoreToTT(stand, ply), Move{});
+                return stand;
+            }
             if (stand > alpha) alpha = stand;
             best = stand;
         }
@@ -652,11 +750,14 @@ private:
         // In check every evasion must be considered (no stand-pat).
         MoveList moves;
         board.generatePseudoLegalMoves(moves, !inCheck);
+        // The TT move only counts if this generator produced it (a quiet TT
+        // move is not searched outside check).
         int scores[MoveList::kCapacity];
-        for (int k = 0; k < moves.size(); ++k) scores[k] = moveScore(moves[k], Move{}, MAX_PLY);
+        for (int k = 0; k < moves.size(); ++k) scores[k] = moveScore(moves[k], ttMove, MAX_PLY);
 
         const Color us = board.sideToMove();
         int legal = 0;
+        Move bestMove;
         for (int n = 0; n < moves.size(); ++n) {
             pickNext(moves, scores, n);
             const Move m = moves[n];
@@ -676,11 +777,16 @@ private:
                 best = score;
                 if (score > alpha) {
                     alpha = score;
+                    bestMove = m;
                     if (alpha >= beta) break;
                 }
             }
         }
         if (inCheck && legal == 0) return -MATE_SCORE + ply; // checkmate
+        if (tt) {
+            Bound bound = best >= beta ? Bound::Lower : (best > originalAlpha ? Bound::Exact : Bound::Upper);
+            tt->store(key, 0, bound, scoreToTT(best, ply), bestMove);
+        }
         return best;
     }
 };

@@ -116,11 +116,33 @@ private:
     int phase = 0;
     struct AccEntry {
         nnue::Accumulator acc;
-        nnue::DirtyPieces dirty; // pieces changed by the move that led to this position
-        bool computed = false;   // acc is valid
+        nnue::DirtyPieces dirty;          // pieces changed by the move that led to this position
+        uint8_t kingSq[2] = {};           // both kings' squares in this position
+        bool computed[2] = {false, false}; // acc.v[perspective] is valid
     };
     // back(): the current position. Mutable: accumulator() fills it in lazily.
     mutable std::vector<AccEntry> accStack = std::vector<AccEntry>(1);
+
+    // Accumulator refresh cache, one entry per perspective and king state:
+    // the accumulator of the pieces last seen with that king state, so a
+    // refresh after the king changes bucket only applies the difference.
+    // Not copied with the board (a copy starts with an empty cache).
+    struct RefreshEntry {
+        alignas(64) int16_t acc[nnue::kHidden];
+        Bitboard pieces[2][6];
+    };
+    struct RefreshCache {
+        std::vector<RefreshEntry> entries;
+        RefreshCache() = default;
+        RefreshCache(const RefreshCache &) {}
+        RefreshCache &operator=(const RefreshCache &) {
+            entries.clear();
+            return *this;
+        }
+    };
+    mutable RefreshCache refreshCache;
+    void refreshPerspective(int perspective, int kstate) const;
+    void setKingSquares(AccEntry &e) const;
 
     struct HistoryEntry {
         Move move;

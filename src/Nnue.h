@@ -1,19 +1,25 @@
 #pragma once
 
-// NNUE evaluation: a 768 -> 2x256 -> 1 network trained by tools/nnue/train.py
-// (see that file for the layout and the file format).
+// NNUE evaluation: a perspective network trained by tools/nnue/train.py (see
+// that file for the layout and the file format).
 //
-// The two 256-wide accumulators (one per perspective) are kept in the board
-// and updated incrementally as pieces are put and removed; evaluation applies
-// a clipped ReLU and the output layer. The network is global to the process:
-// load()/setEnabled() must not be called while a search is running, and
-// boards created before a change must call refresh() (the search does this
-// for its root).
+// Inputs: for each perspective, 768 piece-square features, optionally in one
+// of several sets chosen by that side's king square ("king buckets", with the
+// board mirrored left-right when the king is on files e-h). A feature
+// transformer turns them into two accumulators (one per perspective), which
+// the board keeps up to date incrementally as pieces are put and removed;
+// evaluation applies a clipped ReLU (or its square, SCReLU) and one of up to
+// 8 output layers, chosen by the number of pieces. The network is global to
+// the process: load()/setEnabled() must not be called while a search is
+// running, and boards created before a change must call refresh() (the
+// search does this for its root).
 
+#include "BitOps.h"
 #include "ChessTypes.h"
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace nnue {
 
@@ -25,6 +31,7 @@ constexpr int kFeatures = 768;
 constexpr int kHidden = NAGS_NNUE_HIDDEN; // networks of another size are rejected when loaded
 constexpr int QA = 255, QB = 64, SCALE = 400;
 constexpr int kMaxBuckets = 8;
+constexpr int kMaxKingBuckets = 32;
 
 // Output bucket for a position with `pieces` pieces (1 bucket: always 0).
 inline int bucketOf(int pieces, int buckets) {
@@ -33,11 +40,15 @@ inline int bucketOf(int pieces, int buckets) {
 }
 
 struct Network {
-    alignas(64) int16_t ftWeights[kFeatures * kHidden];
+    std::vector<int16_t> ftWeights; // [kingBuckets][768][kHidden]
     alignas(64) int16_t ftBias[kHidden];
     alignas(64) int16_t outWeights[kMaxBuckets][2 * kHidden]; // [bucket][us | them]
     int32_t outBias[kMaxBuckets];
-    int buckets; // output layers in use, chosen by the number of pieces
+    int buckets = 1;        // output layers in use, chosen by the number of pieces
+    int kingBuckets = 1;    // input feature sets, chosen by the perspective's king square
+    uint8_t kingLayout[64] = {}; // king square (from the perspective) -> input set
+    bool mirror = false;    // king on files e-h: the perspective's squares are mirrored left-right
+    bool screlu = false;    // activation: squared clipped ReLU instead of clipped ReLU
 };
 
 struct Accumulator {
@@ -64,13 +75,25 @@ void useEmbedded();
 // Returns whether NNUE is on afterwards.
 bool setEnabled(bool on);
 
-inline int featureIndex(int perspective, Piece p, int sq) {
+// Which feature set `perspective` uses with its king on `kingSq`:
+// set * 2 + (1 if the squares are mirrored left-right). Accumulators can only
+// be updated incrementally while this stays the same.
+inline int kingState(const Network &net, int perspective, int kingSq) {
+    if (perspective == 1) kingSq ^= 56;
+    return net.kingLayout[kingSq] * 2 + (net.mirror && (kingSq & 7) >= 4 ? 1 : 0);
+}
+inline int kingStates(const Network &net) { return 2 * net.kingBuckets; }
+
+inline int featureIndex(int perspective, Piece p, int sq, int kstate) {
     int colour = colorIndex(colorOf(p)) ^ perspective; // 0 = the perspective's own pieces
     if (perspective == 1) sq ^= 56;
-    return colour * 384 + pieceTypeOf(p) * 64 + sq;
+    if (kstate & 1) sq ^= 7;
+    return (kstate >> 1) * kFeatures + colour * 384 + pieceTypeOf(p) * 64 + sq;
 }
 
-void addFeature(Accumulator &acc, const Network &net, Piece p, int sq);
+// a += (or -=) the weights of one feature.
+void addFeature(int16_t *a, const Network &net, int feature);
+void subFeature(int16_t *a, const Network &net, int feature);
 
 // Pieces a move adds and removes (at most two of each: castling, captures).
 struct DirtyPieces {
@@ -81,20 +104,28 @@ struct DirtyPieces {
     void remove(Piece p, int sq) { removePiece[removes] = p; removeSquare[removes++] = sq; }
 };
 
-// next = prev with the move's pieces added and removed, in one pass.
-void update(const Accumulator &prev, Accumulator &next, const Network &net, const DirtyPieces &d);
+// out = in with the move's pieces added and removed, in one pass, for one
+// perspective whose king state is `kstate` before and after the move.
+void update(const int16_t *in, int16_t *out, const Network &net, const DirtyPieces &d, int perspective, int kstate);
 
-// Recomputes both accumulators from the pieces on the board.
+// Recomputes one perspective's accumulator from the pieces on the board.
 template <class BoardT>
-void refresh(Accumulator &acc, const BoardT &b) {
+void refresh(int16_t *a, const BoardT &b, int perspective) {
     const Network *net = network();
     if (!net) return;
-    for (int persp = 0; persp < 2; ++persp)
-        for (int i = 0; i < kHidden; ++i) acc.v[persp][i] = net->ftBias[i];
+    const int kstate = kingState(*net, perspective, lsb(b.pieceBB(perspective ? Color::Black : Color::White, KING)));
+    for (int i = 0; i < kHidden; ++i) a[i] = net->ftBias[i];
     for (int sq = 0; sq < 64; ++sq) {
         Piece p = b.pieceAt(sq);
-        if (p != Piece::None) addFeature(acc, *net, p, sq);
+        if (p != Piece::None) addFeature(a, *net, featureIndex(perspective, p, sq, kstate));
     }
+}
+
+// Recomputes both accumulators.
+template <class BoardT>
+void refresh(Accumulator &acc, const BoardT &b) {
+    refresh(acc.v[0], b, 0);
+    refresh(acc.v[1], b, 1);
 }
 
 // Centipawns from the side to move's point of view (with the active

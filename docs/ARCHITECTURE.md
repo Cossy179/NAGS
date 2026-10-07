@@ -64,14 +64,29 @@ either.
 * Pruning and reductions (outside PV nodes and check where it matters):
   reverse futility pruning (depth ≤ 6), null-move pruning (R = 3 + depth/6),
   late-move pruning and futility pruning of quiet moves (depth ≤ 3),
-  logarithmic late-move reductions, mate distance pruning.
+  logarithmic late-move reductions, mate distance pruning, and internal
+  iterative reduction (one ply less at depth ≥ 4 without a TT move).
+  "Improving" (the static evaluation is higher than two plies earlier)
+  tightens reverse futility pruning, and when not improving late-move
+  pruning keeps half as many quiet moves and reductions are one ply deeper.
+  Quiet moves with a history score below −4096·depth are pruned (depth ≤ 3)
+  and reductions shrink (or grow) by one ply per 8192 of history. SEE
+  pruning (depth ≤ 8, after the first legal move, not the TT move) skips
+  quiet moves losing more than 60·depth and captures losing more than
+  20·depth² in the static exchange.
 * Move ordering: transposition-table move, then winning/equal captures by
   MVV/LVA (with promotions), killer moves, the countermove, losing captures
   (negative static exchange evaluation), and quiet moves by a history table
-  with a malus for quiet moves that failed to cut off.
+  with a malus for quiet moves that failed to cut off (bonus
+  min(150·depth − 100, 1500), with values kept within ±16384), plus
+  continuation history: the same for (piece, target) pairs following the
+  move one and two plies earlier. Their sum orders quiet moves and drives
+  history pruning and reductions.
 * Quiescence search over captures and promotions with delta pruning and
   without losing captures (SEE < 0). When in check, all evasions are
-  searched and there is no stand-pat.
+  searched and there is no stand-pat. Results go to the transposition table
+  at depth 0; non-PV nodes take cutoffs from it, its move is tried first,
+  and a stored score bounded on the right side replaces the stand-pat.
 * Time management: no new iteration after a soft limit that grows when the
   best move just changed or the score dropped and shrinks when the best move
   is stable; a hard limit aborts the search.

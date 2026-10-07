@@ -29,21 +29,34 @@ static int failures = 0;
         }                                                    \
     } while (0)
 
-// Writes a network file with small random weights.
-static std::string writeRandomNet() {
-    std::string path = "nnue_test_random.nnue";
+// Writes a network file with small random weights: version 1 (one feature
+// set, clipped ReLU) or version 3 with 4 king buckets, mirroring, SCReLU and
+// 8 output buckets.
+static std::string writeRandomNet(bool kingBuckets) {
+    std::string path = kingBuckets ? "nnue_test_random_kb.nnue" : "nnue_test_random.nnue";
     std::ofstream out(path, std::ios::binary);
     out.write("NAGSNNUE", 8);
     auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) out.put(static_cast<char>((v >> (8 * i)) & 0xFF)); };
     auto i16 = [&](int v) { uint16_t u = static_cast<uint16_t>(v); out.put(static_cast<char>(u & 0xFF)); out.put(static_cast<char>(u >> 8)); };
-    u32(1);
-    u32(nnue::kHidden);
+    const int sets = kingBuckets ? 4 : 1, outputs = kingBuckets ? 8 : 1;
+    if (kingBuckets) {
+        u32(3);
+        u32(nnue::kHidden);
+        u32(outputs);
+        u32(sets);
+        u32(3); // SCReLU, mirroring
+        // Bucket by rank of the (mirrored) king: 1st, 2nd, 3rd-4th, 5th-8th.
+        for (int sq = 0; sq < 64; ++sq) out.put(static_cast<char>(sq < 8 ? 0 : sq < 16 ? 1 : sq < 32 ? 2 : 3));
+    } else {
+        u32(1);
+        u32(nnue::kHidden);
+    }
     std::mt19937 rng(42);
     std::uniform_int_distribution<int> w(-60, 60), bias(0, 200), ow(-40, 40);
-    for (int i = 0; i < nnue::kFeatures * nnue::kHidden; ++i) i16(w(rng));
+    for (int i = 0; i < sets * nnue::kFeatures * nnue::kHidden; ++i) i16(w(rng));
     for (int i = 0; i < nnue::kHidden; ++i) i16(bias(rng));
-    for (int i = 0; i < 2 * nnue::kHidden; ++i) i16(ow(rng));
-    u32(static_cast<uint32_t>(1234));
+    for (int i = 0; i < outputs * 2 * nnue::kHidden; ++i) i16(ow(rng));
+    for (int k = 0; k < outputs; ++k) u32(static_cast<uint32_t>(1234 + k));
     return path;
 }
 
@@ -67,10 +80,40 @@ static std::string mirrorFen(const std::string &fen) {
     return out + (stm == "w" ? " b - - " : " w - - ") + hm + " " + fm;
 }
 
-int main() {
+// The same position mirrored left-right (only valid without castling rights).
+static std::string flipFiles(const std::string &fen) {
+    std::istringstream iss(fen);
+    std::string placement, rest;
+    iss >> placement;
+    std::getline(iss, rest);
+    std::string out, rank;
+    auto flush = [&] {
+        std::string expanded;
+        for (char c : rank) expanded += std::isdigit(static_cast<unsigned char>(c)) ? std::string(c - '0', '1') : std::string(1, c);
+        std::string rev(expanded.rbegin(), expanded.rend()), packed;
+        int empty = 0;
+        for (char c : rev) {
+            if (c == '1') { ++empty; continue; }
+            if (empty) packed += std::to_string(empty), empty = 0;
+            packed += c;
+        }
+        if (empty) packed += std::to_string(empty);
+        out += packed;
+        rank.clear();
+    };
+    for (char c : placement) {
+        if (c == '/') { flush(); out += '/'; }
+        else rank += c;
+    }
+    flush();
+    return out + rest;
+}
+
+static void checkNetwork(bool kingBuckets) {
     std::string error;
-    CHECK(nnue::load(writeRandomNet(), error), "loading the random network failed: %s", error.c_str());
+    CHECK(nnue::load(writeRandomNet(kingBuckets), error), "loading the random network failed: %s", error.c_str());
     CHECK(nnue::network() != nullptr, "network not active after load");
+    CHECK(nnue::network()->kingBuckets == (kingBuckets ? 4 : 1), "wrong king bucket count");
 
     // Random games: after every move, null move and unmake, the incremental
     // accumulators equal recomputed ones.
@@ -122,6 +165,27 @@ int main() {
         CHECK(eval::evaluate(a) == eval::evaluate(m), "%s: %d vs mirrored %d", fen, eval::evaluate(a), eval::evaluate(m));
     }
 
+    // With mirroring, positions mirrored left-right evaluate the same.
+    if (kingBuckets) {
+        const char *noCastling[] = {
+            "r1bq1rk1/pppp1ppp/2n2n2/2b1p3/2B1P3/2N2N2/PPPP1PPP/R1BQ1RK1 w - - 6 5",
+            "8/8/1k6/8/8/8/6K1/7Q b - - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        };
+        for (const char *fen : noCastling) {
+            FastBoard a, m;
+            a.setFromFEN(fen);
+            CHECK(m.setFromFEN(flipFiles(fen)), "bad flip of %s", fen);
+            CHECK(eval::evaluate(a) == eval::evaluate(m), "%s: %d vs flipped %d", fen, eval::evaluate(a), eval::evaluate(m));
+        }
+    }
+    std::remove((kingBuckets ? "nnue_test_random_kb.nnue" : "nnue_test_random.nnue"));
+}
+
+int main() {
+    checkNetwork(false);
+    checkNetwork(true);
+
     // The search runs on the network (mate detection does not depend on it).
     TranspositionTable tt(16);
     Searcher<FastBoard> s(&tt);
@@ -138,7 +202,6 @@ int main() {
     CHECK(nnue::network() == nullptr, "NNUE still active after disabling");
     FastBoard c;
     CHECK(eval::evaluate(c) == 0, "classical start position evaluation should be 0");
-    std::remove("nnue_test_random.nnue");
 
     if (failures) {
         std::printf("%d failure(s)\n", failures);

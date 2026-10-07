@@ -49,10 +49,10 @@ of writing:
 
 | Engine | Bench nodes |
 |--------|-------------|
-| `nags_basic` | 2772872 |
-| `nags_fast` | 2542001 |
-| `nags_enhanced` | 5692115 |
-| `nags` | 5692115 |
+| `nags_basic` | 1351486 |
+| `nags_fast` | 1116444 |
+| `nags_enhanced` | 1947402 |
+| `nags` | 1947402 |
 
 When search improvements make a run much faster, raise the depth (in the
 engine's `main` file) and record the new fingerprints.
@@ -80,6 +80,9 @@ How the runner works:
   each hypothesis, as fishtest does.
 * Exit status: 0 = H1 accepted (the change is good), 1 = H0 accepted, 2 =
   game limit reached without a decision.
+* An interrupted match continues with `--resume <its output>` (same engines,
+  settings and `--seed`): the counts are restored from the last status line
+  and play goes on with the next opening pair.
 
 A Monte-Carlo simulation of 1,000 SPRTs per setting (bounds [0, 20],
 α = β = 0.05) confirms the advertised error rates:
@@ -172,7 +175,53 @@ over months.
 | Date | Build | Combined estimate (10+0.1) |
 |------|-------|----------------------------|
 | 2026-10-03 | `a8e5c0c` (before Steps 1 and 2: no pruning beyond the TT, hand-written evaluation) | 2329 ± 52 |
-| 2026-10-04 | `af50fc5` (Step 1 search, NNUE network 5) | **2881 ± 34** |
+| 2026-10-04 | `af50fc5` (Step 1 search, NNUE network 5) | 2881 ± 34 |
+| 2026-10-06 | `3619db2` (NNUE network 7: 8 output buckets, 56.5M positions) | 2944 ± 34 |
+| 2026-10-07 | `b81c8fe` (search batch: quiescence TT, IIR and improving, history rework, continuation history, SEE pruning) | **2994 ± 32** |
+
+#### 2026-10-07: search batch
+
+Same setup (`nags_enhanced` at `b81c8fe`, network 7, 1 thread, 64 MB hash;
+80 games per level at 10+0.1, 3 at a time). The build adds the five search
+changes admitted on 2026-10-06/07 (together +165 Elo in the 3+0.03 matches
+against their predecessors):
+
+| Stockfish `UCI_Elo` | Result | Score | Elo difference | Implied rating | Previous build's score |
+|---|---|---|---|---|---|
+| 2800 | +39 =30 −11 | 67.5% | +127 ± 54 | 2927 ± 54 | 57% |
+| 3000 | +21 =30 −29 | 45% | −35 ± 58 | 2965 ± 58 | 42% |
+| 3190 (the maximum) | +9 =38 −33 | 35% | −108 ± 53 | 3082 ± 53 | 29% |
+
+Combined (inverse-variance weighted): **2994 ± 32**, about +50 over the
+previous build on the same levels. Against Stockfish the batch is worth
+about a third of what the self-play matches measured: pruning gains found
+at 3+0.03 shrink at 10+0.1, and self-play exaggerates gains in any case. The
+levels again disagree in the same direction (2927 at 2800, 3082 at 3190).
+No game was lost on time. At 35% against Stockfish's strongest
+strength-limited level, this ladder is close to its ceiling; later
+measurements need opponents at full strength.
+
+#### 2026-10-06: NNUE network 7
+
+Same setup as the 2026-10-04 run (`nags_enhanced`, 1 thread, 64 MB hash,
+embedded network 7; 80 games per level at 10+0.1, 3 games at a time). The
+2600 level was dropped: the previous build already scored 89% there, which
+says little about the rating.
+
+| Stockfish `UCI_Elo` | Result | Score | Elo difference | Implied rating | Previous build's score |
+|---|---|---|---|---|---|
+| 2800 | +35 =21 −24 | 57% | +48 ± 59 | 2848 ± 59 | 49% |
+| 3000 | +16 =35 −29 | 42% | −57 ± 56 | 2943 ± 56 | 33% |
+| 3190 (the maximum) | +9 =29 −42 | 29% | −152 ± 59 | 3038 ± 59 | 24% |
+
+Combined (inverse-variance weighted): **2944 ± 34** on Stockfish's
+`UCI_Elo` scale at 10+0.1. On the same three levels the 2026-10-04 build
+combines to 2871, so networks 6 and 7 together are worth about +70 here,
+about half of what self-play measured (+101 and +27.4); self-play matches
+against the previous network usually overstate gains against other
+engines. The levels again disagree in the same direction (2848 at 2800,
+3038 at 3190), so "about 2850–3050 on this scale" is a fair summary. No game
+was lost on time.
 
 #### 2026-10-04: Step 1 search and NNUE network 5
 
@@ -268,6 +317,19 @@ in the Test column, with 3 games in parallel on a 4-core VM, openings from
 | Network 5 (38.4M positions: network 4's data plus 11.5M from games by the network-4 engine) vs network 4 | SPRT [0, 10], 20000 nodes | H1 after 440 games (+220 =86 -134) | +68.8 ± 28.1 | 4496143 |
 | 512-wide network on network 5's data (`NAGS_NNUE_HIDDEN=512` build, validation loss 0.00778 vs 0.00815) vs network 5 (256); the 512 build searches about 25% fewer nodes per second | SPRT [0, 10], 3+0.03 | H0 after 450 games (+122 =144 -184; 1 loss on time by the 512 build) | −48.2 ± 25.4 | – (not adopted) |
 | Network 6: 8 output buckets by piece count, 47.7M positions (network 5's data plus 9.3M from games by the network-5 engine) vs network 5 | SPRT [0, 10], 3+0.03 | H1 after 304 games (+155 =80 -69) | +101.0 ± 34.2 | 5692115 |
+| Network 7: 56.5M positions (network 6's data plus 8.86M from ~104,000 games by the network-6 engine), 8 buckets, vs network 6 | SPRT [0, 10], 3+0.03 | H1 after 1042 games (+388 =348 -306) | +27.4 ± 16.9 | 4780523 |
+| Transposition table in quiescence search (probe with cutoffs at non-PV nodes, TT move first, TT score as a better stand-pat, results stored at depth 0) | SPRT [0, 10], 3+0.03 | H1 after 1066 games (+360 =416 -290; 1 loss on time by the baseline) | +22.8 ± 15.2 | 4318033 |
+| Continuation history (quiet-move history after the previous move and the one before, in move ordering and history updates) | SPRT [0, 10], 3+0.03 | H0 after 914 games (+258 =358 -298) | −15.2 ± 16.1 | – (not adopted) |
+| Internal iterative reduction (depth ≥ 4 without a TT move: one ply less) and "improving" (static eval above two plies earlier: reverse futility margin 80·(depth − improving); otherwise late-move pruning after half as many quiet moves and one more ply of reduction) | SPRT [0, 10], 3+0.03 | H1 after 772 games (+269 =299 -204) | +29.3 ± 17.7 | 2146785 |
+| Correction history (per side to move and pawn structure, a running average of search score − static eval, added to the evaluation; needs a pawn hash in FastBoard) | SPRT [0, 10], 3+0.03 | H0 after 1664 games (+484 =660 -520; 1 loss on time by the candidate) | −7.5 ± 12.6 | – (not adopted) |
+| History bonus min(150·depth − 100, 1500) instead of min(depth², 1200) (the old bonus left most scores under ±1000), with history pruning of quiet moves (depth ≤ 3, history < −4096·depth) and history-adjusted reductions (−history/8192 plies) | SPRT [0, 10], 3+0.03 | H1 after 1078 games (+353 =444 -281; 1 loss on time by the baseline) | +23.2 ± 15.3 | 2047814 |
+| Continuation history again, on top of the new history bonus (also counted in history pruning and reductions) | SPRT [0, 10], 3+0.03 | H1 after 2396 games (+741 =1004 -651) | +13.1 ± 10.2 | 2067267 |
+| SEE pruning in the main search (depth ≤ 8, not at PV nodes or in check, after the first legal move, not the TT move: quiet moves with SEE < −60·depth, captures with SEE < −20·depth²) | SPRT [0, 10], 3+0.03 | H1 after 294 games (+120 =118 -56) | +76.9 ± 30.1 | 1947402 |
+| Null-move reduction 3 + depth/3 + min((eval − beta)/200, 3) and razoring (depth ≤ 3, eval + 250·depth ≤ alpha: quiescence decides), together | SPRT [0, 10], 3+0.03 | H0 after 292 games (+56 =117 -119) | −76.2 ± 29.8 | – (not adopted) |
+| Time management by the best move's share of the root nodes (soft limit × clamp((1.6 − share) · 1.15, 0.6, 1.8) from depth 6) | SPRT [0, 10], 3+0.03 (resumed once) | no decision after 5032 games (+1473 =2155 -1404), LLR −0.19; stopped | +4.8 ± 6.8 | – (not adopted) |
+| Transposition table in buckets of four entries (one cache line), replacing the shallowest entry with 8 plies of depth subtracted per search of age | SPRT [0, 10], 3+0.03, Hash 4 MB for both (resumed once) | H0 after 5020 games (+1410 =2221 -1389) | +1.5 ± 6.7 | – (not adopted) |
+| Null-move reduction 4 + depth/6 + min((eval − beta)/200, 3) alone (gentler than the rejected one above) | SPRT [0, 10], 3+0.03 | H0 after 1148 games (+302 =512 -334) | −9.7 ± 13.9 | – (not adopted) |
+| Razoring alone at depth ≤ 2 (eval + 300·depth ≤ alpha: quiescence decides) | SPRT [0, 10], 3+0.03 | H0 after 720 games (+188 =303 -229) | −19.8 ± 18.0 | – (not adopted) |
 
 `nags` benches like `nags_enhanced` (without the Python services the MCTS
 arm does not run); before `nags` was rebuilt on FastBoard (see below) its
