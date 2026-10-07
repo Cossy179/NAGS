@@ -31,6 +31,7 @@ import argparse
 import math
 import os
 import random
+import re
 import shlex
 import sys
 import threading
@@ -465,8 +466,21 @@ class Match:
                          f"[{self.bounds[0]:.2f}, {self.bounds[1]:.2f}] for [{self.sprt[0]:g}, {self.sprt[1]:g}]")
             return line
 
+    def resume(self, status_line: str) -> None:
+        """Continues an interrupted match from its last status line: the counts
+        are restored and play goes on with the next opening pair."""
+        m = re.search(r"Games (\d+): \+(\d+) =(\d+) -(\d+) \| penta \[([\d, ]+)\]", status_line)
+        if not m:
+            raise ValueError("no status line ('Games N: +W =D -L | penta [...]') to resume from")
+        self.wdl = [int(m.group(2)), int(m.group(3)), int(m.group(4))]
+        self.penta.counts = [int(x) for x in m.group(5).split(",")]
+        if len(self.penta.counts) != 5 or 2 * self.penta.pairs != sum(self.wdl):
+            raise ValueError("inconsistent status line")
+        self.next_pair = self.penta.pairs
+        self.resumed = True
+
     def run(self, report_interval: float = 10.0) -> int:
-        if self.pgnout:
+        if self.pgnout and not getattr(self, "resumed", False):
             open(self.pgnout, "w").close()
         threads = [threading.Thread(target=self._worker, daemon=True) for _ in range(self.concurrency)]
         for t in threads:
@@ -544,6 +558,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--pgnout", help="write all games to this PGN file")
     ap.add_argument("--seed", type=int, default=1, help="seed for the opening order")
     ap.add_argument("--report", type=float, default=10.0, help="seconds between status lines")
+    ap.add_argument("--resume", metavar="LOG",
+                    help="continue an interrupted match from the last status line in its output (same engines, "
+                         "settings and --seed); games are appended to --pgnout")
     args = ap.parse_args(argv)
 
     if len(args.engine) != 2:
@@ -575,6 +592,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     match = Match(specs, openings, limits, adj, max_pairs=(args.games + 1) // 2, concurrency=args.concurrency,
                   sprt=tuple(args.sprt) if args.sprt else None, alpha=args.alpha, beta=args.beta,
                   pgnout=args.pgnout, seed=args.seed, shuffle=not args.no_shuffle)
+    if args.resume:
+        try:
+            with open(args.resume) as f:
+                lines = [l for l in f if l.startswith("Games ")]
+            match.resume(lines[-1] if lines else "")
+        except (ValueError, OSError) as e:
+            print(f"ERROR: --resume: {e}", file=sys.stderr)
+            return 3
+        print(f"Resuming after {sum(match.wdl)} games", flush=True)
     print(f"{specs[0].name} vs {specs[1].name}: {limits.describe()}, {len(openings)} openings, "
           f"concurrency {match.concurrency}" + (f", SPRT [{args.sprt[0]:g}, {args.sprt[1]:g}]" if args.sprt else ""),
           flush=True)

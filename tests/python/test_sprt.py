@@ -155,6 +155,28 @@ def test_fixed_match_end_to_end(tmp_path):
 
 
 @needs_engines
+def test_resume_continues_counts_and_openings(tmp_path, capsys):
+    common = ["--engine", _engine("nags_fast"), "--engine", _engine("nags_basic"), "--depth", "2", "--concurrency", "1",
+              "--openings", str(ROOT / "tools/openings/nags_balanced.epd"), "--report", "1000"]
+    full, part = tmp_path / "full.pgn", tmp_path / "part.pgn"
+    assert sprt.main(common + ["--games", "8", "--pgnout", str(full)]) == 0
+    full_status = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Games ")][-1]
+    assert sprt.main(common + ["--games", "4", "--pgnout", str(part)]) == 0
+    log = tmp_path / "part.log"
+    log.write_text(capsys.readouterr().out)
+    assert sprt.main(common + ["--games", "8", "--pgnout", str(part), "--resume", str(log)]) == 0
+    out = capsys.readouterr().out
+    assert "Resuming after 4 games" in out
+    # Deterministic engines at fixed depth: the resumed match equals the uninterrupted one.
+    assert [l for l in out.splitlines() if l.startswith("Games ")][-1] == full_status
+    assert part.read_text() == full.read_text()
+    m = sprt.Match.__new__(sprt.Match)
+    m.penta, m.wdl = sprt.Pentanomial(), [0, 0, 0]
+    with pytest.raises(ValueError):
+        m.resume("Games 3: +1 =1 -1 | penta [0, 1, 0, 0, 0]")  # 3 games cannot be whole pairs
+
+
+@needs_engines
 def test_broken_engine_loses(tmp_path):
     fake = tmp_path / "broken_engine.py"
     fake.write_text(textwrap.dedent("""\

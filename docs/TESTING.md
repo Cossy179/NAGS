@@ -80,6 +80,9 @@ How the runner works:
   each hypothesis, as fishtest does.
 * Exit status: 0 = H1 accepted (the change is good), 1 = H0 accepted, 2 =
   game limit reached without a decision.
+* An interrupted match continues with `--resume <its output>` (same engines,
+  settings and `--seed`): the counts are restored from the last status line
+  and play goes on with the next opening pair.
 
 A Monte-Carlo simulation of 1,000 SPRTs per setting (bounds [0, 20],
 α = β = 0.05) confirms the advertised error rates:
