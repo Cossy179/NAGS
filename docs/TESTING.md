@@ -176,7 +176,30 @@ over months.
 |------|-------|----------------------------|
 | 2026-10-03 | `a8e5c0c` (before Steps 1 and 2: no pruning beyond the TT, hand-written evaluation) | 2329 ± 52 |
 | 2026-10-04 | `af50fc5` (Step 1 search, NNUE network 5) | 2881 ± 34 |
-| 2026-10-06 | `3619db2` (NNUE network 7: 8 output buckets, 56.5M positions) | **2944 ± 34** |
+| 2026-10-06 | `3619db2` (NNUE network 7: 8 output buckets, 56.5M positions) | 2944 ± 34 |
+| 2026-10-07 | `b81c8fe` (search batch: quiescence TT, IIR and improving, history rework, continuation history, SEE pruning) | **2994 ± 32** |
+
+#### 2026-10-07: search batch
+
+Same setup (`nags_enhanced` at `b81c8fe`, network 7, 1 thread, 64 MB hash;
+80 games per level at 10+0.1, 3 at a time). The build adds the five search
+changes admitted on 2026-10-06/07 (together +165 Elo in the 3+0.03 matches
+against their predecessors):
+
+| Stockfish `UCI_Elo` | Result | Score | Elo difference | Implied rating | Previous build's score |
+|---|---|---|---|---|---|
+| 2800 | +39 =30 −11 | 67.5% | +127 ± 54 | 2927 ± 54 | 57% |
+| 3000 | +21 =30 −29 | 45% | −35 ± 58 | 2965 ± 58 | 42% |
+| 3190 (the maximum) | +9 =38 −33 | 35% | −108 ± 53 | 3082 ± 53 | 29% |
+
+Combined (inverse-variance weighted): **2994 ± 32**, about +50 over the
+previous build on the same levels. Against Stockfish the batch is worth
+about a third of what the self-play matches measured: pruning gains found
+at 3+0.03 shrink at 10+0.1, and self-play exaggerates gains in any case. The
+levels again disagree in the same direction (2927 at 2800, 3082 at 3190).
+No game was lost on time. At 35% against Stockfish's strongest
+strength-limited level, this ladder is close to its ceiling; later
+measurements need opponents at full strength.
 
 #### 2026-10-06: NNUE network 7
 
