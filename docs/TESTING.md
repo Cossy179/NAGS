@@ -283,17 +283,28 @@ not alter the search, so the bench node counts stay identical:
 | `aa8472b` vs `f895704` | legality checked only for moves the search tries | 1.44× | 1.30× | 1.41× | 1.30× |
 | `a8e5c0c` vs `aa8472b` | stack move list, lazy move ordering | 1.59× | 1.43× | 1.62× | 1.44× |
 | `06da148` vs `253627c` | incremental evaluation (FastBoard only) | – | ~1.16× | ~1.14× | – |
+| AVX2 NNUE kernels for MSVC (Windows PC, see below) | hand-written AVX2 update, refresh and output kernels, chosen by CPUID | – | 3.03× | 2.61× | 2.69× |
 
 At `a8e5c0c`, `nags_enhanced` benches at about 4.8M nodes/second. The
 `06da148` figures are medians of six alternating runs taken while an SPRT
 occupied the other cores, so they are less precise than the rows above.
 
+**From 2026-10-07 development moved from the cloud VM to a local Windows
+PC** (AMD Ryzen 5 3500X, 6 cores / 6 threads, NVIDIA RTX 3060 12 GB, MSVC
+2019): NNUE training runs on its GPU and self-play data generation on its
+CPU. Results measured there are marked "Windows PC". The AVX2 row above is
+from that PC (medians of three runs; `nags_enhanced` 0.57M to 1.48M
+nodes/second); before it, MSVC builds used the portable NNUE code and ran
+about 2.6× slower than they could.
+
 ## Strength log
 
 Every change that affects playing strength is listed with the test that
 admitted it. Matches are `nags_enhanced` unless noted, at the time control
-in the Test column, with 3 games in parallel on a 4-core VM, openings from
-`nags_balanced.epd` and resign adjudication (4 moves, 1000 cp).
+in the Test column, with 3 games in parallel on a 4-core VM (from
+2026-10-07: 5 games in parallel on the 6-core Windows PC described under the
+speed log), openings from `nags_balanced.epd` and resign adjudication
+(4 moves, 1000 cp).
 
 | Change | Test | Result | Elo | Bench |
 |--------|------|--------|-----|-------|

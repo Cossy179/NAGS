@@ -93,8 +93,10 @@ is recomputed instead, from a per-board cache that keeps one accumulator per
 perspective and king bucket together with the pieces it was computed for,
 so only the difference to the current pieces is applied. `eval::evaluate`
 uses the network whenever one is active. The update and evaluation kernels are also compiled for AVX2 and
-chosen at run time with GCC on x86-64 Linux; other builds use the portable
-code. With the test network, `bench` runs at about 0.8× the speed of the
+chosen at run time with GCC on x86-64 Linux. With MSVC on x86-64 Windows
+they, and the add/subtract kernels used by refreshes, have hand-written AVX2
+versions chosen at run time by CPUID (about 2.6× faster `bench`); other
+builds use the portable code. All versions give exactly the same results. With the test network, `bench` runs at about 0.8× the speed of the
 hand-written evaluation (portable build; about 0.5× before the accumulator
 stack and the AVX2 kernels).
 

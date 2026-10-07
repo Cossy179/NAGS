@@ -15,13 +15,66 @@ extern const unsigned long kNagsEmbeddedNetSize;
 // and picked at run time
 // where the toolchain supports it (GCC, x86-64 Linux); elsewhere the
 // portable build is used.
+// With MSVC on x86-64 they (and the add/sub kernels used by refreshes) have
+// hand-written AVX2 versions instead, also picked at run time (CPUID). Both
+// give exactly the portable results.
 #if defined(__GNUC__) && !defined(__clang__) && defined(__x86_64__) && defined(__linux__)
 #define NAGS_NNUE_KERNEL __attribute__((target_clones("arch=x86-64-v3", "default")))
 #else
 #define NAGS_NNUE_KERNEL
 #endif
 
+#if defined(_MSC_VER) && defined(_M_X64) && !defined(__clang__)
+#define NAGS_NNUE_MSVC_AVX2 1
+#include <immintrin.h>
+#include <intrin.h>
+#endif
+
 namespace nnue {
+
+#ifdef NAGS_NNUE_MSVC_AVX2
+static_assert(kHidden % 16 == 0, "the AVX2 kernels work on 16 values at a time");
+
+namespace {
+bool cpuHasAvx2() {
+    int r[4];
+    __cpuid(r, 0);
+    if (r[0] < 7) return false;
+    __cpuid(r, 1);
+    const bool osxsave = (r[2] >> 27) & 1, avx = (r[2] >> 28) & 1;
+    if (!osxsave || !avx || (_xgetbv(0) & 6) != 6) return false; // the OS saves the YMM registers
+    __cpuidex(r, 7, 0);
+    return (r[1] >> 5) & 1;
+}
+const bool kAvx2 = cpuHasAvx2();
+
+// Unaligned loads and stores: the feature weights live in a std::vector.
+inline __m256i ld(const int16_t *p) { return _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p)); }
+inline void st(int16_t *p, __m256i v) { _mm256_storeu_si256(reinterpret_cast<__m256i *>(p), v); }
+
+// The output layer's int32 sum (before the bias), as the portable code computes it.
+int32_t outputSumAvx2(const int16_t *us, const int16_t *them, const int16_t *w, bool screlu) {
+    const __m256i zero = _mm256_setzero_si256(), qa = _mm256_set1_epi16(QA);
+    __m256i sum = _mm256_setzero_si256();
+    for (int i = 0; i < kHidden; i += 16) {
+        const __m256i a = _mm256_min_epi16(_mm256_max_epi16(ld(us + i), zero), qa);
+        const __m256i b = _mm256_min_epi16(_mm256_max_epi16(ld(them + i), zero), qa);
+        const __m256i wa = ld(w + i), wb = ld(w + kHidden + i);
+        if (screlu) { // int16(a * w) * a, like the portable code
+            sum = _mm256_add_epi32(sum, _mm256_madd_epi16(_mm256_mullo_epi16(a, wa), a));
+            sum = _mm256_add_epi32(sum, _mm256_madd_epi16(_mm256_mullo_epi16(b, wb), b));
+        } else {
+            sum = _mm256_add_epi32(sum, _mm256_madd_epi16(a, wa));
+            sum = _mm256_add_epi32(sum, _mm256_madd_epi16(b, wb));
+        }
+    }
+    __m128i s = _mm_add_epi32(_mm256_castsi256_si128(sum), _mm256_extracti128_si256(sum, 1));
+    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0x4E));
+    s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0xB1));
+    return _mm_cvtsi128_si32(s);
+}
+} // namespace
+#endif
 
 namespace {
 Network fileNet, builtinNet;
@@ -123,11 +176,23 @@ bool load(const std::string &path, std::string &error) {
 
 void addFeature(int16_t *a, const Network &net, int feature) {
     const int16_t *w = net.ftWeights.data() + static_cast<size_t>(feature) * kHidden;
+#ifdef NAGS_NNUE_MSVC_AVX2
+    if (kAvx2) {
+        for (int i = 0; i < kHidden; i += 16) st(a + i, _mm256_add_epi16(ld(a + i), ld(w + i)));
+        return;
+    }
+#endif
     for (int i = 0; i < kHidden; ++i) a[i] = static_cast<int16_t>(a[i] + w[i]);
 }
 
 void subFeature(int16_t *a, const Network &net, int feature) {
     const int16_t *w = net.ftWeights.data() + static_cast<size_t>(feature) * kHidden;
+#ifdef NAGS_NNUE_MSVC_AVX2
+    if (kAvx2) {
+        for (int i = 0; i < kHidden; i += 16) st(a + i, _mm256_sub_epi16(ld(a + i), ld(w + i)));
+        return;
+    }
+#endif
     for (int i = 0; i < kHidden; ++i) a[i] = static_cast<int16_t>(a[i] - w[i]);
 }
 
@@ -139,6 +204,13 @@ int evaluate(const Accumulator &acc, Color stm, uint64_t occupied) {
     const int16_t *us = acc.v[colorIndex(stm)];
     const int16_t *them = acc.v[colorIndex(stm) ^ 1];
     int64_t total;
+#ifdef NAGS_NNUE_MSVC_AVX2
+    if (kAvx2) {
+        const int32_t sum = outputSumAvx2(us, them, w, net.screlu);
+        total = net.screlu ? sum / QA : sum;
+        return static_cast<int>((total + net.outBias[k]) * SCALE / (QA * QB));
+    }
+#endif
     if (net.screlu) {
         // clamp(x)^2 * w as (clamp(x) * w) * clamp(x): the first product fits
         // in 16 bits because the trainer keeps |w| <= 127.
@@ -168,15 +240,40 @@ void update(const int16_t *in, int16_t *out, const Network &net, const DirtyPiec
     const int16_t *a0 = row(d.addPiece[0], d.addSquare[0]);
     const int16_t *r0 = row(d.removePiece[0], d.removeSquare[0]);
     if (d.adds == 1 && d.removes == 1) { // quiet move
+#ifdef NAGS_NNUE_MSVC_AVX2
+        if (kAvx2) {
+            for (int i = 0; i < kHidden; i += 16)
+                st(out + i, _mm256_sub_epi16(_mm256_add_epi16(ld(in + i), ld(a0 + i)), ld(r0 + i)));
+            return;
+        }
+#endif
         for (int i = 0; i < kHidden; ++i) out[i] = static_cast<int16_t>(in[i] + a0[i] - r0[i]);
         return;
     }
     const int16_t *r1 = row(d.removePiece[1], d.removeSquare[1]);
     if (d.adds == 1) { // capture
+#ifdef NAGS_NNUE_MSVC_AVX2
+        if (kAvx2) {
+            for (int i = 0; i < kHidden; i += 16)
+                st(out + i, _mm256_sub_epi16(_mm256_sub_epi16(_mm256_add_epi16(ld(in + i), ld(a0 + i)), ld(r0 + i)),
+                                             ld(r1 + i)));
+            return;
+        }
+#endif
         for (int i = 0; i < kHidden; ++i) out[i] = static_cast<int16_t>(in[i] + a0[i] - r0[i] - r1[i]);
         return;
     }
     const int16_t *a1 = row(d.addPiece[1], d.addSquare[1]);
+#ifdef NAGS_NNUE_MSVC_AVX2
+    if (kAvx2) {
+        for (int i = 0; i < kHidden; i += 16) // castling
+            st(out + i, _mm256_sub_epi16(
+                            _mm256_sub_epi16(_mm256_add_epi16(_mm256_add_epi16(ld(in + i), ld(a0 + i)), ld(a1 + i)),
+                                             ld(r0 + i)),
+                            ld(r1 + i)));
+        return;
+    }
+#endif
     for (int i = 0; i < kHidden; ++i) // castling
         out[i] = static_cast<int16_t>(in[i] + a0[i] + a1[i] - r0[i] - r1[i]);
 }
