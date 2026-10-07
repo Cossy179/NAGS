@@ -128,6 +128,18 @@ works on synthetic data.
 
 ## Training
 
+**The NNUE evaluation** (what `nags_fast`, `nags_enhanced` and `nags` play
+with) is trained with one command on your own machine (an NVIDIA GPU makes
+training fast): it generates self-play data, trains the network designs and
+keeps a new network only if it beats the built-in one. See `docs/NNUE.md`.
+
+```bash
+python tools/nnue/run_round.py --target-positions 200000000 --threads 11
+```
+
+The rest of this section is about the graph neural network used by the
+NAGS hybrid's MCTS arm.
+
 The training data, `AJ-CORR-PGN-000.pgn` (about 1 GB), is stored with Git LFS.
 Fetch it first with `git lfs pull`.
 

@@ -147,33 +147,38 @@ command.
    ```
    The last line should print `True` and the GPU's name.
 
-**First, build up data.** The training data is not in the repository (it is
-large and easy to regenerate). A network trained on a few million positions
-is weaker than the built-in one, so generate several batches first, each
-with a new seed (about 90 positions per game, 32 bytes each). For the
-current design 40–50M positions are enough; bigger designs (king buckets, a
-wider layer) need 200M or more:
+**Then one command does everything:**
 ```
-build\Release\nags_datagen.exe --out data\selfplay_101.bin --games 150000 --threads 11 --seed 101
+python tools\nnue\run_round.py --target-positions 200000000 --threads 11
 ```
-(`--threads`: one less than your CPU's thread count.) In PowerShell, a loop
-over seeds runs unattended, e.g. 15 batches of about 13.5M positions:
-```
-foreach ($s in 101..115) { build\Release\nags_datagen.exe --out data\selfplay_$s.bin --games 150000 --threads 11 --seed $s }
-```
+(`--threads`: one less than your CPU's thread count.) It
 
-**Then run rounds:**
-```
-python tools\nnue\run_round.py --games 150000 --threads 11 --seed 102
-```
-This generates new games, trains on every `data\selfplay*.bin` (on the GPU,
-`--device auto`; older `selfplay*.txt` files are converted to `.bin` once),
-and plays the new network against the built-in one (SPRT [0, 10] at
-3+0.03). `--king-buckets` and `--activation` choose the network design, e.g.
-`--king-buckets 4 --activation screlu`. If the new one wins it is copied to
-`nets\nags.nnue`: rebuild, check `bench`, record the match in
-`docs/TESTING.md` and commit. `--skip-datagen` trains on the existing data
-only; `--skip-test` stops after training.
+1. generates self-play data (`data\selfplay_<seed>.bin`, batches of
+   `--games` 150,000 games, about 13.5M positions each) until `data\` holds
+   `--target-positions` positions; older `selfplay*.txt` files are converted
+   to `.bin` once and count too;
+2. trains each network design in `--designs` on all of it (on the GPU,
+   `--device auto`): by default `current` (the built-in network's design)
+   and `kb4` (4 king buckets with SCReLU, which needs this much data to pay
+   off); `kb8` and `kb16` are also available;
+3. plays each new network against the built-in one (SPRT [0, 10] at
+   3+0.03); if several win, the best two play each other; the winner is
+   copied to `nets\nags.nnue`.
+
+It can be stopped at any time (Ctrl+C, a restart): run the same command
+again and it carries on where it was. Finished batches are kept, training
+continues from its checkpoint, and test matches resume from their logs.
+Each step's result is appended to `data\round_<positions>.txt`. Expect
+roughly a day for 200M positions on a 6-core CPU (data generation is most
+of it), then about an hour per design to train on an RTX 3060 and one to
+two hours per test match.
+
+If a new network was copied to `nets\nags.nnue`: rebuild
+(`cmake --build build --config Release --parallel`), check `bench`, record
+the match in `docs/TESTING.md` and the network in the table below, and
+commit. For the next round raise `--target-positions` (new games come from
+the stronger engine) and run the command again. `--skip-datagen` trains on
+the data that is there; `--skip-test` stops after training.
 
 ## Networks
 
