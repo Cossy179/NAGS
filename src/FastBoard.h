@@ -115,6 +115,10 @@ private:
     int psq = 0;
     int phase = 0;
     struct AccEntry {
+        // User-provided so that accStack.emplace_back() (every makeMove) does
+        // not value-initialise, i.e. zero, the whole accumulator: it is only
+        // read once computed[] says so.
+        AccEntry() {}
         nnue::Accumulator acc;
         nnue::DirtyPieces dirty;          // pieces changed by the move that led to this position
         uint8_t kingSq[2] = {};           // both kings' squares in this position
