@@ -31,6 +31,11 @@ public:
     // order generateLegalMoves filters them. The search checks legality only
     // for moves it actually tries.
     void generatePseudoLegalMoves(MoveList &out, bool noisyOnly = false) const;
+    // Appends the pseudo-legal moves of one kind to `out` (see FastBoard).
+    void generateMoves(MoveList &out, GenMode mode) const;
+    // If `m` (from, to, promotion kind) is pseudo-legal here, sets `out` to
+    // the generated move (with its flags) and returns true.
+    bool toPseudoLegal(const Move &m, Move &out) const;
 
     bool inCheck() const { return inCheck(side); }
     bool inCheck(Color c) const;

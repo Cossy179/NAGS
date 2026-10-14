@@ -391,6 +391,29 @@ void Board::generatePseudoLegalMoves(MoveList &out, bool noisyOnly) const {
     }
 }
 
+// Simple versions (this board is not used where speed matters): filter the
+// full list.
+void Board::generateMoves(MoveList &out, GenMode mode) const {
+    MoveList all;
+    generatePseudoMoves(all);
+    for (int i = 0; i < all.size(); ++i) {
+        const Move &m = all[i];
+        const bool noisy = m.promotion != Piece::None || m.isEnPassant || (occAll & (1ULL << m.to));
+        if (mode == GenMode::All || noisy == (mode == GenMode::Noisy)) out.push_back(m);
+    }
+}
+
+bool Board::toPseudoLegal(const Move &m, Move &out) const {
+    MoveList all;
+    generatePseudoMoves(all);
+    for (int i = 0; i < all.size(); ++i)
+        if (sameMove(all[i], m)) {
+            out = all[i];
+            return true;
+        }
+    return false;
+}
+
 std::vector<Move> Board::generateLegalMoves(bool noisyOnly) const {
     MoveList pseudo;
     generatePseudoLegalMoves(pseudo, noisyOnly);

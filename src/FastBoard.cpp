@@ -496,7 +496,8 @@ void FastBoard::generatePseudoMoves(MoveList &moves) const {
     generateCastlingMoves(moves, side);
 }
 
-void FastBoard::generatePawnMoves(MoveList &moves, Color c) const {
+void FastBoard::generatePawnMoves(MoveList &moves, Color c, GenMode mode) const {
+    const bool noisy = mode != GenMode::Quiet, quiet = mode != GenMode::Noisy;
     int ci = colorIndex(c);
     Bitboard pawns = pieces[ci][PAWN];
     Bitboard enemies = occupied[1 - ci];
@@ -511,9 +512,10 @@ void FastBoard::generatePawnMoves(MoveList &moves, Color c) const {
     if (c == Color::White) {
         Bitboard single = northOne(pawns) & empty;
         Bitboard dbl = northOne(single) & empty & RANK_4;
-        tmp = single & ~RANK_8; while (tmp) { int to = popLsb(tmp); addMove(moves, to - 8, to); }
-        tmp = single & RANK_8;  while (tmp) { int to = popLsb(tmp); addPromos(to - 8, to); }
-        tmp = dbl;              while (tmp) { int to = popLsb(tmp); addMove(moves, to - 16, to); }
+        if (quiet) { tmp = single & ~RANK_8; while (tmp) { int to = popLsb(tmp); addMove(moves, to - 8, to); } }
+        if (noisy) { tmp = single & RANK_8;  while (tmp) { int to = popLsb(tmp); addPromos(to - 8, to); } }
+        if (quiet) { tmp = dbl;              while (tmp) { int to = popLsb(tmp); addMove(moves, to - 16, to); } }
+        if (!noisy) return;
         Bitboard capL = northWest(pawns) & enemies, capR = northEast(pawns) & enemies;
         tmp = capL & ~RANK_8; while (tmp) { int to = popLsb(tmp); addMove(moves, to - 7, to); }
         tmp = capR & ~RANK_8; while (tmp) { int to = popLsb(tmp); addMove(moves, to - 9, to); }
@@ -527,9 +529,10 @@ void FastBoard::generatePawnMoves(MoveList &moves, Color c) const {
     } else {
         Bitboard single = southOne(pawns) & empty;
         Bitboard dbl = southOne(single) & empty & RANK_5;
-        tmp = single & ~RANK_1; while (tmp) { int to = popLsb(tmp); addMove(moves, to + 8, to); }
-        tmp = single & RANK_1;  while (tmp) { int to = popLsb(tmp); addPromos(to + 8, to); }
-        tmp = dbl;              while (tmp) { int to = popLsb(tmp); addMove(moves, to + 16, to); }
+        if (quiet) { tmp = single & ~RANK_1; while (tmp) { int to = popLsb(tmp); addMove(moves, to + 8, to); } }
+        if (noisy) { tmp = single & RANK_1;  while (tmp) { int to = popLsb(tmp); addPromos(to + 8, to); } }
+        if (quiet) { tmp = dbl;              while (tmp) { int to = popLsb(tmp); addMove(moves, to + 16, to); } }
+        if (!noisy) return;
         Bitboard capL = southEast(pawns) & enemies, capR = southWest(pawns) & enemies;
         tmp = capL & ~RANK_1; while (tmp) { int to = popLsb(tmp); addMove(moves, to + 7, to); }
         tmp = capR & ~RANK_1; while (tmp) { int to = popLsb(tmp); addMove(moves, to + 9, to); }
@@ -543,9 +546,9 @@ void FastBoard::generatePawnMoves(MoveList &moves, Color c) const {
     }
 }
 
-void FastBoard::generatePieceMoves(MoveList &moves, Color c) const {
+void FastBoard::generatePieceMoves(MoveList &moves, Color c, GenMode mode) const {
     int ci = colorIndex(c);
-    Bitboard targets = ~occupied[ci];
+    Bitboard targets = mode == GenMode::All ? ~occupied[ci] : mode == GenMode::Noisy ? occupied[1 - ci] : ~all_occupied;
     for (int type = KNIGHT; type <= KING; ++type) {
         Bitboard bb = pieces[ci][type];
         while (bb) {
@@ -585,15 +588,63 @@ void FastBoard::generateCastlingMoves(MoveList &moves, Color c) const {
 }
 
 void FastBoard::generatePseudoLegalMoves(MoveList &out, bool noisyOnly) const {
-    generatePseudoMoves(out);
-    if (noisyOnly) {
-        int kept = 0;
-        for (int i = 0; i < out.size(); ++i) {
-            const Move &m = out[i];
-            if (m.promotion != Piece::None || m.isEnPassant || mailbox[m.to] != Piece::None) out[kept++] = m;
+    out.clear();
+    generateMoves(out, noisyOnly ? GenMode::Noisy : GenMode::All);
+}
+
+void FastBoard::generateMoves(MoveList &out, GenMode mode) const {
+    generatePawnMoves(out, side, mode);
+    generatePieceMoves(out, side, mode);
+    if (mode != GenMode::Noisy) generateCastlingMoves(out, side);
+}
+
+bool FastBoard::toPseudoLegal(const Move &m, Move &out) const {
+    if (m.from < 0 || m.from > 63 || m.to < 0 || m.to > 63 || m.from == m.to) return false;
+    const Piece p = mailbox[m.from];
+    if (p == Piece::None || colorOf(p) != side) return false;
+    const int ci = colorIndex(side);
+    const Bitboard toBB = 1ULL << m.to;
+    if (occupied[ci] & toBB) return false;
+    const int type = pieceTypeOf(p);
+    const int promo = pieceTypeOf(m.promotion); // -1: none
+    out = Move{m.from, m.to, Piece::None, false, false};
+    if (type == PAWN) {
+        const bool white = side == Color::White;
+        if ((rankOf(m.to) == (white ? 7 : 0)) != (promo >= 0)) return false; // promotes exactly on the last rank
+        if (promo >= 0 && (promo < KNIGHT || promo > QUEEN)) return false;
+        const int fwd = white ? 8 : -8;
+        bool ok = false;
+        if (m.to == m.from + fwd) {
+            ok = !(all_occupied & toBB);
+        } else if (m.to == m.from + 2 * fwd) {
+            ok = rankOf(m.from) == (white ? 1 : 6) && !(all_occupied & (toBB | (1ULL << (m.from + fwd))));
+        } else if (pawnAttacks[ci][m.from] & toBB) {
+            if (occupied[1 - ci] & toBB) ok = true;
+            else if (m.to == epSquare) ok = out.isEnPassant = true;
         }
-        out.resize(kept);
+        if (!ok) return false;
+        if (promo >= 0) out.promotion = makePiece(side, promo);
+        return true;
     }
+    if (promo >= 0) return false;
+    Bitboard attacks;
+    switch (type) {
+        case KNIGHT: attacks = knightAttacks[m.from]; break;
+        case BISHOP: attacks = getBishopAttacks(m.from, all_occupied); break;
+        case ROOK: attacks = getRookAttacks(m.from, all_occupied); break;
+        case QUEEN: attacks = getQueenAttacks(m.from, all_occupied); break;
+        default: attacks = kingAttacks[m.from]; break;
+    }
+    if (attacks & toBB) return true;
+    if (type != KING || (m.to - m.from != 2 && m.from - m.to != 2)) return false;
+    MoveList castles;
+    generateCastlingMoves(castles, side);
+    for (int i = 0; i < castles.size(); ++i)
+        if (castles[i].from == m.from && castles[i].to == m.to) {
+            out = castles[i];
+            return true;
+        }
+    return false;
 }
 
 std::vector<Move> FastBoard::generateLegalMoves(bool noisyOnly) const {

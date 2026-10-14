@@ -35,6 +35,13 @@ public:
     // Pseudo-legal moves (they may leave the own king in check), in the same
     // order generateLegalMoves filters them.
     void generatePseudoLegalMoves(MoveList &out, bool noisyOnly = false) const;
+    // Appends the pseudo-legal moves of one kind to `out`.
+    void generateMoves(MoveList &out, GenMode mode) const;
+    // If `m` (from, to and promotion kind, e.g. from the transposition table
+    // or a killer slot) is a pseudo-legal move here, sets `out` to it as the
+    // generator would produce it (en passant / castling flags, promotion
+    // colour) and returns true.
+    bool toPseudoLegal(const Move &m, Move &out) const;
 
     bool inCheck() const { return inCheck(side); }
     bool inCheck(Color c) const;
@@ -175,8 +182,8 @@ private:
     void removePiece(int sq);
     void movePiece(int from, int to);
 
-    void generatePawnMoves(MoveList &moves, Color c) const;
-    void generatePieceMoves(MoveList &moves, Color c) const;
+    void generatePawnMoves(MoveList &moves, Color c, GenMode mode = GenMode::All) const;
+    void generatePieceMoves(MoveList &moves, Color c, GenMode mode = GenMode::All) const;
     void generateCastlingMoves(MoveList &moves, Color c) const;
     bool isSquareAttacked(int sq, Color byColor) const;
     int kingSquare(Color c) const;

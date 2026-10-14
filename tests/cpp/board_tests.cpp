@@ -192,6 +192,78 @@ static void testNullMove() {
     CHECK(!b.isRepetition(), "repetition detected across a null move");
 }
 
+static bool identical(const Move &a, const Move &b) {
+    return a.from == b.from && a.to == b.to && a.promotion == b.promotion && a.isEnPassant == b.isEnPassant &&
+           a.isCastling == b.isCastling;
+}
+
+// The staged move picker relies on these: generating one kind of move gives
+// exactly the matching moves of the full list, in the same order, and
+// toPseudoLegal accepts exactly the generated moves (from/to/promotion kind)
+// and reproduces them with their flags.
+static void testGenerationModes() {
+    const char *starts[] = {
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+        "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        "4k3/1P6/8/8/8/8/6p1/4K3 b - - 0 1",
+    };
+    std::mt19937 rng(99);
+    int checked = 0;
+    for (const char *start : starts) {
+        for (int game = 0; game < 8; ++game) {
+            TestBoard b;
+            b.setFromFEN(start);
+            for (int ply = 0; ply < 80; ++ply) {
+                MoveList all, viaMode, noisy, quiet;
+                b.generatePseudoLegalMoves(all);
+                b.generateMoves(viaMode, GenMode::All);
+                b.generateMoves(noisy, GenMode::Noisy);
+                b.generateMoves(quiet, GenMode::Quiet);
+                CHECK(viaMode.size() == all.size(), "GenMode::All differs at %s", b.getFEN().c_str());
+                int n = 0, q = 0;
+                for (int i = 0; i < all.size(); ++i) {
+                    if (i < viaMode.size()) CHECK(identical(all[i], viaMode[i]), "GenMode::All order differs at %s", b.getFEN().c_str());
+                    const bool isNoisy = eval::isNoisy(b, all[i]);
+                    MoveList &part = isNoisy ? noisy : quiet;
+                    int &k = isNoisy ? n : q;
+                    CHECK(k < part.size() && identical(part[k], all[i]), "%s move %s missing or out of order at %s",
+                          isNoisy ? "noisy" : "quiet", moveToUciString(all[i]).c_str(), b.getFEN().c_str());
+                    ++k;
+                }
+                CHECK(n == noisy.size() && q == quiet.size(), "extra moves in a subset at %s", b.getFEN().c_str());
+                MoveList noisyOnly;
+                b.generatePseudoLegalMoves(noisyOnly, true);
+                CHECK(noisyOnly.size() == noisy.size(), "noisyOnly differs at %s", b.getFEN().c_str());
+                for (int i = 0; i < noisyOnly.size() && i < noisy.size(); ++i)
+                    CHECK(identical(noisyOnly[i], noisy[i]), "noisyOnly order differs at %s", b.getFEN().c_str());
+                // Every from/to/promotion-kind combination.
+                for (int from = 0; from < 64; ++from)
+                    for (int to = 0; to < 64; ++to)
+                        for (int promo = -1; promo <= QUEEN; ++promo) {
+                            if (promo == PAWN) continue;
+                            Move probe{from, to, promo < 0 ? Piece::None : makePiece(Color::White, promo), false, false};
+                            const Move *gen = nullptr;
+                            for (int i = 0; i < all.size(); ++i)
+                                if (sameMove(all[i], probe)) gen = &all[i];
+                            Move out;
+                            const bool ok = b.toPseudoLegal(probe, out);
+                            CHECK(ok == (gen != nullptr), "toPseudoLegal(%s) = %d at %s", moveToUciString(probe).c_str(), ok,
+                                  b.getFEN().c_str());
+                            if (ok && gen) CHECK(identical(out, *gen), "toPseudoLegal(%s) flags differ at %s",
+                                                 moveToUciString(probe).c_str(), b.getFEN().c_str());
+                        }
+                ++checked;
+                auto legal = b.generateLegalMoves();
+                if (legal.empty()) break;
+                b.makeMove(legal[rng() % legal.size()]);
+            }
+        }
+    }
+    CHECK(checked > 1000, "generation modes checked on only %d positions", checked);
+}
+
 int main() {
     testPerft();
     testNullMove();
@@ -199,6 +271,7 @@ int main() {
     testFenValidation();
     testDraws();
     testApplyMoves();
+    testGenerationModes();
     if (failures) {
         std::printf("%s: %d failure(s)\n", kBoardName, failures);
         return 1;

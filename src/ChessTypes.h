@@ -53,6 +53,11 @@ private:
     int count = 0;
 };
 
+// Which pseudo-legal moves to generate: all, captures and promotions
+// ("noisy", including en passant and non-capturing promotions), or the rest.
+// Each subset comes in the same relative order as in the full list.
+enum class GenMode { All, Noisy, Quiet };
+
 inline constexpr Color opposite(Color c) { return c == Color::White ? Color::Black : Color::White; }
 
 inline constexpr int colorIndex(Color c) { return static_cast<int>(c); }
