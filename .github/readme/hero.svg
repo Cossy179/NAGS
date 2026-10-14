@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="382" viewBox="0 0 1200 382" role="img" aria-labelledby="title desc">
+<title id="title">NAGS — Neuro-Adaptive Graph Search</title>
+<desc id="desc">Minimal midnight-green banner with NAGS typography, search-tree geometry and a stylised chess board.</desc>
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0A1115"/><stop offset=".62" stop-color="#101B20"/><stop offset="1" stop-color="#0B1115"/></linearGradient>
+<linearGradient id="lime" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#D5FA80"/><stop offset="1" stop-color="#77DDBD"/></linearGradient>
+<linearGradient id="fade" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#0B1417" stop-opacity="0"/><stop offset="1" stop-color="#0B1417"/></linearGradient>
+<pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#94B5B0" stroke-opacity=".065"/></pattern>
+<clipPath id="frame"><rect width="1200" height="382" rx="20"/></clipPath>
+</defs>
+<g clip-path="url(#frame)">
+<rect width="1200" height="382" fill="url(#bg)"/>
+<rect width="1200" height="382" fill="url(#grid)"/>
+<circle cx="1018" cy="170" r="242" fill="#79CFA1" opacity=".035"/>
+<path d="M0 0H1200M0 381H1200" stroke="#A3C9BF" stroke-opacity=".20"/>
+<rect x="50" y="39" width="30" height="3" fill="#C9F27E"/>
+<text x="93" y="45" fill="#A3B7B4" font-size="13" font-weight="700" letter-spacing="3.4" font-family="Arial,Helvetica,sans-serif">INDEPENDENT CHESS ENGINE RESEARCH</text>
+<text x="48" y="193" fill="#F0F3E9" font-size="124" font-weight="800" letter-spacing="-8" font-family="Arial,Helvetica,sans-serif">NAGS</text>
+<circle cx="442" cy="175" r="9" fill="#D5FA80"/>
+<text x="52" y="230" fill="#B7C9C6" font-size="20" font-weight="500" letter-spacing="4.8" font-family="Arial,Helvetica,sans-serif">NEURO-ADAPTIVE GRAPH SEARCH</text>
+<rect x="51" y="260" width="399" height="1" fill="#33454A"/>
+<text x="52" y="291" fill="#DEE6DC" font-size="16" font-family="Arial,Helvetica,sans-serif">Search deeply.</text>
+<text x="167" y="291" fill="#D5FA80" font-size="16" font-family="Arial,Helvetica,sans-serif">Evaluate intelligently.</text>
+<text x="349" y="291" fill="#DEE6DC" font-size="16" font-family="Arial,Helvetica,sans-serif">Learn relentlessly.</text>
+<g font-size="11" font-weight="700" letter-spacing="1.3" font-family="Arial,Helvetica,sans-serif">
+<rect x="51" y="316" rx="8" width="91" height="28" fill="#1C3030" stroke="#355554"/>
+<text x="70" y="335" fill="#C7E2DC">C++ / UCI</text>
+<rect x="151" y="316" rx="8" width="67" height="28" fill="#1C3030" stroke="#355554"/>
+<text x="169" y="335" fill="#C7E2DC">NNUE</text>
+<rect x="227" y="316" rx="8" width="156" height="28" fill="#1C3030" stroke="#355554"/>
+<text x="243" y="335" fill="#C7E2DC">HYBRID RESEARCH</text>
+</g>
+<path d="M620 64L710 109L615 189L738 249L646 333" fill="none" stroke="#64847E" stroke-width="1.6" opacity=".72"/>
+<path d="M710 109L786 39M710 109L794 183M615 189L551 128M615 189L546 251M738 249L793 304" fill="none" stroke="#55776F" stroke-width="1.6" opacity=".7"/>
+<path d="M620 64L710 109L794 183" fill="none" stroke="#D5FA80" stroke-width="2.6"/>
+<g fill="#0F1C20" stroke="#82AE9B" stroke-width="1.5">
+<circle cx="620" cy="64" r="6"/><circle cx="710" cy="109" r="7"/><circle cx="615" cy="189" r="6"/><circle cx="738" cy="249" r="7"/><circle cx="646" cy="333" r="5"/><circle cx="786" cy="39" r="6"/><circle cx="794" cy="183" r="7"/><circle cx="551" cy="128" r="5"/><circle cx="546" cy="251" r="5"/><circle cx="793" cy="304" r="5"/>
+</g>
+<circle cx="710" cy="109" r="3.6" fill="#D5FA80"/><circle cx="794" cy="183" r="4" fill="#D5FA80"/>
+<g transform="translate(866 51)">
+<rect x="-13" y="-13" width="288" height="288" rx="18" fill="#080E12" stroke="#53776B" stroke-opacity=".7"/>
+<g>
+<rect x="0" y="0" width="32" height="32" fill="#1D2E32"/><rect x="32" y="0" width="32" height="32" fill="#2A4041"/><rect x="64" y="0" width="32" height="32" fill="#1D2E32"/><rect x="96" y="0" width="32" height="32" fill="#2A4041"/><rect x="128" y="0" width="32" height="32" fill="#1D2E32"/><rect x="160" y="0" width="32" height="32" fill="#2A4041"/><rect x="192" y="0" width="32" height="32" fill="#1D2E32"/><rect x="224" y="0" width="32" height="32" fill="#2A4041"/><rect x="0" y="32" width="32" height="32" fill="#2A4041"/><rect x="32" y="32" width="32" height="32" fill="#1D2E32"/><rect x="64" y="32" width="32" height="32" fill="#2A4041"/><rect x="96" y="32" width="32" height="32" fill="#1D2E32"/><rect x="128" y="32" width="32" height="32" fill="#2A4041"/><rect x="160" y="32" width="32" height="32" fill="#1D2E32"/><rect x="192" y="32" width="32" height="32" fill="#2A4041"/><rect x="224" y="32" width="32" height="32" fill="#1D2E32"/><rect x="0" y="64" width="32" height="32" fill="#1D2E32"/><rect x="32" y="64" width="32" height="32" fill="#2A4041"/><rect x="64" y="64" width="32" height="32" fill="#1D2E32"/><rect x="96" y="64" width="32" height="32" fill="#2A4041"/><rect x="128" y="64" width="32" height="32" fill="#1D2E32"/><rect x="160" y="64" width="32" height="32" fill="#2A4041"/><rect x="192" y="64" width="32" height="32" fill="#1D2E32"/><rect x="224" y="64" width="32" height="32" fill="#2A4041"/><rect x="0" y="96" width="32" height="32" fill="#2A4041"/><rect x="32" y="96" width="32" height="32" fill="#1D2E32"/><rect x="64" y="96" width="32" height="32" fill="#2A4041"/><rect x="96" y="96" width="32" height="32" fill="#1D2E32"/><rect x="128" y="96" width="32" height="32" fill="#2A4041"/><rect x="160" y="96" width="32" height="32" fill="#1D2E32"/><rect x="192" y="96" width="32" height="32" fill="#2A4041"/><rect x="224" y="96" width="32" height="32" fill="#1D2E32"/><rect x="0" y="128" width="32" height="32" fill="#1D2E32"/><rect x="32" y="128" width="32" height="32" fill="#2A4041"/><rect x="64" y="128" width="32" height="32" fill="#1D2E32"/><rect x="96" y="128" width="32" height="32" fill="#2A4041"/><rect x="128" y="128" width="32" height="32" fill="#1D2E32"/><rect x="160" y="128" width="32" height="32" fill="#2A4041"/><rect x="192" y="128" width="32" height="32" fill="#1D2E32"/><rect x="224" y="128" width="32" height="32" fill="#2A4041"/><rect x="0" y="160" width="32" height="32" fill="#2A4041"/><rect x="32" y="160" width="32" height="32" fill="#1D2E32"/><rect x="64" y="160" width="32" height="32" fill="#2A4041"/><rect x="96" y="160" width="32" height="32" fill="#1D2E32"/><rect x="128" y="160" width="32" height="32" fill="#2A4041"/><rect x="160" y="160" width="32" height="32" fill="#1D2E32"/><rect x="192" y="160" width="32" height="32" fill="#2A4041"/><rect x="224" y="160" width="32" height="32" fill="#1D2E32"/><rect x="0" y="192" width="32" height="32" fill="#1D2E32"/><rect x="32" y="192" width="32" height="32" fill="#2A4041"/><rect x="64" y="192" width="32" height="32" fill="#1D2E32"/><rect x="96" y="192" width="32" height="32" fill="#2A4041"/><rect x="128" y="192" width="32" height="32" fill="#1D2E32"/><rect x="160" y="192" width="32" height="32" fill="#2A4041"/><rect x="192" y="192" width="32" height="32" fill="#1D2E32"/><rect x="224" y="192" width="32" height="32" fill="#2A4041"/><rect x="0" y="224" width="32" height="32" fill="#2A4041"/><rect x="32" y="224" width="32" height="32" fill="#1D2E32"/><rect x="64" y="224" width="32" height="32" fill="#2A4041"/><rect x="96" y="224" width="32" height="32" fill="#1D2E32"/><rect x="128" y="224" width="32" height="32" fill="#2A4041"/><rect x="160" y="224" width="32" height="32" fill="#1D2E32"/><rect x="192" y="224" width="32" height="32" fill="#2A4041"/><rect x="224" y="224" width="32" height="32" fill="#1D2E32"/>
+</g>
+<rect x="4" y="4" width="248" height="248" rx="0" fill="none" stroke="#A5C9B8" stroke-opacity=".18"/>
+<rect x="128" y="160" width="32" height="32" fill="#D5FA80" opacity=".3"/>
+<rect x="160" y="96" width="32" height="32" fill="#D5FA80" opacity=".25"/>
+<rect x="96" y="32" width="32" height="32" fill="#D5FA80" opacity=".20"/>
+<path d="M144 176L176 112L112 48" fill="none" stroke="#D5FA80" stroke-width="2.7" stroke-linecap="round" stroke-dasharray="4 7"/>
+<circle cx="144" cy="176" r="8" fill="#D5FA80"/><circle cx="176" cy="112" r="8" fill="#D5FA80"/>
+<circle cx="112" cy="48" r="14" fill="#C9F58C"/>
+<text x="112" y="55" text-anchor="middle" font-size="21" font-family="DejaVu Sans,Segoe UI Symbol,serif" fill="#0B1617">♞</text>
+<path d="M17 17h26M17 17v26M213 239h26M239 213v26" stroke="#CBF48C" stroke-width="2" opacity=".7"/>
+</g>
+<g font-family="Consolas,Menlo,monospace" font-size="12" fill="#86A39B"><text x="885" y="350">SEARCH / EVALUATE / ADAPT</text></g>
+</g></svg>

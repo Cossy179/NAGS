@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="395" viewBox="0 0 1200 395" role="img" aria-labelledby="at ad">
+<title id="at">NAGS architecture</title><desc id="ad">The UCI interface drives a C++ alpha-beta engine backed by NNUE, a transposition table, and Syzygy. Optional GNN and MCTS execute separately with alpha-beta move verification. A meta-learner can tune search parameters.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0L6 3L0 6" fill="none" stroke="#A8D98D" stroke-width="1.3"/></marker><marker id="arrow2" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0 0L6 3L0 6" fill="none" stroke="#91A5B0" stroke-width="1.3"/></marker></defs>
+<rect width="1200" height="395" rx="18" fill="#0D1519"/><rect x="1" y="1" width="1198" height="393" rx="18" fill="none" stroke="#34504E"/>
+<text x="35" y="42" font-size="13" font-family="Arial,Helvetica,sans-serif" font-weight="700" letter-spacing="2.2" fill="#C9F285">01 / THE ENGINE</text>
+<text x="35" y="68" font-size="15" font-family="Arial,Helvetica,sans-serif" fill="#A8B8B5">The C++ search core is the production-strength foundation. Neural search is an optional experimental arm.</text>
+<g font-family="Arial,Helvetica,sans-serif">
+<rect x="35" y="113" width="176" height="112" rx="12" fill="#172329" stroke="#48605C"/><text x="53" y="143" font-size="11" letter-spacing="1.6" fill="#9AACA9">INPUT</text><text x="53" y="181" font-size="28" font-weight="700" fill="#F2F3EB">UCI</text><text x="53" y="202" font-size="13" fill="#A8B8B5">GUI · clocks · moves</text>
+<path d="M211 169H256" stroke="#ADD999" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="262" y="113" width="280" height="112" rx="12" fill="#22332F" stroke="#C5EF88" stroke-width="1.5"/><text x="280" y="143" font-size="11" letter-spacing="1.6" fill="#C5EF88">PRIMARY SEARCH</text><text x="280" y="180" font-size="25" font-weight="700" fill="#F4F6EE">Alpha-beta / PVS</text><text x="280" y="202" font-size="13" fill="#C0CEC7">Iterative deepening · pruning</text>
+<path d="M542 169H597" stroke="#ADD999" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="602" y="113" width="178" height="112" rx="12" fill="#172329" stroke="#48605C"/><text x="620" y="143" font-size="11" letter-spacing="1.6" fill="#9AACA9">EVALUATOR</text><text x="620" y="181" font-size="25" font-weight="700" fill="#F4F6EE">NNUE</text><text x="620" y="202" font-size="13" fill="#A8B8B5">Incremental · AVX2</text>
+<path d="M780 169H828" stroke="#ADD999" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="834" y="113" width="330" height="112" rx="12" fill="#172329" stroke="#48605C"/><text x="852" y="143" font-size="11" letter-spacing="1.6" fill="#9AACA9">SEARCH SUPPORT</text><text x="852" y="174" font-size="18" font-weight="700" fill="#F4F6EE">Transposition table</text><text x="852" y="198" font-size="16" fill="#CBD6CE">Syzygy WDL / DTZ</text>
+<path d="M35 260H1165" stroke="#425752" stroke-dasharray="4 8"/>
+<text x="35" y="284" font-size="12" fill="#93A5AA" letter-spacing="1.5" font-weight="700">OPTIONAL HYBRID PATH · EXPERIMENTAL</text>
+<rect x="35" y="303" width="252" height="62" rx="10" fill="#17242A" stroke="#668F8C"/><text x="54" y="329" font-size="17" font-weight="700" fill="#EAF1ED">GNN policy + value</text><text x="54" y="348" font-size="12" fill="#A3B7B7">Python inference service</text>
+<path d="M287 334H336" stroke="#91A5B0" stroke-width="2" marker-end="url(#arrow2)"/>
+<rect x="344" y="303" width="252" height="62" rx="10" fill="#17242A" stroke="#668F8C"/><text x="362" y="329" font-size="17" font-weight="700" fill="#EAF1ED">MCTS proposal</text><text x="362" y="348" font-size="12" fill="#A3B7B7">Parallel tree exploration</text>
+<path d="M596 334H644" stroke="#91A5B0" stroke-width="2" marker-end="url(#arrow2)"/>
+<rect x="650" y="303" width="252" height="62" rx="10" fill="#17242A" stroke="#668F8C"/><text x="667" y="329" font-size="17" font-weight="700" fill="#EAF1ED">Alpha-beta verifies</text><text x="667" y="348" font-size="12" fill="#A3B7B7">Candidate move before override</text>
+<path d="M902 334H951" stroke="#91A5B0" stroke-width="2" marker-end="url(#arrow2)"/>
+<rect x="959" y="303" width="205" height="62" rx="10" fill="#17242A" stroke="#668F8C"/><text x="976" y="329" font-size="17" font-weight="700" fill="#EAF1ED">Final move</text><text x="976" y="348" font-size="12" fill="#A3B7B7">UCI bestmove</text>
+</g>
+</svg>

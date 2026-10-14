@@ -1,274 +1,230 @@
 <div align="center">
 
-# ♞ NAGS
+<img src=".github/readme/hero.svg" width="100%" alt="NAGS — Neuro-Adaptive Graph Search. Independent chess engine research." />
 
-### N E U R O · A D A P T I V E · G R A P H · S E A R C H
+<br/>
 
-**Search deeply. Evaluate intelligently. Learn relentlessly.**
+[![Build & tests](https://github.com/Cossy179/NAGS/actions/workflows/nags-ci.yml/badge.svg)](https://github.com/Cossy179/NAGS/actions/workflows/nags-ci.yml)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-161D22?logo=cplusplus&logoColor=D5FA80)](CMakeLists.txt)
+[![Python](https://img.shields.io/badge/Python-ML%20research-161D22?logo=python&logoColor=D5FA80)](requirements.txt)
+[![UCI](https://img.shields.io/badge/interface-UCI-161D22?labelColor=161D22&color=668F79)](#quick-start)
+[![MIT](https://img.shields.io/badge/license-MIT-161D22?color=668F79)](LICENSE)
 
-An open-source chess engine research project combining high-performance **C++ alpha-beta search**, **incremental NNUE evaluation**, and an experimental **graph-neural-network-guided MCTS** system.
+**A chess engine built to ask a better question: how much intelligence can we extract from every millisecond of search?**
 
-[![CI](https://github.com/Cossy179/NAGS/actions/workflows/nags-ci.yml/badge.svg)](https://github.com/Cossy179/NAGS/actions/workflows/nags-ci.yml)
-[![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)](CMakeLists.txt)
-[![Python](https://img.shields.io/badge/Python-ML%20pipeline-3776AB?logo=python&logoColor=white)](requirements.txt)
-[![UCI](https://img.shields.io/badge/Protocol-UCI-13B8A6)](#quick-start)
-[![License: MIT](https://img.shields.io/badge/License-MIT-8B5CF6)](LICENSE)
+A serious C++ search engine, efficient NNUE evaluation, and a separate experimental neural-search laboratory. Every improvement earns its place through testing.
 
-**[Get started](#quick-start)** &nbsp;·&nbsp; **[Explore the architecture](#under-the-hood)** &nbsp;·&nbsp; **[See the benchmarks](#measured-progress)** &nbsp;·&nbsp; **[Read the research docs](#documentation)**
-
----
-
-### THE ENGINE AT A GLANCE
-
-| ♟️ **56.5M** | ⚡ **1.48M** | 🎯 **2,994 ± 32** | 🧠 **4** |
-|:---:|:---:|:---:|:---:|
-| Positions behind NNUE Network 7 | Nodes/sec in a reported Windows AVX2 bench | Estimated on a **strength-limited** Stockfish UCI_Elo ladder | UCI engine variants |
-
-<sub>Historical measurements from October 2026; see [testing methodology](docs/TESTING.md). Nodes/sec is hardware/build-specific. The Elo estimate is **not** a rating against unrestricted Stockfish, and it is not a universal chess Elo.</sub>
+[**Get running**](#quick-start)　·　[**Explore the engine**](#architecture)　·　[**See the evidence**](#measured-progress)　·　[**Train & experiment**](#training--experimentation)
 
 </div>
 
-> [!IMPORTANT]
-> **Active development · New NNUE training in progress.** NAGS is being actively developed while a new network is trained. Changes to network formats, feature encodings, inference, or trainer interfaces must preserve compatibility with the ongoing run. Experimental architectures belong on isolated branches until they are validated. The checked-in network remains the reference until a new candidate wins its evaluation matches.
+---
 
-## What makes NAGS different?
+## Built to search. Built to learn.
 
-NAGS is a chess-engine laboratory with a practical goal: find which combinations of **classical search**, **efficient neural evaluation**, and **learned search guidance** actually win games under real time limits.
+<table>
+<tr>
+<td width="60%" valign="top">
 
-- **Fast search core** — magic bitboards, iterative deepening, principal variation search, aspiration windows, null-move and futility pruning, late-move reductions, singular extensions, and history-based ordering.
-- **Incremental NNUE** — efficient accumulator updates, piece-count output buckets, optional king-bucket architectures, SCReLU experimentation, and AVX2 inference kernels.
-- **Experimental neural search** — a GNN predicts policy priors, value and uncertainty for a parallel PUCT/MCTS arm; alpha-beta verifies potential move overrides.
-- **Serious endgame support** — Syzygy WDL/DTZ probing via Fathom.
-- **Evidence over hype** — deterministic bench fingerprints, paired-opening matches, SPRT testing, and documented *failed* experiments.
-- **Runs without neural services** — the hybrid gracefully falls back to its full C++ alpha-beta engine if the optional Python services are unavailable.
+### One project. Two approaches.
 
-## Under the hood
+**01 / Search first.** A fast C++ alpha-beta/PVS engine built on magic bitboards, incremental NNUE, a transposition table, selective search and Syzygy endgames.
 
-```mermaid
-flowchart TB
-    U["♞ UCI / Chess GUI"] --> H["NAGS hybrid controller"]
-    H --> A["Alpha-beta / PVS search"]
-    A --> B["Magic bitboard position"]
-    A <--> TT["Shared transposition table"]
-    A --> E["Incremental NNUE"]
-    A --> TB["Syzygy tablebases"]
-    H -. "optional" .-> M["PUCT / MCTS"]
-    M -. "TCP requests" .-> G["Python GNN policy + value"]
-    H -. "optional" .-> L["Meta-learner"]
-    M --> V["Candidate move"]
-    A --> V
-    V --> R["Alpha-beta verification when needed"]
-    R --> OUT["bestmove"]
-```
+**02 / Learn to guide.** A separate experimental GNN produces move priors, values and uncertainty for MCTS. The hybrid only allows an MCTS move to displace the alpha-beta choice after verification.
 
-The **strongest established standalone search build** is `nags_enhanced`. The `nags` executable adds an optional experimental hybrid controller; its GNN/MCTS component should not be assumed stronger without direct match evidence.
+**03 / Test everything.** Perft and regression tests guard correctness; benchmarks and SPRT matches decide whether a change really improves play.
 
-### Choose your engine
+> **The baseline is real. The hybrid is research.** `nags_enhanced` is the strongest established alpha-beta variant. The optional GNN/MCTS path is not presented as a proven strength gain.
 
-| Engine | Board / search | Neural evaluation | Best for |
-|:---|:---|:---|:---|
-| **`nags_enhanced`** | Magic bitboards · TT · Lazy SMP | NNUE | **Recommended:** everyday analysis, engine matches and benchmarks |
-| **`nags`** | Enhanced search + optional MCTS verification | NNUE + optional GNN | Hybrid and neural-search experiments |
-| `nags_fast` | Magic bitboards · no TT | NNUE | Measuring the impact of transpositions |
-| `nags_basic` | Ray-based bitboards · no TT | Classical evaluation | Reference implementation and comparisons |
+</td>
+<td width="40%" valign="middle" align="center">
+
+<img src=".github/readme/search-loop.gif" width="100%" alt="Animated illustration of a chess knight exploring the board alongside a branching search tree." />
+
+<sub><b>Search space, visualised.</b> Custom looping illustration, not a recorded NAGS search or performance measurement.</sub>
+
+</td>
+</tr>
+</table>
+
+### What’s inside?
+
+| | Capability | Details |
+|:--|:--|:--|
+| `01` | **Efficient board representation** | Magic-bitboard attacks, mailbox piece lookup, incremental Zobrist hashing |
+| `02` | **Selective game-tree search** | PVS, aspiration windows, null-move pruning, LMR, SEE, singular extensions, history heuristics |
+| `03` | **Neural evaluation** | Incremental NNUE, piece-count buckets, optional king buckets, SIMD / AVX2 paths |
+| `04` | **Endgames with certainty** | Syzygy WDL / DTZ via Fathom |
+| `05` | **Experimental hybrid** | GNN policy/value inference, parallel MCTS, alpha-beta verification, optional meta-learner |
+| `06` | **Measurable engineering** | Multi-platform CI, tests, reproducible bench fingerprints, paired-opening SPRT |
+
+## Architecture
+
+<img src=".github/readme/architecture.svg" width="100%" alt="NAGS system architecture showing UCI, alpha-beta search, NNUE evaluation, transposition and tablebase support, plus the optional GNN and MCTS verification path." />
+
+The production-strength search path is implemented in C++. The GNN and meta-learner are optional Python services; if they're unavailable, the `nags` executable continues with its alpha-beta engine. **The illustrated hybrid branch is experimental**, not a claim of superior Elo.
 
 <details>
-<summary><b>Technical highlights: what's inside the search?</b></summary>
+<summary><b>Which executable should I use?</b></summary>
 
-<br>
+<br/>
 
-| Component | Implementation |
-|:---|:---|
-| Search | Iterative deepening, aspiration windows, principal variation search |
-| Selectivity | Null-move pruning, reverse futility, late-move pruning/reductions, SEE pruning, internal iterative reductions |
-| Tactics | Quiescence search, checks, singular extensions, mate-distance bounds |
-| Move ordering | TT moves, capture SEE, killers, counter-moves, history and continuation history |
-| Position representation | Incremental Zobrist hashing, mailbox + magic-bitboard attacks |
-| Parallelism | Lazy SMP workers sharing a lockless transposition table |
-| Endgames | Syzygy tablebase WDL and root DTZ via Fathom |
-| NNUE | Embedded network, optional `EvalFile`, lazy accumulators and SIMD kernels |
-
-For implementation details, read **[Architecture](docs/ARCHITECTURE.md)** and **[NNUE](docs/NNUE.md)**.
+| Executable | Purpose |
+|:--|:--|
+| **`nags_enhanced`** | Recommended pure alpha-beta engine: FastBoard, NNUE, transposition table, Lazy SMP |
+| `nags` | Hybrid entry point; same C++ search with an optional GNN/MCTS arm and meta-learner |
+| `nags_fast` | FastBoard and shared search, without a transposition table |
+| `nags_basic` | Reference implementation using the simpler ray-based board |
 
 </details>
 
 ## Quick start
 
-### 1. Clone and build
-
-**Requirements:** CMake **3.15+** and a **C++17 compiler** (GCC, Clang, or MSVC). Python is not required to run the C++ engines.
+**Requirements:** CMake 3.15+, a C++17 compiler (GCC, Clang or MSVC), and optionally Python 3.9+ for neural services/training.
 
 ```bash
 git clone https://github.com/Cossy179/NAGS.git
 cd NAGS
+
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release --parallel
 ```
 
-The executables are normally in `build/` on Linux/macOS and `build/Release/` for multi-configuration Visual Studio builds on Windows.
+**Play with a chess GUI.** Add `nags_enhanced` (or `nags`) as a UCI engine in Arena, Cute Chess, BanksiaGUI or another UCI-compatible interface.
 
-### 2. Play or analyse with a UCI GUI
-
-Load **`nags_enhanced`** as a UCI engine in your preferred interface, such as Arena, Cute Chess, or BanksiaGUI. The default NNUE is embedded in the binary.
-
-Alternatively, run it from a terminal:
+**Or search directly:**
 
 ```bash
 # Linux / macOS
-./build/nags_enhanced
+printf 'uci\nisready\nposition startpos\ngo depth 12\n' | ./build/nags_enhanced
 ```
 
 ```powershell
-# Windows PowerShell (Visual Studio multi-config build)
+# Windows PowerShell (Visual Studio generator)
 .\build\Release\nags_enhanced.exe
+# In the interactive engine:
+# uci
+# isready
+# position startpos
+# go depth 12
 ```
 
-Then send UCI commands (the engine outputs `info` lines and a `bestmove`):
+The NNUE network is embedded when available. The Python services are **not** required to run the recommended `nags_enhanced` engine.
 
-```text
-uci
-isready
-setoption name Hash value 256
-setoption name Threads value 4
-position startpos moves e2e4 e7e5 g1f3
-go depth 14
-```
+<details>
+<summary><b>Useful UCI options</b></summary>
 
-You can also run a self-contained benchmark:
+<br/>
 
-```bash
-./build/nags_enhanced bench
-```
+| Option | What it controls |
+|:--|:--|
+| `Hash` | Transposition-table memory |
+| `Threads` | Lazy SMP worker count |
+| `MultiPV` | Number of reported candidate lines |
+| `UseNNUE` / `EvalFile` | Enable NNUE or select a compatible network |
+| `SyzygyPath` / `SyzygyProbeLimit` | Endgame tablebase probing |
+| `Move Overhead` | Reserve time for GUI/system latency |
+| `UseNN` / `NNHost` / `NNPort` | Optional neural MCTS service (hybrid `nags`) |
+| `UseMetaLearner` | Optional search-parameter adaptation (hybrid `nags`) |
 
-> [!TIP]
-> On Windows, substitute `build\Release\nags_enhanced.exe` for `./build/nags_enhanced` in benchmark commands.
+Run `uci` for the full live option list.
 
-### Useful UCI options
+</details>
 
-| Option | Purpose |
-|:---|:---|
-| `Hash` / `Threads` | TT size in MB / Lazy SMP worker count (`nags`, `nags_enhanced`) |
-| `UseNNUE` / `EvalFile` | Toggle NNUE or select a compatible network file |
-| `MultiPV` / `Ponder` | Analyse multiple lines / configure pondering |
-| `SyzygyPath` / `SyzygyProbeLimit` | Enable supported endgame tablebases |
-| `UseNN` / `NNHost` / `NNPort` | Enable/configure experimental GNN guidance on `nags` |
-| `UseMetaLearner` | Enable experimental per-move search-parameter adjustments on `nags` |
-| `MctsMinTime` | Minimum soft time budget needed to launch the optional MCTS arm |
+## Measured progress
 
-See the UCI option table in the [original architecture documentation](docs/ARCHITECTURE.md) and the option declarations in `src/` for exact defaults.
+<div align="center">
 
-## The neural side
+### Progress isn't a slogan. It's a match result.
 
-NAGS contains **two distinct neural subsystems**. They serve different purposes and should not be confused.
+</div>
 
-| | **NNUE** | **GNN / policy-value** |
-|:---|:---|:---|
-| Role | Fast static position evaluation inside alpha-beta | Move priors, value and uncertainty for experimental MCTS |
-| Runtime | In-process C++ / CPU | Optional Python service (PyTorch / PyG) |
-| Model path | `nets/nags.nnue` (embedded at build time) | `models/production_model.pth` (when trained and available) |
-| Training | `tools/nnue/` | `training_pipeline.py` |
-| Required to play? | No; classical evaluation is the fallback | No; hybrid falls back to enhanced alpha-beta |
+| Historical milestone | Reported result | Context |
+|:--|--:|:--|
+| 03 Oct 2026 | **2,329 ± 52** | Early calibration |
+| 04 Oct 2026 | **2,881 ± 34** | Search improvements + NNUE network 5 |
+| 06 Oct 2026 | **2,944 ± 34** | NNUE network 7 |
+| 07 Oct 2026 | **2,994 ± 32** | Additional search improvements |
 
-### Run the optional GNN service
+These figures are estimates on **Stockfish's strength-limited `UCI_Elo` ladder at 10+0.1**. They are **not** ratings against unrestricted Stockfish, nor directly comparable with tournament Elo. The historical Windows AVX2 benchmark reported up to **1.48 million nodes per second** on the documented test machine; that number varies with hardware, build and workload. Network 7 was trained using **56.5 million positions**.
 
-Install Python dependencies in a dedicated environment, then start the evaluator. A trained checkpoint is needed for meaningful GNN-guided decisions.
+The full context, uncertainty and rejected experiments matter. See **[testing history and methodology →](docs/TESTING.md)**.
+
+## Training & experimentation
+
+> [!IMPORTANT]
+> **An NNUE training run is in progress.** Development must preserve the active run's checkpoint, input-feature and network-format compatibility. Do not overwrite datasets, rebuild binaries in use or restart a training job merely to follow a README example. New incompatible architectures belong in isolated, versioned experiments.
+
+<table>
+<tr>
+<td valign="top" width="68%">
+
+### From positions to evaluations
+
+The NNUE workflow supports self-play generation, training, candidate evaluation and promotion only after match testing. The hybrid GNN has a separate supervised-learning and self-play pipeline. They are **different models serving different purposes**.
+
+Explore the existing commands, formats and safeguards in [**NNUE training guide**](docs/NNUE.md) and [**training pipeline**](training_pipeline.py).
+
+For the optional GNN RPC service, once you have a trained compatible model:
 
 ```bash
 python -m pip install -r requirements.txt
 python rpc_server.py --model models/production_model.pth
 ```
 
-In another terminal, start the hybrid engine and enable its neural arm:
+The server warns if it is launched without a trained checkpoint. Its use is optional.
 
-```text
-setoption name UseNN value true
-position startpos
-go movetime 3000
-```
+</td>
+<td valign="middle" align="center" width="32%">
 
-The optional meta-learner runs independently with `python meta_learner.py`. The server can start with an untrained model when no checkpoint is found, but **untrained predictions are not evidence of chess strength**.
+<img src="https://upload.wikimedia.org/wikipedia/commons/d/da/Knight%27s_tour_anim_2.gif" alt="Knight's tour solving a 64-square board, with visited squares shaded, animated GIF." width="200" />
 
-### Training new networks
+<sub><b>Another kind of search problem.</b><br/>Public-domain [knight's-tour animation](https://commons.wikimedia.org/wiki/File:Knight%27s_tour_anim_2.gif) by Ilmari Karonen (CC0). An educational illustration, not NAGS gameplay.</sub>
 
-The NNUE pipeline generates data, trains candidate architectures, evaluates them through matches, and promotes only a successful candidate. Read **[NNUE training](docs/NNUE.md)** before launching it.
+</td>
+</tr>
+</table>
 
-```bash
-# Resource-intensive example — do not launch a second run over active outputs
-python tools/nnue/run_round.py --target-positions 200000000 --threads 11
-```
+### The research backlog
 
-The GNN pipeline supports PGN parsing, supervised learning, hybrid self-play, experimental PPO, evaluation and meta-learning:
+- Faster move picking and more selective search without tactical regressions
+- Better policy learning targets and legal-action representations
+- GPU batching and cheaper neural inference for the experimental MCTS path
+- NNUE designs compared **at equal thinking time**, not only by validation loss
+- Transparent, statistically sound matches against stronger unrestricted opponents
 
-```bash
-git lfs pull                  # Fetch the large PGN training corpus if needed
-python training_pipeline.py --help
-# ./run_training.sh full     # Linux/macOS — see training_config.json
-# run_training.bat full      # Windows
-```
+Proposed work is just that—**proposed**, not implemented or measured.
 
-> [!CAUTION]
-> **Protect in-progress training.** Never overwrite active checkpoint/data files, modify network formats incompatibly, or point experiments at the same output directory as a live training run. Introduce incompatible features only through versioned, backward-compatible loaders or isolated experiments. A freshly trained NNUE must remain loadable by the engine after code changes.
-
-## Measured progress
-
-NAGS tracks improvements with **paired-opening statistical matches**, not intuition alone.
-
-| Historical milestone | Reported result | Context |
-|:---|---:|:---|
-| NNUE Network 7 | **56.5M** positions | 8 piece-count output buckets |
-| Search batch, October 7, 2026 | **≈ +50 Elo** on the same Stockfish ladder | Relative to the preceding benchmark on that test setup |
-| Calibrated build, October 7, 2026 | **2,994 ± 32** | Stockfish 16 `UCI_LimitStrength` / `UCI_Elo` ladder at 10+0.1 |
-| MSVC AVX2 inference | **0.57M → 1.48M nodes/sec** | Reported `nags_enhanced` median on Ryzen 5 3500X; same bench node count |
-
-**Read these numbers correctly:** `UCI_Elo` on a strength-limited Stockfish ladder at a short time control is a *rough comparative calibration*, not a published CCRL rating or a claim of parity with full-strength Stockfish. Bench speed depends on CPU, build, NNUE network and workload. The hybrid with a trained GNN has **not** been established as stronger than `nags_enhanced` in the documented results.
-
-See **[full results, accepted and rejected experiments, and SPRT methodology](docs/TESTING.md)**.
-
-## Test it. Challenge it. Improve it.
+## Prove it
 
 ```bash
-# C++ correctness tests (perft, search, hashing, UCI, NNUE, Syzygy)
+# C++ correctness, perft, search and UCI tests
 ctest --test-dir build --build-config Release --output-on-failure
 
-# Python services, training pipeline and statistics
+# Python model, service and training tests
 python -m pytest -q
 
-# Deterministic search fingerprint and measured nodes/second
+# Deterministic bench fingerprint + nodes/second
 ./build/nags_enhanced bench
 ```
 
-CI runs C++ builds/tests on **Linux, Windows and macOS**, plus Python tests on Linux. For engine-strength changes, use the paired-opening **[SPRT workflow](docs/TESTING.md#3-strength-sprt-matches-with-toolssprtpy)** and confirm promising results at longer time controls.
-
-### Current research directions
-
-- Faster, more selective alpha-beta search and improved move generation.
-- Richer **NNUE architectures per unit of inference cost**.
-- Correct, legal-action-aware policy training and evaluation targets.
-- Better GPU inference batching and a tighter connection between policy guidance and alpha-beta search.
-- Adaptive compute allocation backed by controlled engine matches.
-
-These are **research directions, not features claimed to be finished**. Contributions should be tested independently and must preserve compatibility with any active model-training run.
+Strength changes are admitted by controlled matches, using paired openings and sequential probability ratio testing (SPRT). Full reproduction instructions: [**docs/TESTING.md**](docs/TESTING.md).
 
 ## Documentation
 
-| Guide | What you'll find |
-|:---|:---|
-| 📐 **[Architecture](docs/ARCHITECTURE.md)** | Boards, alpha-beta search, hybrid controller, GNN and meta-learner |
-| 🧠 **[NNUE](docs/NNUE.md)** | Network formats, training, quantisation, incremental inference |
-| 🧪 **[Testing & results](docs/TESTING.md)** | Perft, CI, benchmarks, SPRT, calibration and honest experiment logs |
-| ⚙️ **[Training configuration](training_config.json)** | GNN pipeline settings and evaluation defaults |
-| 🧰 **[NNUE tools](tools/nnue/)** | Data conversion, training and resumable training rounds |
-
----
+| Read | What you'll find |
+|:--|:--|
+| [**Architecture ↗**](docs/ARCHITECTURE.md) | Board representation, engine internals and hybrid control |
+| [**NNUE ↗**](docs/NNUE.md) | Network formats, self-play data generation and training |
+| [**Testing ↗**](docs/TESTING.md) | Benchmarks, strength logs, SPRT and absolute-rating caveats |
+| [**Training pipeline ↗**](training_pipeline.py) | GNN parsing, supervised training, self-play and evaluation |
 
 <div align="center">
 
-### ♞ NAGS — Every position is a problem worth solving.
+---
 
-**Built for experimentation. Measured by the moves it plays.**
+<sub>Crafted for chess research. Backed by reproducible results.</sub>
 
-[Source](https://github.com/Cossy179/NAGS) · [CI](https://github.com/Cossy179/NAGS/actions/workflows/nags-ci.yml) · [MIT License](LICENSE)
-
-<sub>© 2025–2026 NAGS contributors · Open-source under the MIT License.</sub>
+**NAGS** · [Source](https://github.com/Cossy179/NAGS) · [CI](https://github.com/Cossy179/NAGS/actions/workflows/nags-ci.yml) · [MIT license](LICENSE)
 
 </div>
