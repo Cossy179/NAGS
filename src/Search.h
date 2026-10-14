@@ -399,23 +399,133 @@ private:
         return (board.pieceBB(c, KNIGHT) | board.pieceBB(c, BISHOP) | board.pieceBB(c, ROOK) | board.pieceBB(c, QUEEN)) != 0;
     }
 
-    // Lazy move ordering: brings the highest-scored remaining move to index n.
-    // Ties keep generation order (the same order as a stable sort), and moves
-    // after a cutoff are never sorted at all.
-    static void pickNext(MoveList &moves, int *scores, int n) {
-        int best = n;
-        for (int k = n + 1; k < moves.size(); ++k)
-            if (scores[k] > scores[best]) best = k;
-        if (best == n) return;
-        Move m = moves[best];
-        int sc = scores[best];
-        for (int k = best; k > n; --k) {
-            moves[k] = moves[k - 1];
-            scores[k] = scores[k - 1];
+    // Staged move ordering for one node. The moves come out in exactly the
+    // order of a stable sort by moveScore (TT move, winning/equal captures by
+    // MVV/LVA, killers, countermove, losing captures, quiet moves by history;
+    // ties in generation order), but the static exchange evaluation of the
+    // captures is only computed once they are reached (a TT move cutoff needs
+    // none) and each pick scans one stage instead of every move. Killers, the
+    // countermove and quiet scores are taken when the picker is created: the
+    // search of the earlier moves changes them.
+    class MovePicker {
+    public:
+        MovePicker(const SearchWorker &w, const Move &ttMove, int ply, const Move &counter, const ContTable *cont1,
+                   const ContTable *cont2, bool noisyOnly)
+            : w(w) {
+            const BoardT &b = w.board;
+            b.generatePseudoLegalMoves(moves, noisyOnly);
+            const bool useKillers = ply < MAX_PLY;
+            const int stm = colorIndex(b.sideToMove());
+            for (int k = 0; k < moves.size(); ++k) {
+                const Move &m = moves[k];
+                if (!ttMove.isNull() && sameMove(m, ttMove)) {
+                    ttIdx = k;
+                    continue;
+                }
+                if (eval::isNoisy(b, m)) {
+                    int s = eval::capturedValue(b, m) * 16 - eval::pieceValue(b.pieceAt(m.from)) / 16;
+                    if (m.promotion != Piece::None) s += eval::pieceValue(m.promotion) * 16;
+                    score[k] = s;
+                    good[nNoisy++] = static_cast<uint8_t>(k); // split into good/bad once reached
+                    continue;
+                }
+                if (useKillers) {
+                    if (sameMove(m, w.killers[ply][0])) { special[0] = k; continue; }
+                    if (sameMove(m, w.killers[ply][1])) { special[1] = k; continue; }
+                    if (!counter.isNull() && sameMove(m, counter)) { special[2] = k; continue; }
+                }
+                int s = w.history[stm][m.from][m.to];
+                if (cont1 || cont2) {
+                    const int piece = static_cast<int>(b.pieceAt(m.from)) - 1;
+                    if (cont1) s += (*cont1)[piece][m.to];
+                    if (cont2) s += (*cont2)[piece][m.to];
+                }
+                score[k] = s;
+                quiet[nQuiet++] = static_cast<uint8_t>(k);
+            }
         }
-        moves[n] = m;
-        scores[n] = sc;
-    }
+
+        // The next move (index into moveAt) or -1 when there are none left.
+        // Losing captures are left out with skipLosingCaptures.
+        int next(bool skipLosingCaptures = false) {
+            if (stage == Stage::Tt) {
+                stage = Stage::GoodCaptures;
+                if (ttIdx >= 0) return found(ttIdx, false);
+            }
+            if (stage == Stage::GoodCaptures) {
+                if (!capturesSplit) splitCaptures();
+                if (nGood) return found(take(good, nGood), true);
+                stage = Stage::Special;
+            }
+            if (stage == Stage::Special) {
+                while (specialPos < 3)
+                    if (int k = special[specialPos++]; k >= 0) return found(k, false);
+                stage = Stage::LosingCaptures;
+            }
+            if (stage == Stage::LosingCaptures) {
+                if (nBad && !skipLosingCaptures) return found(take(bad, nBad), true);
+                stage = Stage::Quiets;
+            }
+            if (nQuiet) return found(take(quiet, nQuiet), false);
+            return -1;
+        }
+
+        const Move &moveAt(int k) const { return moves[k]; }
+        // Static exchange evaluation of the move last returned by next()
+        // (computed only if the picker does not know it already).
+        int seeOfLast() const { return lastSeeKnown ? see[last] : eval::see(w.board, moves[last]); }
+
+    private:
+        enum class Stage { Tt, GoodCaptures, Special, LosingCaptures, Quiets };
+
+        int found(int k, bool seeKnown) {
+            last = k;
+            lastSeeKnown = seeKnown;
+            return k;
+        }
+        // Splits the captures (in generation order) by the sign of their
+        // static exchange evaluation.
+        void splitCaptures() {
+            capturesSplit = true;
+            for (int i = 0; i < nNoisy; ++i) {
+                const int k = good[i];
+                see[k] = static_cast<int16_t>(eval::see(w.board, moves[k]));
+                if (see[k] >= 0) good[nGood++] = static_cast<uint8_t>(k);
+                else bad[nBad++] = static_cast<uint8_t>(k);
+            }
+        }
+        // Removes and returns the highest-scored entry of list[0..n), the
+        // earliest one on ties; the rest keep their order.
+        int take(uint8_t *list, int &n) {
+            int best = 0, bestScore = score[list[0]];
+            for (int i = 1; i < n; ++i) {
+                const int sc = score[list[i]];
+                if (sc > bestScore) {
+                    best = i;
+                    bestScore = sc;
+                }
+            }
+            const int k = list[best];
+            for (int i = best + 1; i < n; ++i) list[i - 1] = list[i];
+            --n;
+            return k;
+        }
+
+        const SearchWorker &w;
+        MoveList moves;
+        int score[MoveList::kCapacity];
+        int16_t see[MoveList::kCapacity];
+        // Captures: all of them in `good` until split by SEE sign.
+        uint8_t good[MoveList::kCapacity], bad[MoveList::kCapacity], quiet[MoveList::kCapacity];
+        int nNoisy = 0, nGood = 0, nBad = 0, nQuiet = 0;
+        bool capturesSplit = false;
+        int ttIdx = -1;
+        int special[3] = {-1, -1, -1}; // killer 1, killer 2, countermove
+        int specialPos = 0;
+        Stage stage = Stage::Tt;
+        int last = -1;
+        bool lastSeeKnown = false;
+    };
 
     void updatePv(int ply, const Move &m) {
         pvTable[ply][ply] = m;
@@ -561,13 +671,10 @@ private:
 
         // Pseudo-legal moves; legality is checked only for moves actually
         // tried (most nodes cut off after a few moves).
-        MoveList moves;
-        board.generatePseudoLegalMoves(moves);
         const Move prevMove = board.lastMove();
         const Move counter = counterMoveFor(prevMove);
         ContTable *cont1 = contFor(ply, 1), *cont2 = contFor(ply, 2);
-        int scores[MoveList::kCapacity];
-        for (int k = 0; k < moves.size(); ++k) scores[k] = moveScore(moves[k], ttMove, ply, counter, cont1, cont2);
+        MovePicker picker(*this, ttMove, ply, counter, cont1, cont2, false);
 
         const Color us = board.sideToMove();
         int originalAlpha = alpha;
@@ -581,10 +688,10 @@ private:
 
         int i = 0; // number of legal moves tried so far
         int quietsTried = 0;
-        MoveList quietsSearched; // quiet moves searched without a cutoff
-        for (int n = 0; n < moves.size(); ++n) {
-            pickNext(moves, scores, n);
-            const Move m = moves[n];
+        uint8_t quietsSearched[MoveList::kCapacity]; // quiet moves searched without a cutoff (picker indices)
+        int nQuietsSearched = 0;
+        for (int idx; (idx = picker.next()) >= 0;) {
+            const Move m = picker.moveAt(idx);
             if (excluding && sameMove(m, excluded)) continue;
             bool quiet = !eval::isNoisy(board, m);
             int histScore = 0;
@@ -604,7 +711,7 @@ private:
             // SEE pruning: at low depth, skip moves that lose material by
             // force (more for captures, which win some of it back).
             if (!isPv && !inCheck && i > 0 && depth <= 8 && std::abs(alpha) < MATE_BOUND && !sameMove(m, ttMove) &&
-                eval::see(board, m) < (quiet ? -60 * depth : -20 * depth * depth))
+                picker.seeOfLast() < (quiet ? -60 * depth : -20 * depth * depth))
                 continue;
             // Singular extension: if every other move fails low against a
             // margin below the TT score, the TT move is singular and gets one
@@ -663,13 +770,15 @@ private:
                             int bonus = std::min(150 * depth - 100, 1500);
                             auto &table = history[colorIndex(board.sideToMove())];
                             updateHistory(table[m.from][m.to], bonus);
-                            for (int q = 0; q < quietsSearched.size(); ++q)
-                                updateHistory(table[quietsSearched[q].from][quietsSearched[q].to], -bonus);
+                            for (int q = 0; q < nQuietsSearched; ++q) {
+                                const Move &qm = picker.moveAt(quietsSearched[q]);
+                                updateHistory(table[qm.from][qm.to], -bonus);
+                            }
                             for (ContTable *cont : {cont1, cont2}) {
                                 if (!cont) continue;
                                 updateContHistory((*cont)[static_cast<int>(board.pieceAt(m.from)) - 1][m.to], bonus);
-                                for (int q = 0; q < quietsSearched.size(); ++q) {
-                                    const Move &qm = quietsSearched[q];
+                                for (int q = 0; q < nQuietsSearched; ++q) {
+                                    const Move &qm = picker.moveAt(quietsSearched[q]);
                                     updateContHistory((*cont)[static_cast<int>(board.pieceAt(qm.from)) - 1][qm.to], -bonus);
                                 }
                             }
@@ -682,7 +791,7 @@ private:
                     }
                 }
             }
-            if (quiet) quietsSearched.push_back(m);
+            if (quiet) quietsSearched[nQuietsSearched++] = static_cast<uint8_t>(idx);
         }
 
         if (i == 0) {
@@ -748,22 +857,20 @@ private:
         }
 
         // In check every evasion must be considered (no stand-pat).
-        MoveList moves;
-        board.generatePseudoLegalMoves(moves, !inCheck);
         // The TT move only counts if this generator produced it (a quiet TT
         // move is not searched outside check).
-        int scores[MoveList::kCapacity];
-        for (int k = 0; k < moves.size(); ++k) scores[k] = moveScore(moves[k], ttMove, MAX_PLY);
+        MovePicker picker(*this, ttMove, MAX_PLY, Move{}, nullptr, nullptr, !inCheck);
 
         const Color us = board.sideToMove();
         int legal = 0;
         Move bestMove;
-        for (int n = 0; n < moves.size(); ++n) {
-            pickNext(moves, scores, n);
-            const Move m = moves[n];
+        // Outside check losing captures are never searched (below), so the
+        // picker need not return them.
+        for (int idx; (idx = picker.next(!inCheck)) >= 0;) {
+            const Move m = picker.moveAt(idx);
             if (!inCheck && m.promotion == Piece::None && stand + eval::capturedValue(board, m) + 200 <= alpha)
                 continue; // delta pruning
-            if (!inCheck && eval::see(board, m) < 0) continue; // losing capture
+            if (!inCheck && picker.seeOfLast() < 0) continue; // losing capture
             board.makeMove(m);
             if (board.inCheck(us)) {
                 board.unmakeMove();
