@@ -261,6 +261,7 @@ public:
         for (auto &side : history) for (auto &from : side) for (auto &v : from) v = 0;
         for (auto &piece : counterMoves) for (auto &mv : piece) mv = Move{};
         for (int i = 0; i < 12 * 64; ++i) for (auto &p : contHist[i]) for (auto &v : p) v = 0;
+        std::fill(captHist.get(), captHist.get() + kCaptHistSize, int16_t{0});
     }
 
     // Searches the root to `depth` (with an aspiration window around
@@ -358,6 +359,15 @@ private:
     // after a given move (piece, target) one or two plies earlier.
     using ContTable = int16_t[12][64];
     std::unique_ptr<ContTable[]> contHist = std::make_unique<ContTable[]>(12 * 64); // [prev piece * 64 + prev to]
+    // Capture history: how well a capture (moving piece, target square,
+    // captured piece type; 6 for a promotion without capture) did.
+    static constexpr int kCaptHistSize = 12 * 64 * 7;
+    std::unique_ptr<int16_t[]> captHist = std::make_unique<int16_t[]>(kCaptHistSize);
+    int16_t &captureHistory(const Move &m) const {
+        const Piece victim = board.pieceAt(m.to);
+        const int captured = m.isEnPassant ? PAWN : victim == Piece::None ? 6 : pieceTypeOf(victim);
+        return captHist[((static_cast<int>(board.pieceAt(m.from)) - 1) * 64 + m.to) * 7 + captured];
+    }
     struct PlyMove {
         int piece = -1; // 0..11 (moving piece), -1 for none or a null move
         int to = 0;
@@ -561,7 +571,7 @@ private:
                 if (hasTt && sameMove(m, tt)) continue;
                 int s = eval::capturedValue(b, m) * 16 - eval::pieceValue(b.pieceAt(m.from)) / 16;
                 if (m.promotion != Piece::None) s += eval::pieceValue(m.promotion) * 16;
-                score[k] = s;
+                score[k] = s + w.captureHistory(m) / 8;
                 see[k] = static_cast<int16_t>(eval::see(b, m));
                 if (see[k] >= 0) good[nGood++] = static_cast<uint8_t>(k);
                 else bad[nBad++] = static_cast<uint8_t>(k);
@@ -802,6 +812,8 @@ private:
         int quietsTried = 0;
         uint8_t quietsSearched[MoveList::kCapacity]; // quiet moves searched without a cutoff (picker indices)
         int nQuietsSearched = 0;
+        uint8_t noisySearched[MoveList::kCapacity]; // the same for captures and promotions
+        int nNoisySearched = 0;
         for (int idx; (idx = picker.next()) >= 0;) {
             const Move m = picker.moveAt(idx);
             if (excluding && sameMove(m, excluded)) continue;
@@ -897,6 +909,14 @@ private:
                     if (alpha >= beta) {
                         NAGS_STAT(++stats.cutNodes; ++stats.cutoffAt[std::min(i - 1, 7)];
                                   ++stats.cutoffByStage[picker.lastStage()]);
+                        // Captures tried before the cutoff move did not cut;
+                        // a capture that cuts is rewarded.
+                        {
+                            const int bonus = std::min(150 * depth - 100, 1500);
+                            if (!quiet) updateContHistory(captureHistory(m), bonus);
+                            for (int q = 0; q < nNoisySearched; ++q)
+                                updateContHistory(captureHistory(picker.moveAt(noisySearched[q])), -bonus);
+                        }
                         if (quiet) {
                             if (!sameMove(m, killers[ply][0])) {
                                 killers[ply][1] = killers[ply][0];
@@ -930,6 +950,7 @@ private:
                 }
             }
             if (quiet) quietsSearched[nQuietsSearched++] = static_cast<uint8_t>(idx);
+            else noisySearched[nNoisySearched++] = static_cast<uint8_t>(idx);
         }
 
         NAGS_STAT(if (best < beta) ++(best > originalAlpha ? stats.pvNodes : stats.allNodes));
