@@ -1,4 +1,5 @@
 #include "Board.h"
+#include "FenChecks.h"
 
 #include "BitOps.h"
 
@@ -171,7 +172,10 @@ bool Board::setFromFEN(const std::string &fen) {
     int hm = 0, fm = 1;
     if (!(iss >> hm)) hm = 0;
     if (!(iss >> fm)) fm = 1;
-    if (hm < 0 || fm < 1) return false;
+    // Lenient with the counters (some tools write "0 0"): an invalid FEN
+    // would leave the previous position on the board.
+    hm = std::max(hm, 0);
+    fm = std::max(fm, 1);
 
     Board b(*this, NoHistory{});
     b.pieces.fill(0);
@@ -195,6 +199,7 @@ bool Board::setFromFEN(const std::string &fen) {
     if (r != 0 || f != 8) return false;
     if (popcount(b.pieces[WK_]) != 1 || popcount(b.pieces[BK_]) != 1) return false;
     if ((b.pieces[WP_] | b.pieces[BP_]) & (RANK_1 | RANK_8)) return false;
+    if (!plausibleMaterial(b)) return false;
     b.updateOccupancy();
 
     if (stm == "w") b.side = Color::White;
@@ -217,8 +222,9 @@ bool Board::setFromFEN(const std::string &fen) {
     if (ep != "-") {
         int sq = parseSquare(ep);
         if (sq < 0 || ep.size() != 2) return false;
-        if (rankOf(sq) != (b.side == Color::White ? 5 : 2)) return false;
-        b.epSquare = sq;
+        // An impossible en-passant square is ignored (most engines do the
+        // same); an en-passant capture would remove a pawn that is not there.
+        if (plausibleEpSquare(b, sq, b.side)) b.epSquare = sq;
     }
     // The side that just moved must not be in check.
     if (b.inCheck(opposite(b.side))) return false;

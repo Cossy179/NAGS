@@ -1,4 +1,5 @@
 #include "FastBoard.h"
+#include "FenChecks.h"
 
 #include "BitOps.h"
 #include "Eval.h"
@@ -357,7 +358,10 @@ bool FastBoard::setFromFEN(const std::string &fen) {
     int hm = 0, fm = 1;
     if (!(iss >> hm)) hm = 0;
     if (!(iss >> fm)) fm = 1;
-    if (hm < 0 || fm < 1) return false;
+    // Lenient with the counters (some tools write "0 0"): an invalid FEN
+    // would leave the previous position on the board.
+    hm = std::max(hm, 0);
+    fm = std::max(fm, 1);
 
     FastBoard b(*this, NoHistory{});
     for (int c = 0; c < 2; ++c) {
@@ -389,6 +393,7 @@ bool FastBoard::setFromFEN(const std::string &fen) {
     if (rank != 0 || file != 8) return false;
     if (popcount(b.pieces[0][KING]) != 1 || popcount(b.pieces[1][KING]) != 1) return false;
     if ((b.pieces[0][PAWN] | b.pieces[1][PAWN]) & (RANK_1 | RANK_8)) return false;
+    if (!plausibleMaterial(b)) return false;
 
     if (stm == "w") b.side = Color::White;
     else if (stm == "b") b.side = Color::Black;
@@ -410,8 +415,9 @@ bool FastBoard::setFromFEN(const std::string &fen) {
     if (ep != "-") {
         int sq = parseSquare(ep);
         if (sq < 0 || ep.size() != 2) return false;
-        if (rankOf(sq) != (b.side == Color::White ? 5 : 2)) return false;
-        b.epSquare = sq;
+        // An impossible en-passant square is ignored (most engines do the
+        // same); an en-passant capture would remove a pawn that is not there.
+        if (plausibleEpSquare(b, sq, b.side)) b.epSquare = sq;
     }
     if (b.inCheck(opposite(b.side))) return false;
 

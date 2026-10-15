@@ -143,6 +143,27 @@ static void testFenValidation() {
     // Castling rights without the rook are dropped rather than trusted.
     CHECK(b.setFromFEN("4k3/8/8/8/8/8/8/4K3 w KQ - 0 1"), "rejected FEN with stale castling rights");
     for (const Move &m : b.generateLegalMoves()) CHECK(!m.isCastling, "castling generated without a rook");
+
+    // More material than the starting position allows (it would overflow the
+    // move list) is rejected.
+    b.setStartPos();
+    CHECK(!b.setFromFEN("BQQQQQBk/Q5RB/Q6Q/Q6Q/Q6Q/Q6Q/Q6Q/KQQQQQQQ w - - 0 1"), "accepted 40 queens");
+    CHECK(!b.setFromFEN("4k3/8/8/8/8/8/PPPPPPPP/N2NK1NN w - - 0 1"), "accepted 3 extra knights with 8 pawns");
+    CHECK(b.setFromFEN("4k3/8/8/8/8/8/PPPPPPP1/N2NK1N1 w - - 0 1"), "rejected 1 extra knight with 7 pawns");
+    CHECK(b.setFromFEN("4k3/8/8/8/8/8/PPPPPP2/QQQ1K3 w - - 0 1"), "rejected 2 extra queens with 6 pawns");
+    // An en-passant square no double push can have produced is ignored: the
+    // capture would remove a pawn that is not there.
+    CHECK(b.setFromFEN("4k3/8/8/3P4/8/8/8/4K3 w - e6 0 1") && b.getFEN() == "4k3/8/8/3P4/8/8/8/4K3 w - - 0 1",
+          "kept an en-passant square without a pawn: %s", b.getFEN().c_str());
+    CHECK(b.setFromFEN("4k3/8/4n3/3Pp3/8/8/8/4K3 w - e6 0 1") && b.getFEN() == "4k3/8/4n3/3Pp3/8/8/8/4K3 w - - 0 1",
+          "kept an occupied en-passant square: %s", b.getFEN().c_str());
+    for (const Move &m : b.generateLegalMoves()) CHECK(!m.isEnPassant, "en passant onto an occupied square");
+    CHECK(b.setFromFEN("rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3") &&
+              b.getFEN() == "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3",
+          "dropped a valid en-passant square: %s", b.getFEN().c_str());
+    // Move counters: "0 0" (written by some tools) is accepted.
+    CHECK(b.setFromFEN("4k3/8/8/8/8/8/8/R3K3 w Q - 0 0") && b.getFEN() == "4k3/8/8/8/8/8/8/R3K3 w Q - 0 1",
+          "fullmove number 0 not accepted: %s", b.getFEN().c_str());
 }
 
 static void testDraws() {
