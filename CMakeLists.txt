@@ -21,6 +21,12 @@ endif()
 
 find_package(Threads REQUIRED)
 
+# MSVC threads get the executable's stack reserve (1 MB by default); deep
+# searches (128 plies of negamax and quiescence frames) need more.
+if(MSVC)
+  add_link_options(/STACK:8388608)
+endif()
+
 function(nags_warnings target)
   if(MSVC)
     target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)

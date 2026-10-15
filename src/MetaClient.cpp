@@ -1,5 +1,6 @@
 #include "MetaClient.h"
 
+#include <algorithm>
 #include <sstream>
 
 namespace {
@@ -29,16 +30,21 @@ void MetaClient::configure(const std::string &h, int p) {
 
 bool MetaClient::roundTrip(const std::string &request, std::string &response) {
     auto now = std::chrono::steady_clock::now();
-    for (int attempt = 0; attempt < 2; ++attempt) {
+    // Within budgetMs in total: the connect timeout plus one request
+    // timeout per attempt.
+    const int connectMs = std::max(1, std::min(kConnectTimeoutMs, budgetMs / 4));
+    const int attempts = budgetMs >= kConnectTimeoutMs + 2 * kRequestTimeoutMs ? 2 : 1;
+    const int requestMs = std::max(1, std::min(kRequestTimeoutMs, (budgetMs - connectMs) / attempts));
+    for (int attempt = 0; attempt < attempts; ++attempt) {
         if (!socket.isOpen()) {
             if (now < retryAfter) return false;
-            if (!socket.connect(host, port, kConnectTimeoutMs)) {
+            if (!socket.connect(host, port, connectMs)) {
                 retryAfter = now + std::chrono::seconds(kBackoffSeconds);
                 return false;
             }
         }
         // A stale connection (server restarted) fails here; reconnect once.
-        if (socket.request(request, response, kRequestTimeoutMs)) return true;
+        if (socket.request(request, response, requestMs)) return true;
     }
     retryAfter = now + std::chrono::seconds(kBackoffSeconds);
     return false;

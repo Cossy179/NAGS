@@ -74,7 +74,7 @@ public:
             if (!uci::parseInt(value, v)) { message = "invalid Hash value '" + value + "'"; return false; }
             v = std::clamp<long long>(v, 1, 4096);
             tt->resize(static_cast<size_t>(v));
-            message = "Hash set to " + std::to_string(v) + " MB";
+            message = "Hash set to " + std::to_string(tt->sizeMb()) + " MB";
             return true;
         }
         if (tt && optName == "Threads") {
@@ -163,6 +163,10 @@ public:
         int lines = searcher.multiPvCount();
         searcher.setThreads(1); // helper threads would make the node count nondeterministic
         searcher.setMultiPv(1);
+        // The fingerprint depends on the table size (index collisions), so
+        // bench always uses the default.
+        const size_t hashMb = tt ? tt->sizeMb() : 0;
+        if (tt && hashMb != kDefaultHashMB) tt->resize(kDefaultHashMB);
         newGame();
         const auto &fens = bench::positions();
         uint64_t total = 0;
@@ -185,6 +189,7 @@ public:
         for (const auto &line : bench::summary(total, ms)) uci::send(line);
         searcher.setThreads(threads);
         searcher.setMultiPv(lines);
+        if (tt && hashMb != tt->sizeMb()) tt->resize(hashMb);
         newGame();
     }
 

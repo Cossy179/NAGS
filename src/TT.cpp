@@ -1,6 +1,7 @@
 #include "TT.h"
 
 #include <algorithm>
+#include <new>
 
 namespace {
 
@@ -12,8 +13,8 @@ namespace {
 //   bits 16..31  score (int16)
 //   bits 32..39  depth (0..255)
 //   bits 40..41  bound
-//   bits 42..49  generation
-uint64_t pack(int depth, Bound bound, int score, const Move &move, uint8_t generation) {
+//   bits 42..63  generation (22 bits)
+uint64_t pack(int depth, Bound bound, int score, const Move &move, uint32_t generation) {
     uint64_t d = 0;
     if (!move.isNull()) {
         int promo = pieceTypeOf(move.promotion) + 1; // 0 if none
@@ -25,12 +26,12 @@ uint64_t pack(int depth, Bound bound, int score, const Move &move, uint8_t gener
     d |= static_cast<uint64_t>(static_cast<uint16_t>(static_cast<int16_t>(score))) << 16;
     d |= static_cast<uint64_t>(std::clamp(depth, 0, 255)) << 32;
     d |= static_cast<uint64_t>(static_cast<uint8_t>(bound) & 3) << 40;
-    d |= static_cast<uint64_t>(generation) << 42;
+    d |= static_cast<uint64_t>(generation & ((1u << 22) - 1)) << 42;
     return d;
 }
 
 inline int depthOf(uint64_t d) { return static_cast<int>((d >> 32) & 0xFF); }
-inline uint8_t generationOf(uint64_t d) { return static_cast<uint8_t>((d >> 42) & 0xFF); }
+inline uint32_t generationOf(uint64_t d) { return static_cast<uint32_t>((d >> 42) & ((1u << 22) - 1)); }
 
 } // namespace
 
@@ -41,7 +42,22 @@ void TranspositionTable::resize(size_t megabytes) {
     size_t entries = megabytes * 1024ULL * 1024ULL / sizeof(Entry);
     size_t pow2 = 1;
     while (pow2 * 2 <= entries) pow2 <<= 1;
-    table.reset(new Entry[pow2]);
+    if (table && pow2 == mask + 1) { // same size (GUIs resend Hash): keep the memory
+        clear();
+        return;
+    }
+    // Free the old table first (never hold both), and fall back to smaller
+    // sizes rather than terminate on a failed allocation.
+    table.reset();
+    for (;;) {
+        try {
+            table.reset(new Entry[pow2]);
+            break;
+        } catch (const std::bad_alloc &) {
+            if (pow2 == 1) throw;
+            pow2 >>= 1;
+        }
+    }
     mask = pow2 - 1;
     clear();
 }

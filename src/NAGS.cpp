@@ -248,7 +248,12 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
     float tactical = tacticalRatio(root);
     int timeLeft = static_cast<int>(timeLeftMs >= 0 ? std::min<int64_t>(timeLeftMs, 1 << 30) : 30000);
     MetaDeltas deltas;
-    bool metaUsed = config.useMetaLearner && meta.predict(fen, timeLeft, lastUncertainty, tactical, deltas);
+    // The request must fit into the move: at most a quarter of the hard
+    // limit (and none at all for a move shorter than 40 ms). Without a time
+    // limit the usual timeouts apply.
+    const bool metaAffordable = limits.hardMs <= 0 || limits.hardMs >= 40;
+    meta.setTimeBudget(limits.hardMs > 0 ? static_cast<int>(std::clamp<int64_t>(limits.hardMs / 4, 10, 1200)) : 1200);
+    bool metaUsed = config.useMetaLearner && metaAffordable && meta.predict(fen, timeLeft, lastUncertainty, tactical, deltas);
     if (config.metaExploration > 0.0f) {
         std::normal_distribution<float> noise(0.0f, config.metaExploration);
         deltas.dfs_depth_delta = std::clamp(deltas.dfs_depth_delta + noise(rng), -1.0f, 1.0f);
@@ -262,6 +267,7 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
     // ---- MCTS arm: only with a live network (and not while pondering) -------
     mctsRoot.reset();
     mctsBoard = root;
+    mctsBoard.refreshAccumulator(); // `root` may hold accumulators of an earlier network (EvalFile/UseNNUE changed)
     mctsSims = 0;
     mctsNodes = 1;
     mctsUsedNetwork = false;

@@ -53,10 +53,13 @@ public:
     explicit TranspositionTable(size_t megabytes = 16);
 
     // Rounds the entry count down to a power of two so the table never uses
-    // more memory than requested. Clears the table.
+    // more memory than requested. Clears the table. If the memory is not
+    // available the size is halved until it is (sizeMb() tells what was
+    // allocated).
     void resize(size_t megabytes);
     void clear();
-    void newSearch() { generation = static_cast<uint8_t>(generation + 1); }
+    void newSearch() { generation = (generation + 1) & kGenerationMask; }
+    size_t sizeMb() const { return (mask + 1) * sizeof(Entry) / (1024 * 1024); }
 
     bool probe(uint64_t key, TTHit &out) const;
     void store(uint64_t key, int depth, Bound bound, int score, const Move &move);
@@ -73,5 +76,9 @@ private:
     };
     std::unique_ptr<Entry[]> table;
     size_t mask = 0;
-    uint8_t generation = 0;
+    // 22 bits (the top of the packed entry): an 8-bit counter wrapped after
+    // 256 searches without a clear, and entries that old then counted as
+    // current (protected from replacement, counted in hashfull).
+    static constexpr uint32_t kGenerationMask = (1u << 22) - 1;
+    uint32_t generation = 0;
 };

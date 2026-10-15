@@ -126,6 +126,21 @@ static void testTT() {
 
     tt.clear();
     CHECK(tt.hashfull() == 0, "hashfull not zero after clear");
+
+    // An entry from 256 searches ago is old, not current (the generation
+    // counter used to be 8 bits and wrapped): a shallow store replaces it.
+    const uint64_t a = 0x1234567ULL, b = a + tt.entryCount(); // same slot
+    tt.store(a, 20, Bound::Exact, 1, m);
+    for (int i = 0; i < 256; ++i) tt.newSearch();
+    tt.store(b, 1, Bound::Exact, 2, m);
+    CHECK(tt.probe(b, hit) && hit.score == 2, "a 256-search-old entry blocked a new one");
+
+    // Resizing to the same size keeps the table usable (and empty).
+    CHECK(tt.sizeMb() == 1, "1 MB table reports %zu MB", tt.sizeMb());
+    tt.resize(1);
+    CHECK(tt.sizeMb() == 1 && !tt.probe(b, hit), "same-size resize did not clear the table");
+    tt.store(a, 3, Bound::Exact, 3, m);
+    CHECK(tt.probe(a, hit) && hit.score == 3, "table unusable after a same-size resize");
 }
 
 static void testLimits() {

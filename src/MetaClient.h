@@ -35,6 +35,10 @@ public:
 
     bool is_connected() const { return socket.isOpen(); }
 
+    // Longest time a call may take (connecting included); a request that
+    // has to fit into a short move gets one attempt with shorter timeouts.
+    void setTimeBudget(int ms) { budgetMs = ms; }
+
 private:
     bool roundTrip(const std::string &request, std::string &response);
 
@@ -42,4 +46,5 @@ private:
     int port;
     LineSocket socket;
     std::chrono::steady_clock::time_point retryAfter{};
+    int budgetMs = 1200; // default: the old fixed timeouts (150 ms connect, 2 x 500 ms request)
 };
