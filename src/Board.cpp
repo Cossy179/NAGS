@@ -1,5 +1,6 @@
 #include "Board.h"
 #include "FenChecks.h"
+#include "Legality.h"
 
 #include "BitOps.h"
 
@@ -425,13 +426,8 @@ std::vector<Move> Board::generateLegalMoves(bool noisyOnly) const {
     generatePseudoLegalMoves(pseudo, noisyOnly);
     std::vector<Move> legal;
     legal.reserve(pseudo.size());
-    Board tmp(*this, NoHistory{}); // copying the game history here would cost O(game length) per node
-    Color us = side;
-    for (int i = 0; i < pseudo.size(); ++i) {
-        tmp.makeMove(pseudo[i]);
-        if (!tmp.inCheck(us)) legal.push_back(pseudo[i]);
-        tmp.unmakeMove();
-    }
+    for (int i = 0; i < pseudo.size(); ++i)
+        if (isLegalMove(*this, pseudo[i])) legal.push_back(pseudo[i]);
     return legal;
 }
 

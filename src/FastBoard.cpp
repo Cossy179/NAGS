@@ -1,5 +1,6 @@
 #include "FastBoard.h"
 #include "FenChecks.h"
+#include "Legality.h"
 
 #include "BitOps.h"
 #include "Eval.h"
@@ -658,12 +659,8 @@ std::vector<Move> FastBoard::generateLegalMoves(bool noisyOnly) const {
     generatePseudoLegalMoves(pseudo, noisyOnly);
     std::vector<Move> legal;
     legal.reserve(pseudo.size());
-    FastBoard tmp(*this, NoHistory{}); // one copy without the game history, then make/unmake
-    for (int i = 0; i < pseudo.size(); ++i) {
-        tmp.makeMove(pseudo[i]);
-        if (!tmp.inCheck(side)) legal.push_back(pseudo[i]);
-        tmp.unmakeMove();
-    }
+    for (int i = 0; i < pseudo.size(); ++i)
+        if (isLegalMove(*this, pseudo[i])) legal.push_back(pseudo[i]);
     return legal;
 }
 

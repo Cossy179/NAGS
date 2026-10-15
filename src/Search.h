@@ -15,6 +15,7 @@
 
 #include "ChessTypes.h"
 #include "Eval.h"
+#include "Legality.h"
 #include "Syzygy.h"
 #include "TT.h"
 
@@ -853,13 +854,12 @@ private:
                     return singularBeta;
                 }
             }
-            setPlyMove(ply, m);
-            board.makeMove(m);
-            if (board.inCheck(us)) { // illegal: leaves our own king in check
-                board.unmakeMove();
+            if (!isLegalMove(board, m)) { // leaves our own king in check
                 NAGS_STAT(++stats.illegal);
                 continue;
             }
+            setPlyMove(ply, m);
+            board.makeMove(m);
             NAGS_STAT(++stats.movesSearched);
             bool givesCheck = board.inCheck();
             int score;
@@ -1007,7 +1007,6 @@ private:
         // move is not searched outside check).
         MovePicker picker(*this, ttMove, MAX_PLY, Move{}, nullptr, nullptr, !inCheck);
 
-        const Color us = board.sideToMove();
         int legal = 0;
         Move bestMove;
         // Outside check losing captures are never searched (below), so the
@@ -1022,11 +1021,8 @@ private:
                 NAGS_STAT(++stats.qSee);
                 continue;
             }
+            if (!isLegalMove(board, m)) continue;
             board.makeMove(m);
-            if (board.inCheck(us)) {
-                board.unmakeMove();
-                continue;
-            }
             ++legal;
             int score = -quiescence(-beta, -alpha, ply + 1);
             board.unmakeMove();
