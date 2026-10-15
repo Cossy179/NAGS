@@ -55,7 +55,27 @@ of writing:
 | `nags` | 1947402 |
 
 When search improvements make a run much faster, raise the depth (in the
-engine's `main` file) and record the new fingerprints.
+engine's `main` file) and record the new fingerprints. `bench` always
+searches with the default hash size (64 MB), whatever `Hash` is set to.
+
+For a non-functional change, also check that `nags_datagen` still writes
+the same games: with `--threads 1` and a fixed `--seed` its output must be
+byte-identical to the previous build's (bench covers the search, this also
+covers move generation order and the opening playouts).
+
+### Where the time goes
+
+* `nags_enhanced speedtest` (or the UCI command `speedtest`): nanoseconds
+  per operation for move generation, legality checks, make/unmake, SEE,
+  evaluation (output layer only, and incremental after a move),
+  accumulator refreshes and TT probes, on 787 positions.
+* A build with `-DNAGS_STATS=ON` counts what the search does (TT hit and
+  cutoff rates, node types, cutoffs by move number and by picker stage,
+  each pruning and reduction rule) and `bench` prints it. The counters are
+  compiled out otherwise.
+* `nags` reports MCTS simulations per second and the round trips to
+  `rpc_server.py` (count, failures, total/mean/maximum wait) in its
+  `info string nags` line.
 
 ## 3. Strength: SPRT matches with `tools/sprt.py`
 
@@ -284,6 +304,9 @@ not alter the search, so the bench node counts stay identical:
 | `a8e5c0c` vs `aa8472b` | stack move list, lazy move ordering | 1.59× | 1.43× | 1.62× | 1.44× |
 | `06da148` vs `253627c` | incremental evaluation (FastBoard only) | – | ~1.16× | ~1.14× | – |
 | AVX2 NNUE kernels for MSVC (Windows PC, see below) | hand-written AVX2 update, refresh and output kernels, chosen by CPUID | – | 3.03× | 2.61× | 2.69× |
+| `c82b96e` (4-core VM) | `makeMove` no longer zeroes a 1 KB accumulator entry (value-initialisation) | – | – | 1.057× | – |
+| `6200d9f` (4-core VM) | staged move picker, same order: SEE only once captures are reached, per-stage selection | – | – | 1.05–1.07× | – |
+| `80f8bd0` (4-core VM) | captures generated directly in quiescence search | – | – | 1.033× | – |
 
 At `a8e5c0c`, `nags_enhanced` benches at about 4.8M nodes/second. The
 `06da148` figures are medians of six alternating runs taken while an SPRT
