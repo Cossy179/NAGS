@@ -226,6 +226,33 @@ Samples whose reward beats the batch average get exponentially more weight,
 so the predictions move towards deltas that won games. The training data is
 stored as JSON.
 
+**Why it is off by default.** The reward is not an informative signal for
+the decision it is meant to train:
+
+* Every move of a game gets the same reward (the result). Samples from one
+  game are not independent, so the effective sample size is the number of
+  games, not of moves.
+* One move's deltas change the expected game result by a tiny amount ε,
+  while a game result varies by about ±0.5 (variance about 0.25 with
+  draws). Telling ε = 0.01 from 0 takes on the order of (0.5 / 0.01)² ≈
+  2500 games per region of the feature space, before the noise exploration
+  adds of its own.
+* The result depends on all deltas of both engines over the whole game,
+  and two of the three deltas only matter when the MCTS arm runs (it does
+  not at short time controls, and without a trained network).
+* Advantages are normalised per batch across unrelated positions, so the
+  regression mostly fits noise.
+
+So `UseMetaLearner` defaults to false, and the learner should only be
+switched on with a match result that shows a gain. A signal that measures
+the decision directly is the way forward: for sampled positions, search
+with one budget or setting and with another, and score the move each
+chooses with a much deeper reference search (the value lost, and how
+often the extra effort changed the move), per unit of time spent. That
+gives a per-move reward with no game-length credit assignment, and it is
+also what time management needs (when is more search unlikely to change
+the decision?).
+
 ## Training pipeline (`training_pipeline.py`)
 
 See the README for the steps. Notes:
