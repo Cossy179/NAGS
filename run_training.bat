@@ -19,7 +19,7 @@ if "%STEP%"=="" set "STEP=full"
 if /i "%STEP%"=="help" goto usage
 if /i "%STEP%"=="-h" goto usage
 if /i "%STEP%"=="--help" goto usage
-for %%s in (parse supervised selfplay ppo evaluate meta full) do if /i "%STEP%"=="%%s" goto valid_step
+for %%s in (parse supervised selfplay ppo evaluate meta full label distill) do if /i "%STEP%"=="%%s" goto valid_step
 echo Unknown step: %STEP% 1>&2
 call :print_usage
 exit /b 1
@@ -65,5 +65,6 @@ exit /b 0
 :print_usage
 echo Usage: run_training.bat [step] [pipeline options]
 echo Steps: parse, supervised, selfplay, ppo, evaluate, meta, full (default: full)
+echo v3 network (not part of 'full'): label (engine scores for positions), distill (train on them)
 echo Options are passed to training_pipeline.py (see: %PYTHON% training_pipeline.py --help)
 exit /b 0
