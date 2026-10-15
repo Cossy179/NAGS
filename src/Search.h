@@ -946,7 +946,10 @@ private:
             best = tbCeiling;
             bound = Bound::Upper;
         }
-        if (tt && !excluding) tt->store(key, depth, bound, scoreToTT(best, ply), bestMove);
+        // At a fail-low node no move proved anything (the "best" one just
+        // has the highest upper bound): store none, so the TT keeps the move
+        // of an earlier search, and IIR applies to nodes that never had one.
+        if (tt && !excluding) tt->store(key, depth, bound, scoreToTT(best, ply), bound == Bound::Upper ? Move{} : bestMove);
         return best;
     }
 
