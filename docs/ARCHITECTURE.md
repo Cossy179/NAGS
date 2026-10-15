@@ -218,6 +218,194 @@ Batched and single-position inference give identical results. Checkpoints
 store the model configuration alongside the weights, so the server rebuilds
 the model with the right dimensions.
 
+## Neural network v3 (`nags-gnn-v3`, experimental)
+
+A second network design, added next to the one above rather than replacing
+it. **v2 checkpoints keep working unchanged:** `chess_graph.py`,
+`gnn_evaluator.py` (format `nags-gnn-v2`, 4096-entry policy, `move_index`,
+`legal_move_priors`, `save_checkpoint` / `load_checkpoint`), the training
+steps `parse` … `full` and their defaults, `meta_learner.py`,
+`training_config.json` and the RPC protocol are as they were, and
+`tests/python/test_compat.py` pins a frozen v2 checkpoint's outputs. Nothing
+uses v3 unless a v3 checkpoint is passed to `rpc_server.py --model` (or to
+`training_pipeline.py --step evaluate --model`).
+
+| Module | Contents |
+|--------|----------|
+| `policy_encoding.py` | promotion-aware move encoding (4228 entries) |
+| `relational_graph.py` | `RelationalChessGraph`: typed, directed relations built with python-chess |
+| `gnn_v3.py` | `RelationalGNNEvaluator`, v3 checkpoints, `load_any_checkpoint` and the per-format adapters |
+| `distillation.py` | label rows, distillation targets and losses |
+| `tools/gnn_bench.py` | latency / throughput of v2 and v3, graph construction and model separately |
+
+### Move encoding
+
+The v2 policy gives a move the index `from·64 + to`, so `e7e8q`, `e7e8r`,
+`e7e8b` and `e7e8n` share one probability. v3 keeps those 4096 indices for
+every move that is not an underpromotion (queen promotions, castling as the
+king's UCI from/to such as `e1g1`, en passant as the pawn's from/to) and adds
+`4096 + pair·3 + {n: 0, b: 1, r: 2}` for underpromotions. `pair` numbers the
+44 from/to pairs a promotion can use: White's (rank 7 → 8) then Black's
+(rank 2 → 1), by the pawn's file a–h, and for one pawn by target file from
+left to right (capture towards a, push, capture towards h); so pair 0 is
+`a7a8`, 1 `a7b8`, 2 `b7a8`, …, 21 `h7h8`, 22 `a2a1`, …, 43 `h2h1`.
+`POLICY_V3_DIM = 4228`. Every legal move has its own index (tested on
+thousands of random positions, many with promotions); `index_to_uci_v3`
+inverts it, given the board to tell `e7e8q` from a rook's `e7e8`.
+
+### Graph
+
+Built from a `chess.Board` (a FEN, or a board with its move history), so
+attacks, pins, castling and en passant follow the rules exactly.
+
+* **Nodes:** 64 squares (node *i* is square *i*), one per piece (in square
+  order), one global node; `node_kind` marks which is which.
+* **Relations** (21 directed edge types, `RELATIONS`): piece → its square and
+  back; piece → enemy piece it attacks, and attacked-by back; piece → own
+  piece it defends, and back; piece → empty square it controls, and back;
+  side-to-move piece → square it can legally move to, and back; pawn ↔ pawns
+  on its file; pawn → own pawn it protects (chain), and back; passed pawn →
+  each square of its path to promotion, and back; king → the squares around
+  it, and back; pinned piece → the slider pinning it to its king, and back;
+  global node → every piece, and back.
+* **Node features** (32 columns, documented one by one in `FEATURE_COLUMNS`),
+  relative to the side to move ("own"/"opponent", ranks counted from the
+  mover's side, so a position and its colour-flipped mirror image look the
+  same apart from one `white_to_move` flag): node kind, piece type, own /
+  opponent, file and relative rank, attackers of each side on the square
+  (for a piece, attackers of its own colour are its defenders), legal
+  en-passant square, pinned, mobility, legal moves of the piece, passed
+  pawn, castling rook / king; on the global node: in check, castling rights
+  of both sides, half-move clock / 100, repetitions of the position in the
+  board's history (0 for a bare FEN), number of legal moves, material.
+
+### Model
+
+The trunk is a stack of R-GCN layers (basis decomposition, `num_bases`
+shared matrices; messages averaged per relation, so a busy relation such as
+"controls" does not drown a rare one such as "pins") with residual
+connections, LayerNorm and a feed-forward block. It is written with one
+gather and a few `index_add` calls, without a Python loop over relations or
+torch-scatter. Heads:
+
+* **Policy** (4228 logits): bilinear from-square × to-square scores of the
+  square embeddings (plus the global embedding); an underpromotion's logit is
+  its from/to logit plus a learned per-piece offset from the two square
+  embeddings (initialised at −2).
+* **WDL** (3 logits: win / draw / loss for the side to move) from the global
+  node and the mean of all nodes; value = P(win) − P(loss).
+* **Auxiliary search score** (optional, tanh), trained towards the search's
+  expected score.
+
+`evaluate()` returns what the v2 evaluator returns, with the same meaning:
+policy probabilities over all entries (here 4228), the value from the side to
+move's view in [−1, 1], and the uncertainty as the standard deviation of the
+value over `mc_samples` Monte-Carlo dropout samples of the WDL head (not the
+WDL entropy, which is also high in quiet drawn positions).
+
+### Checkpoints and serving
+
+`save_checkpoint_v3` writes `{'format': 'nags-gnn-v3', 'config': {...,
+'policy_encoding': 'v3', 'graph': 'relational-v1'}, 'state_dict': ...}`.
+`load_checkpoint_v3` rejects anything else (and a config naming another
+encoding or graph version); the legacy `load_checkpoint` still rejects
+everything but `nags-gnn-v2`. `load_any_checkpoint(path)` returns an adapter
+holding the model with its own graph builder and move encoding (v2:
+`GNNEvaluator` + `ChessGraph` + `legal_move_priors`, the exact legacy code
+path; v3: `RelationalGNNEvaluator` + `RelationalChessGraph` +
+`legal_move_priors_v3`), so one format's outputs are never read with the
+other's encoding.
+
+`rpc_server.py --model` takes either format. Replies keep their fields;
+`policy_dim` is the served model's (4096 for v2 and for the untrained
+fallback, exactly as before; 4228 for v3) and a new `model_format` field
+names the format. The engine reads only `move_priors` (one per requested
+move, in the request's order), `value` and `uncertainty`, so a v3 network
+works with the engine unchanged, and an underpromotion gets its own prior.
+
+### Search-policy distillation (`label`, `distill`)
+
+`label` takes positions from the existing jsonl datasets (`parse` and
+self-play outputs, or any jsonl with a `fen` field; `--data`), keeps
+distinct ones, and runs the alpha-beta engine (`nags_enhanced` unless
+configured otherwise; one thread, hash cleared per position) with MultiPV k
+at a fixed node budget. Each row has the FEN, the legal moves, the top-k
+moves with their exact scores (`{"cp": x}` or `{"mate": n}` from the side to
+move's view; mates are never folded into centipawns), `rest_upper_bound`
+(the other moves are only known to score at most the k-th score), depth,
+nodes, and the source game's result when known. NAGS's MultiPV searches
+every line with a full window, so the k scores are exact for that search.
+
+`distill` trains `RelationalGNNEvaluator` on those rows:
+
+* **Policy:** cross-entropy against a soft target over the legal moves only
+  (log-softmax restricted to the legal mask). The target is
+  `softmax(score / T)` (T = `temperature_cp`, 50 cp) over the k scored
+  moves, with mates mapped to large but finite scores (mate in n → 3000 −
+  10·(n − 1), beyond every clipped cp score), and zero mass on unscored
+  moves: they are only bounded above by the k-th score, so no value can be
+  given to them.
+* **Value:** cross-entropy of the WDL head against a WDL target from the best
+  line's score s with a logistic model:
+  `P(win) = σ((s − a)/b)`, `P(loss) = σ((−s − a)/b)`, `P(draw) = 1 − P(win) − P(loss)`,
+  a = 400, b = 250, which puts the expected score P(win) + P(draw)/2 within
+  0.034 of σ(s/400) at every score, the scale of the NNUE trainer, with a 66% draw
+  probability at s = 0. `result_weight` (default 0) blends in the game
+  result when the row has one. The auxiliary head regresses the search-only
+  P(win) − P(loss).
+* **Validation**, split by source game (by position when there is no game
+  id): policy NLL, top-1 agreement with the search's best move, WDL NLL and
+  value MSE, logged per epoch and stored in the checkpoint's `extra`. The
+  best checkpoint is `models/gnn_v3_distill_<stamp>.pth`, a name the legacy
+  steps' `*_model_*.pth` lookups never pick up.
+
+Defaults are `DISTILL_DEFAULTS` in `training_pipeline.py`, merged under the
+config's `distill_params` key; `training_config.json` does not change.
+
+```bash
+./run_training.sh label --data data/training_data.jsonl   # or: python training_pipeline.py --step label
+./run_training.sh distill                                 # newest data/distill_*.jsonl
+python rpc_server.py --model models/gnn_v3_distill_<stamp>.pth
+./run_training.sh evaluate --model models/gnn_v3_distill_<stamp>.pth
+```
+
+### Speed
+
+`tools/gnn_bench.py` times graph construction (on the CPU) and the model
+(`evaluate`, 3 MC-dropout samples) separately for both formats at batch
+sizes 1, 8, 64 and 256, on the CPU and on CUDA when available. Untrained
+models of the default sizes (v2: 1.34M parameters, v3: 1.03M), one torch
+thread, on a 4-core machine already loaded by an engine match (load
+average 4.3), median of 3 runs, positions per second:
+
+| batch | v2 build | v2 model | v2 total | v3 build | v3 model | v3 total |
+|------:|---------:|---------:|---------:|---------:|---------:|---------:|
+| 1     | 216 | 14.4 | 13.5 | 245 | 62.2 | 49.6 |
+| 8     | 304 | 16.0 | 15.2 | 385 | 137.5 | 101.3 |
+| 64    | 446 | 16.8 | 16.2 | 429 | 135.4 | 102.9 |
+| 256   | 393 | 13.6 | 13.1 | 526 | 63.5 | 56.6 |
+
+A single position (the engine's per-leaf request) takes 74 ms with v2 and
+20 ms with v3. Most of v2's time goes to its transformer heads; v3 has
+none. Building the graphs costs about the same in both (2–5 ms a
+position in Python), so at small batches it is a large share of a v3
+request.
+
+### Why PPO on these games is not on-policy
+
+The `ppo` step updates the network on self-play positions with the move
+the engine played. PPO's ratio π_new(a|s) / π_old(a|s) is an importance
+weight only if π_old chose a. In NAGS the move is chosen by the alpha-beta
+search (MCTS, guided by the network, can only replace it after a
+verification search), so the behaviour policy is the search, not the network:
+the ratio says nothing about how the data were sampled, clipping does not
+bound a real policy change, and the update amounts to advantage-weighted
+imitation of the engine's moves. The step is kept as it was, since a network
+may be training with it, and logs this caveat. For v3, distillation is the
+recommended objective: it trains on what the search actually knows, the
+exact scores of its best k moves, instead of one sampled move and a game
+result.
+
 ## Meta-learner (`meta_learner.py`)
 
 A small MLP maps 8 position/clock features to the three deltas. Training is
@@ -241,6 +429,12 @@ See the README for the steps. Notes:
   * old log-probabilities and values come from the starting checkpoint;
   * advantage = result − old value, normalised;
   * losses: value loss (MSE against the result) plus an entropy bonus.
+
+  The moves come from the alpha-beta search, not from the network, so this
+  is not an on-policy update (see "Why PPO on these games is not on-policy"
+  above); `distill` is the recommended objective for the v3 network.
+* `supervised_legal_mask` (default off, so the step is unchanged) restricts
+  the supervised policy loss to the legal moves.
 * Evaluation plays each opening (from the polyglot book if present, otherwise
   random plies) with both colours under the configured clock, and reports
   `+W =D -L`, the score, and Elo with a 95% interval. Promotion requires Elo

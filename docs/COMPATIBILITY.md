@@ -73,6 +73,17 @@ reads `move_priors` (one per move, same order), `value` (side to move,
 [-1, 1]) and `uncertainty`. New model formats get a new checkpoint format
 string and are served through the same protocol.
 
+`nags-gnn-v3` (`gnn_v3.py`, `relational_graph.py`, `policy_encoding.py`) is
+such a format, next to v2: 4228-entry promotion-aware policy, graph
+`relational-v1`. `load_checkpoint` still accepts only v2;
+`load_any_checkpoint` gives each format its own builder and encoding.
+Replies gained one field, `model_format`; with a v2 checkpoint or no model
+every other field is as before (`policy_dim` 4096), and for v3 `policy_dim`
+is 4228. Any change to the v3 graph features or relations needs a new
+`graph` version, and to its move encoding a new `policy_encoding`, so that
+v3 checkpoints in use keep their meaning (the loader refuses versions it
+does not know).
+
 ### Engine options used by the tools
 
 `EvalFile` (prints `NNUE evaluation: <name>` or `EvalFile: <error>`),
