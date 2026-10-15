@@ -104,12 +104,16 @@ struct NagsSettings {
     int verifyMargin = 25;        // an MCTS move may score this much below the alpha-beta move
     int minMctsMs = 1000;         // MCTS only runs when the soft time limit is at least this (or unlimited)
 
-    bool useMetaLearner = true;
+    // Both services are off by default: neither has shown a gain in strength
+    // (MCTS with an untrained GNN cost -64 +- 62 Elo and takes 15% of the
+    // alpha-beta time whenever it runs; the meta-learner was never measured).
+    // The training pipeline turns them on explicitly.
+    bool useMetaLearner = false;
     std::string metaHost = "127.0.0.1";
     int metaPort = 5556;
     float metaExploration = 0.0f; // std-dev of Gaussian noise added to deltas (self-play)
 
-    bool useNN = true;
+    bool useNN = false;
     std::string nnHost = "127.0.0.1";
     int nnPort = 5555;
 };

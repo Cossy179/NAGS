@@ -93,8 +93,8 @@ UCI options:
 | `SyzygyPath` | all | Directories with Syzygy tablebase files (`:`-separated, `;` on Windows) |
 | `SyzygyProbeLimit` (default 7) | all | Only probe positions with at most this many pieces |
 | `UseNNUE` (default true), `EvalFile` | `nags`, `nags_fast`, `nags_enhanced` | NNUE evaluation (see `docs/NNUE.md`); the hand-written evaluation is used when no network is available |
-| `UseNN`, `NNHost`, `NNPort` | `nags` | Use `rpc_server.py` for MCTS priors/values (default `127.0.0.1:5555`) |
-| `UseMetaLearner`, `MetaHost`, `MetaPort` | `nags` | Ask `meta_learner.py` for per-move deltas (default `127.0.0.1:5556`) |
+| `UseNN` (default false), `NNHost`, `NNPort` | `nags` | Use `rpc_server.py` for MCTS priors/values (default `127.0.0.1:5555`). Off by default until a trained network shows a gain in strength |
+| `UseMetaLearner` (default false), `MetaHost`, `MetaPort` | `nags` | Ask `meta_learner.py` for per-move deltas (default `127.0.0.1:5556`); off by default, as it has not been shown to help |
 | `MetaExploration` (0-100) | `nags` | Gaussian noise (std = value/100) added to the deltas; used in self-play |
 | `MctsMinTime` (ms, default 1000) | `nags` | The MCTS arm only runs when the soft time limit for the move is at least this (0: always) |
 
