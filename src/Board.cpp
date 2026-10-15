@@ -598,6 +598,21 @@ bool Board::isRepetition() const {
     return false;
 }
 
+bool Board::isRepetition(int pliesFromRoot) const {
+    int n = static_cast<int>(history.size());
+    int stop = n - std::min(halfmoveClock, pliesFromNull);
+    if (stop < 0) stop = 0;
+    int earlier = 0;
+    for (int i = n - 2; i >= stop; i -= 2)
+        if (history[i].prevHash == hash && (i > n - pliesFromRoot || ++earlier >= 2)) return true;
+    return false;
+}
+
+bool Board::isDraw(int pliesFromRoot) const {
+    if (halfmoveClock >= 100) return !inCheck() || !generateLegalMoves().empty();
+    return isRepetition(pliesFromRoot) || isInsufficientMaterial();
+}
+
 bool Board::isInsufficientMaterial() const {
     if (pieces[WP_] | pieces[BP_] | pieces[WR_] | pieces[BR_] | pieces[WQ_] | pieces[BQ_]) return false;
     int minors = popcount(pieces[WN_] | pieces[BN_] | pieces[WB_] | pieces[BB_]);

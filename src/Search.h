@@ -683,7 +683,7 @@ private:
     int negamax(int depth, int alpha, int beta, int ply, bool isPv, const Move &excluded = Move{}) {
         pvLength[ply] = ply;
         if (checkStop()) return 0;
-        if (board.isDraw()) return 0;
+        if (board.isDraw(ply)) return 0;
         if (ply >= MAX_PLY - 1) return eval::evaluate(board);
 
         // Mate distance pruning.

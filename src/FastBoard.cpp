@@ -856,6 +856,21 @@ bool FastBoard::isRepetition() const {
     return false;
 }
 
+bool FastBoard::isRepetition(int pliesFromRoot) const {
+    int n = static_cast<int>(history.size());
+    int stop = n - std::min(halfmoveClock, pliesFromNull);
+    if (stop < 0) stop = 0;
+    int earlier = 0;
+    for (int i = n - 2; i >= stop; i -= 2)
+        if (history[i].hash == hash && (i > n - pliesFromRoot || ++earlier >= 2)) return true;
+    return false;
+}
+
+bool FastBoard::isDraw(int pliesFromRoot) const {
+    if (halfmoveClock >= 100) return !inCheck() || !generateLegalMoves().empty();
+    return isRepetition(pliesFromRoot) || isInsufficientMaterial();
+}
+
 bool FastBoard::isInsufficientMaterial() const {
     for (int c = 0; c < 2; ++c)
         if (pieces[c][PAWN] | pieces[c][ROOK] | pieces[c][QUEEN]) return false;

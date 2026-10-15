@@ -172,6 +172,11 @@ static void testDraws() {
     CHECK(!b.isDraw(), "start position reported as draw");
     CHECK(b.applyMovesUCI({"g1f3", "g8f6", "f3g1", "f6g8"}), "knight shuffle rejected");
     CHECK(b.isRepetition(), "repetition of the start position not detected");
+    // In a search: a repetition inside the tree is a draw, one of a position
+    // from before the root (or of the root) only on its third occurrence.
+    CHECK(!b.isRepetition(0) && !b.isRepetition(4), "second occurrence of a pre-root position counted as a draw");
+    CHECK(b.isRepetition(5), "repetition inside the search tree not detected");
+    CHECK(b.applyMovesUCI({"g1f3", "g8f6", "f3g1", "f6g8"}) && b.isRepetition(0), "third occurrence not detected");
     b.setStartPos();
     CHECK(b.applyMovesUCI({"e2e4", "g8f6", "g1f3", "f6g8", "f3g1"}), "moves rejected");
     CHECK(!b.isRepetition(), "false repetition after a pawn move");
