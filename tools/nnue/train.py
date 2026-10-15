@@ -666,6 +666,10 @@ def main(argv=None):
     steps = args.epochs * source.steps(args.batch)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, steps), eta_min=args.lr * 0.01)
     ckpt_path = args.out + ".ckpt"
+    # Settings that must also match on --resume. Checkpoints written before
+    # they were recorded lack them and are resumed as before.
+    settings = {"batch": args.batch, "lr": args.lr, "lam": args.lam, "val": args.val, "seed": args.seed,
+                "king_layout": [int(x) for x in king_config(args.king_buckets)[2]]}
     first_epoch = 1
     if args.resume and os.path.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, weights_only=False, map_location=device)
@@ -673,6 +677,9 @@ def main(argv=None):
                 or ckpt.get("buckets", 1) != args.buckets or ckpt.get("king_buckets", "none") != args.king_buckets
                 or ckpt.get("activation", "crelu") != args.activation):
             sys.exit(f"{ckpt_path} was made with different data, network design or --epochs")
+        changed = [k for k, v in settings.items() if k in ckpt and ckpt[k] != v]
+        if changed:
+            sys.exit(f"{ckpt_path} was made with different settings: {', '.join(changed)}")
         model.load_state_dict(ckpt["model"])
         opt.load_state_dict(ckpt["opt"])
         sched.load_state_dict(ckpt["sched"])
@@ -700,7 +707,7 @@ def main(argv=None):
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(),
                     "rng": rng.bit_generator.state, "epoch": epoch, "positions": n, "hidden": args.hidden,
                     "epochs": args.epochs, "buckets": args.buckets, "king_buckets": args.king_buckets,
-                    "activation": args.activation},
+                    "activation": args.activation, **settings},
                    ckpt_path + ".tmp")
         os.replace(ckpt_path + ".tmp", ckpt_path)
     print(f"wrote {args.out}" + (f" (stopped after epoch {last_epoch} of {args.epochs})" if last_epoch < args.epochs else ""))

@@ -219,6 +219,11 @@ int main(int argc, char **argv) {
         std::cerr << "cannot open " << o.out << "\n";
         return 1;
     }
+    // A network that does not fit this build (another NAGS_NNUE_HIDDEN)
+    // silently means the hand-written evaluation: say which one plays.
+    std::fprintf(stderr, "nags_datagen: evaluation %s\n",
+                 nnue::network() ? ("NNUE " + nnue::networkName()).c_str()
+                                 : "hand-written (no usable NNUE network embedded)");
     auto start = std::chrono::steady_clock::now();
     std::vector<std::thread> threads;
     for (int i = 0; i < o.threads; ++i) threads.emplace_back(worker, std::cref(o), i, std::ref(out));

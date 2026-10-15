@@ -200,6 +200,23 @@ def test_resume_reproduces_a_full_run(tmp_path):
         train.main([a if a != "4" else "5" for a in common] + ["--out", str(tmp_path / "split.nnue"), "--resume"])
 
 
+@pytest.mark.parametrize("change", [["--lambda", "0.5"], ["--batch", "32"], ["--lr", "0.01"], ["--seed", "2"]])
+def test_resume_refuses_changed_settings(tmp_path, change):
+    data = tmp_path / "d.txt"
+    _dataset(data)
+    common = ["--data", str(data), "--epochs", "3", "--hidden", "8", "--batch", "64", "--threads", "1",
+              "--out", str(tmp_path / "n.nnue")]
+    train.main(common + ["--stop-after", "1"])
+    args = list(common)
+    if change[0] in args:
+        args[args.index(change[0]) + 1] = change[1]
+    else:
+        args += change
+    with pytest.raises(SystemExit):
+        train.main(args + ["--resume"])
+    train.main(common + ["--resume"])  # the same settings still resume
+
+
 def _engine():
     for c in (ROOT / "build" / "nags_enhanced", ROOT / "build" / "Release" / "nags_enhanced.exe"):
         if c.exists():

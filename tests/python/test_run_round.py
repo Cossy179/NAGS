@@ -1,6 +1,7 @@
 """tools/nnue/run_round.py: data generation to a target, training several
 designs, resuming, and reading match results."""
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -60,3 +61,48 @@ def test_match_results_are_read_from_logs(tmp_path):
     log.write_text(log.read_text() + "Games 300: +120 =118 -62 | penta [3, 24, 51, 44, 28] | Elo +68.0 ± 30.1 | "
                    "LLR +2.96\nH1 accepted: x is stronger (Elo bounds [0, 10])\n")
     assert run_round.sprt_result(log) == ("H1", 68.0, 30.1)
+
+
+def _engine():
+    for c in (ROOT / "build" / "nags_enhanced", ROOT / "build" / "Release" / "nags_enhanced.exe"):
+        if c.exists():
+            return c
+    return None
+
+
+@pytest.mark.skipif(_engine() is None, reason="nags_enhanced not built")
+def test_networks_that_do_not_load_are_not_tested(tmp_path):
+    # A network the engine rejects would otherwise play as the built-in one.
+    engine = _engine()
+    assert run_round.load_error(engine, ROOT / "nets" / "nags.nnue") is None
+    bad = tmp_path / "bad.nnue"
+    bad.write_bytes(b"not a network")
+    assert "not a NAGS NNUE file" in run_round.load_error(engine, bad)
+
+    class Args:
+        tc, threads = "1+0.01", 2
+    log = tmp_path / "match.log"
+    assert run_round.match(Args, engine, bad, None, log, ["0", "10"]) == ("error", 0.0, 0.0)
+    assert not log.exists()  # no match was played
+
+
+def test_logs_of_other_networks_are_not_reused(tmp_path):
+    # A finished log is reused only for the networks, engine and settings it
+    # was made for (recorded in <log>.key); a log without a key is reused as
+    # before.
+    engine, net, other = tmp_path / "engine", tmp_path / "a.nnue", tmp_path / "b.nnue"
+    engine.write_bytes(b"engine")
+    net.write_bytes(b"net a")
+    other.write_bytes(b"net b")
+
+    class Args:
+        tc, threads = "3+0.03", 2
+    log = tmp_path / "m.log"
+    log.write_text("Games 300: +150 =100 -50 | penta [0, 0, 0, 0, 0] | Elo +100.0 ± 20.0 | LLR 3.0\nH1 accepted\n")
+    assert run_round.match(Args, engine, net, None, log, ["0", "10"]) == ("H1", 100.0, 20.0)  # no key: reused
+    log.with_suffix(".key").write_text(json.dumps(run_round.match_key(Args, engine, net, None, ["0", "10"])))
+    assert run_round.match(Args, engine, net, None, log, ["0", "10"]) == ("H1", 100.0, 20.0)  # same key: reused
+    # Another network under the same log name: set aside, and (as the network
+    # cannot be loaded by this fake engine) not tested.
+    assert run_round.match(Args, engine, other, None, log, ["0", "10"])[0] == "error"
+    assert not log.exists() and len(list(tmp_path.glob("m.stale*.log"))) == 1

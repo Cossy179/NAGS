@@ -212,3 +212,14 @@ def test_calibration_combine():
     rating, _ = calibrate.combine([(1700, 50), (2000, 500)])
     assert 1700 < rating < 1710
     assert math.isnan(calibrate.combine([(1500, float("inf"))])[0])
+
+
+def test_engine_paths_stay_whole(tmp_path):
+    # run_round passes native paths: on Windows with backslashes, which POSIX
+    # command-line splitting dropped (every match then failed to start), and
+    # possibly with spaces.
+    exe = tmp_path / "dir with space" / "eng\\ine.exe"
+    exe.parent.mkdir()
+    exe.write_text("")
+    assert sprt.engine_command(str(exe)) == [str(exe)]
+    assert sprt.engine_command("python3 -u engine.py") == ["python3", "-u", "engine.py"]

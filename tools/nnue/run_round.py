@@ -24,6 +24,8 @@ written to <data-dir>/round_<positions>.txt.
 """
 
 import argparse
+import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -125,12 +127,56 @@ def sprt_result(log):
     return decision or "none", elo, err
 
 
+def load_error(engine, net):
+    """Why the engine cannot load `net` (None if it can). A network the
+    engine rejects (e.g. another hidden size than the build's) would
+    otherwise play the match as the built-in network."""
+    try:
+        out = subprocess.run([str(engine)], input=f"setoption name EvalFile value {net}\nquit\n",
+                             capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"cannot run {engine}: {e}"
+    if f"NNUE evaluation: {net}" in out:
+        return None
+    errors = [l for l in out.splitlines() if "EvalFile" in l]
+    return errors[-1] if errors else f"no confirmation that {net} loaded"
+
+
+def file_hash(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def match_key(args, engine, net1, net2, bounds):
+    """What a match log is about: the networks, the engine binary (which holds
+    the built-in network), the time control and the SPRT bounds."""
+    return {"net1": file_hash(net1), "net2": file_hash(net2) if net2 else "built-in", "engine": file_hash(engine),
+            "tc": args.tc, "bounds": list(bounds)}
+
+
 def match(args, engine, net1, net2, log, bounds):
     """SPRT between two networks in the same engine (net2 None: the built-in
     one); resumes an interrupted match from its log."""
+    # A log is reused (finished) or resumed only for the same networks,
+    # engine, time control and bounds, recorded next to it in <log>.key. A
+    # log of something else (say, the same data after the built-in network
+    # changed) is set aside. Logs without a key (older versions) are used as
+    # they are.
+    key_file, key = log.with_suffix(".key"), match_key(args, engine, net1, net2, bounds)
+    if log.exists() and key_file.exists() and json.loads(key_file.read_text()) != key:
+        stale = log.with_suffix(f".stale{len(list(log.parent.glob(log.stem + '.stale*')))}.log")
+        log.rename(stale)
+        print(f"{log.name} was for other networks or settings: moved to {stale.name}", flush=True)
     done = sprt_result(log)
     if done:
         return done
+    for net in (net1, net2):
+        if net and (error := load_error(engine, net)):
+            print(f"not testing {Path(net1).name}: {error}", flush=True)
+            return "error", 0.0, 0.0
     cmd = [sys.executable, ROOT / "tools" / "sprt.py", "--engine", engine, "--engine", engine,
            "--name", Path(net1).stem, "--name", Path(net2).stem if net2 else "built-in",
            "--option1", f"EvalFile={net1}", "--tc", args.tc,
@@ -143,6 +189,8 @@ def match(args, engine, net1, net2, log, bounds):
         partial = log.with_suffix(".part")
         shutil.copyfile(log, partial)
         cmd += ["--resume", partial]
+    if not log.exists() or not key_file.exists():
+        key_file.write_text(json.dumps(key) + "\n")
     run(cmd, log)
     return sprt_result(log) or ("none", 0.0, 0.0)
 

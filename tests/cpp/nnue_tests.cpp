@@ -182,7 +182,13 @@ static void checkNetwork(bool kingBuckets) {
     std::remove((kingBuckets ? "nnue_test_random_kb.nnue" : "nnue_test_random.nnue"));
 }
 
+extern const unsigned long kNagsEmbeddedNetSize;
+
 int main() {
+    // A network embedded in the build must load: one of another hidden size
+    // than NAGS_NNUE_HIDDEN would silently leave every engine and
+    // nags_datagen on the hand-written evaluation.
+    if (kNagsEmbeddedNetSize > 0) CHECK(nnue::embedded() != nullptr, "the embedded network does not load in this build");
     checkNetwork(false);
     checkNetwork(true);
 

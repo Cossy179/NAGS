@@ -255,6 +255,19 @@ class EngineSpec:
     options: Dict[str, str] = field(default_factory=dict)
 
 
+def engine_command(text: str) -> List[str]:
+    """An --engine value as an argument list. The path of an existing file is
+    one argument as it is: Windows paths contain backslashes, which POSIX
+    shell splitting would drop, and paths may contain spaces. Anything else
+    is split like a command line (with Windows rules on Windows)."""
+    if os.path.isfile(text):
+        return [text]
+    if os.name == "nt":
+        return [t[1:-1] if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'" else t
+                for t in shlex.split(text, posix=False)]
+    return shlex.split(text)
+
+
 class Player:
     """One engine process; restarted after a crash or hang."""
 
@@ -565,15 +578,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if len(args.engine) != 2:
         ap.error("give exactly two --engine arguments (candidate first, baseline second)")
-    names = args.name or [os.path.basename(shlex.split(e)[0]) for e in args.engine]
+    names = args.name or [os.path.basename(engine_command(e)[0]) for e in args.engine]
     if len(names) != 2:
         ap.error("give either no --name or exactly two")
     if names[0] == names[1]:
         names = [names[0] + "-1", names[1] + "-2"]
     try:
         common = parse_options(args.option)
-        specs = (EngineSpec(names[0], shlex.split(args.engine[0]), {**common, **parse_options(args.option1)}),
-                 EngineSpec(names[1], shlex.split(args.engine[1]), {**common, **parse_options(args.option2)}))
+        specs = (EngineSpec(names[0], engine_command(args.engine[0]), {**common, **parse_options(args.option1)}),
+                 EngineSpec(names[1], engine_command(args.engine[1]), {**common, **parse_options(args.option2)}))
         limits = Limits(margin=args.timemargin)
         if args.tc:
             limits.base, limits.inc = parse_tc(args.tc)
