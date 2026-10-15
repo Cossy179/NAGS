@@ -49,10 +49,10 @@ of writing:
 
 | Engine | Bench nodes |
 |--------|-------------|
-| `nags_basic` | 1351486 |
-| `nags_fast` | 1116444 |
-| `nags_enhanced` | 1947402 |
-| `nags` | 1947402 |
+| `nags_basic` | 1416774 |
+| `nags_fast` | 1071658 |
+| `nags_enhanced` | 1595609 |
+| `nags` | 1595609 |
 
 When search improvements make a run much faster, raise the depth (in the
 engine's `main` file) and record the new fingerprints. `bench` always
@@ -364,6 +364,21 @@ speed log), openings from `nags_balanced.epd` and resign adjudication
 | Transposition table in buckets of four entries (one cache line), replacing the shallowest entry with 8 plies of depth subtracted per search of age | SPRT [0, 10], 3+0.03, Hash 4 MB for both (resumed once) | H0 after 5020 games (+1410 =2221 -1389) | +1.5 ± 6.7 | – (not adopted) |
 | Null-move reduction 4 + depth/6 + min((eval − beta)/200, 3) alone (gentler than the rejected one above) | SPRT [0, 10], 3+0.03 | H0 after 1148 games (+302 =512 -334) | −9.7 ± 13.9 | – (not adopted) |
 | Razoring alone at depth ≤ 2 (eval + 300·depth ≤ alpha: quiescence decides) | SPRT [0, 10], 3+0.03 | H0 after 720 games (+188 =303 -229) | −19.8 ± 18.0 | – (not adopted) |
+| Moves generated and scored only when their stage is reached: TT move before any generation, captures at the capture stage, quiet moves after the killers and scored with the history as it is then (`10d3d5a`) | SPRT [0, 10], 3+0.03, 3 at a time on the 4-core VM | H1 after 1246 games (+400 =516 -330) | +19.5 ± 13.8 | 1595609 |
+
+### Experiment record
+
+From 2026-10-14 every experiment is kept on its own `exp/*` branch and
+tested against the current development head, so rejected ideas stay
+available and are not repeated without a new hypothesis. For each: the
+hypothesis, the bench and speed effect, the test, the decision, and
+whether it touches anything a network in training depends on
+(docs/COMPATIBILITY.md). Non-functional speed-ups (same bench, same
+`nags_datagen` output) are in the speed log above and need no SPRT.
+
+| Experiment (branch) | Hypothesis | Bench / speed | Test | Decision | Training impact |
+|---|---|---|---|---|---|
+| Lazy move generation (`exp/lazy-picker`) | Fresher history for quiet moves orders them better; no generation at TT cutoffs saves time | 1947402 → 1595609 at depth 10, 1.044× nodes/s | SPRT [0, 10]: H1, +19.5 ± 13.8 (1246 games) | accepted (`10d3d5a`) | changes future datagen games (better search), not their format |
 
 `nags` benches like `nags_enhanced` (without the Python services the MCTS
 arm does not run); before `nags` was rebuilt on FastBoard (see below) its
