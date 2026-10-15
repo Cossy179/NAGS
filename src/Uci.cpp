@@ -182,6 +182,10 @@ int run(Engine &engine, int argc, char **argv) {
         engine.bench(argc > 2 ? benchDepth(argv[2]) : 0);
         return 0;
     }
+    if (argc > 1 && std::string(argv[1]) == "speedtest") {
+        engine.speedtest();
+        return 0;
+    }
 
     std::thread worker;
     std::atomic<bool> stopFlag{false};
@@ -283,6 +287,9 @@ int run(Engine &engine, int argc, char **argv) {
         } else if (cmd == "bench") {
             stopSearch();
             engine.bench(tokens.size() > 1 ? benchDepth(tokens[1]) : 0);
+        } else if (cmd == "speedtest") {
+            stopSearch();
+            engine.speedtest();
         } else if (cmd == "d" || cmd == "fen") {
             send(engine.fen());
         } else if (cmd == "eval") {

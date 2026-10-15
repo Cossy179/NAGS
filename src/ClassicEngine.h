@@ -5,6 +5,7 @@
 // nags_enhanced (FastBoard, hash table + Lazy SMP threads).
 
 #include "Bench.h"
+#include "Profile.h"
 #include "Search.h"
 #include "TT.h"
 #include "Uci.h"
@@ -152,6 +153,10 @@ public:
         return "info string eval " + std::to_string(eval::evaluate(b)) + " (side to move, " + kind + ")";
     }
 
+    void speedtest() override {
+        for (const auto &line : profile::run<BoardT>()) uci::send("info string " + line);
+    }
+
     void bench(int depth) override {
         if (depth <= 0) depth = defaultBenchDepth;
         int threads = searcher.threadCount();
@@ -162,6 +167,7 @@ public:
         const auto &fens = bench::positions();
         uint64_t total = 0;
         std::atomic<bool> stop{false};
+        searcher.resetStatistics();
         auto start = std::chrono::steady_clock::now();
         for (size_t i = 0; i < fens.size(); ++i) {
             BoardT b;
@@ -174,6 +180,8 @@ public:
                       std::to_string(r.nodes) + " bestmove " + moveToUciString(r.bestMove));
         }
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        if constexpr (kSearchStats)
+            for (const auto &line : searcher.statistics().report()) uci::send("info string " + line);
         for (const auto &line : bench::summary(total, ms)) uci::send(line);
         searcher.setThreads(threads);
         searcher.setMultiPv(lines);

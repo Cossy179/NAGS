@@ -63,6 +63,15 @@ public:
     EvalResult evaluate(FastBoard &board, const std::vector<Move> &legal) override;
     bool lastUsedNetwork() const { return usedNetwork; }
 
+    // Round trips to the service since the last reset: count, failures and
+    // the time spent waiting for answers.
+    struct Timing {
+        long long requests = 0, failures = 0;
+        double waitMs = 0.0, maxMs = 0.0;
+    };
+    const Timing &timing() const { return stats; }
+    void resetTiming() { stats = Timing{}; }
+
 private:
     Evaluator &fallback;
     bool enabled = true;
@@ -72,6 +81,7 @@ private:
     LineSocket socket;
     std::chrono::steady_clock::time_point retryAfter{};
     bool usedNetwork = false;
+    Timing stats;
 };
 
 struct MCTSNode {
@@ -139,6 +149,7 @@ private:
     float lastUncertainty = 0.1f;
 
     // MCTS state for the current move (used by the MCTS thread only).
+    double mctsMs = 0.0; // time the MCTS thread ran
     std::unique_ptr<MCTSNode> mctsRoot;
     FastBoard mctsBoard;
     int mctsSims = 0;

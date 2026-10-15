@@ -92,11 +92,18 @@ EvalResult RpcEvaluator::evaluate(FastBoard &board, const std::vector<Move> &leg
     std::string response;
     std::vector<double> priors;
     double value = 0, uncertainty = 0;
-    if (!socket.request(request, response, requestTimeoutMs) ||
+    const auto sent = std::chrono::steady_clock::now();
+    const bool answered = socket.request(request, response, requestTimeoutMs);
+    const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sent).count();
+    ++stats.requests;
+    stats.waitMs += waited;
+    stats.maxMs = std::max(stats.maxMs, waited);
+    if (!answered ||
         !jsonlite::findNumberArray(response, "move_priors", priors) || priors.size() != legal.size() ||
         !jsonlite::findNumber(response, "value", value)) {
         socket.close();
         retryAfter = now + std::chrono::seconds(kNnBackoffSeconds);
+        ++stats.failures;
         return fallback.evaluate(board, legal);
     }
     jsonlite::findNumber(response, "uncertainty", uncertainty);
@@ -209,10 +216,12 @@ void NAGSController::simulate() {
 }
 
 void NAGSController::runMcts(long long budget, const std::atomic<bool> &stopMcts) {
+    const auto start = std::chrono::steady_clock::now();
     while (mctsSims < budget && mctsNodes < kMaxMctsNodes && !stopMcts.load(std::memory_order_relaxed)) {
         simulate();
         ++mctsSims;
     }
+    mctsMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
 const MCTSNode *NAGSController::mostVisitedRootChild() const {
@@ -232,6 +241,8 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
 
     // ---- Meta-learner: per-move deltas ----------------------------------------
     network.configure(config.useNN, config.nnHost, config.nnPort);
+    network.resetTiming();
+    mctsMs = 0.0;
     meta.configure(config.metaHost, config.metaPort);
     std::string fen = root.getFEN();
     float tactical = tacticalRatio(root);
@@ -341,6 +352,13 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
                    << std::setprecision(3) << top->q() << " (" << formatScore(valueToCp(top->q())) << ")";
         s << " evaluator " << (mctsUsedNetwork ? "network" : "none") << " chose " << moveToUciString(best) << " ("
           << reason << ")";
+        // Cost of the neural arm: simulation rate and time spent waiting for
+        // rpc_server.py (including the root evaluation).
+        const RpcEvaluator::Timing &rpc = network.timing();
+        s << std::setprecision(1) << " mcts_ms " << mctsMs << " mcts_sims_per_s "
+          << (mctsMs > 0 ? mctsSims * 1000.0 / mctsMs : 0.0) << " rpc_requests " << rpc.requests << " rpc_failures "
+          << rpc.failures << " rpc_wait_ms " << rpc.waitMs << " rpc_mean_ms "
+          << (rpc.requests ? rpc.waitMs / rpc.requests : 0.0) << " rpc_max_ms " << rpc.maxMs;
         onString(s.str());
 
         // Kept as the last info line so the training pipeline can pair the

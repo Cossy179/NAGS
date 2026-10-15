@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <memory>
@@ -33,6 +34,69 @@
 #include <vector>
 
 static_assert(eval::kEvalLimit < TB_BOUND, "evaluations must stay below the tablebase and mate scores");
+
+// Search statistics for profiling (CMake option NAGS_STATS). Compiled out
+// otherwise: normal builds search, and run, exactly as without them.
+#ifdef NAGS_STATS
+inline constexpr bool kSearchStats = true;
+#else
+inline constexpr bool kSearchStats = false;
+#endif
+#define NAGS_STAT(stmt)                    \
+    do {                                   \
+        if constexpr (kSearchStats) { stmt; } \
+    } while (0)
+
+struct SearchStats {
+    uint64_t nodes = 0, qnodes = 0, evals = 0;
+    uint64_t ttProbes = 0, ttHits = 0, ttCutoffs = 0, qttProbes = 0, qttHits = 0, qttCutoffs = 0;
+    uint64_t cutNodes = 0, cutoffAt[8] = {}; // beta cutoffs by the number of legal moves tried before (7: 7 or more)
+    uint64_t cutoffByStage[5] = {};          // TT move, winning capture, killer/countermove, losing capture, quiet
+    uint64_t allNodes = 0, pvNodes = 0;      // nodes without a cutoff: no move beat alpha / one did
+    uint64_t movesSearched = 0, illegal = 0;
+    uint64_t rfp = 0, nmpTries = 0, nmpCutoffs = 0, lmp = 0, futility = 0, historyPrunes = 0, seePrunes = 0;
+    uint64_t lmrSearches = 0, lmrResearches = 0, pvsResearches = 0;
+    uint64_t singularTries = 0, singularExtensions = 0, multiCuts = 0;
+    uint64_t qStandPat = 0, qDelta = 0, qSee = 0, qCutoffs = 0;
+
+    void add(const SearchStats &o) {
+        const uint64_t *src = reinterpret_cast<const uint64_t *>(&o);
+        uint64_t *dst = reinterpret_cast<uint64_t *>(this);
+        for (size_t i = 0; i < sizeof(SearchStats) / sizeof(uint64_t); ++i) dst[i] += src[i];
+    }
+
+    std::vector<std::string> report() const {
+        auto pct = [](uint64_t a, uint64_t b) {
+            char buf[32];
+            std::snprintf(buf, sizeof buf, "%.1f%%", b ? 100.0 * static_cast<double>(a) / static_cast<double>(b) : 0.0);
+            return std::string(buf);
+        };
+        auto n = [](uint64_t v) { return std::to_string(v); };
+        std::string at;
+        for (int i = 0; i < 8; ++i) at += (i ? " " : "") + pct(cutoffAt[i], cutNodes);
+        static const char *stages[5] = {"tt", "good_capture", "killer_counter", "bad_capture", "quiet"};
+        std::string byStage;
+        for (int i = 0; i < 5; ++i) byStage += std::string(i ? " " : "") + stages[i] + " " + pct(cutoffByStage[i], cutNodes);
+        return {
+            "stats nodes " + n(nodes) + " qnodes " + n(qnodes) + " (" + pct(qnodes, nodes + qnodes) + ") evals " + n(evals),
+            "stats tt probes " + n(ttProbes) + " hits " + pct(ttHits, ttProbes) + " cutoffs " + pct(ttCutoffs, ttProbes) +
+                " | qsearch probes " + n(qttProbes) + " hits " + pct(qttHits, qttProbes) + " cutoffs " + pct(qttCutoffs, qttProbes),
+            "stats node types cut " + pct(cutNodes, cutNodes + allNodes + pvNodes) + " all " +
+                pct(allNodes, cutNodes + allNodes + pvNodes) + " pv " + pct(pvNodes, cutNodes + allNodes + pvNodes) +
+                " | moves searched per node " +
+                std::to_string(cutNodes + allNodes + pvNodes ? static_cast<double>(movesSearched) / static_cast<double>(cutNodes + allNodes + pvNodes) : 0.0) +
+                " illegal " + n(illegal),
+            "stats cutoff on move 1..8+ " + at,
+            "stats cutoff by stage " + byStage,
+            "stats pruning rfp " + n(rfp) + " nmp " + n(nmpCutoffs) + "/" + n(nmpTries) + " lmp " + n(lmp) + " futility " +
+                n(futility) + " history " + n(historyPrunes) + " see " + n(seePrunes),
+            "stats reductions lmr " + n(lmrSearches) + " researched " + pct(lmrResearches, lmrSearches) + " pvs re-searches " +
+                n(pvsResearches) + " | singular " + n(singularExtensions) + "/" + n(singularTries) + " multicut " + n(multiCuts),
+            "stats qsearch stand-pat cutoffs " + n(qStandPat) + " delta " + n(qDelta) + " see skips " + n(qSee) +
+                " beta cutoffs " + n(qCutoffs),
+        };
+    }
+};
 
 struct SearchLimits {
     int depth = 0;        // 0 = no depth limit
@@ -270,6 +334,8 @@ public:
     }
 
     uint64_t nodeCount() const { return nodes; }
+    const SearchStats &statistics() const { return stats; }
+    void resetStatistics() { stats = SearchStats{}; }
     uint64_t tbHitCount() const { return tbHits.load(std::memory_order_relaxed); }
     int selectiveDepth() const { return selDepth; }
     bool wasAborted() const { return aborted; }
@@ -305,6 +371,7 @@ private:
     int pvLength[MAX_PLY] = {};
     uint64_t nodes = 0;
     uint64_t unflushed = 0;
+    SearchStats stats; // only counted with NAGS_STATS
     int selDepth = 0;
     bool aborted = false;
     std::atomic<uint64_t> tbHits{0}; // written by this worker only, read by the reporting thread
@@ -473,6 +540,9 @@ private:
         }
 
         const Move &moveAt(int k) const { return moves[k]; }
+        // Stage of the move last returned by next(): 0 TT move, 1 winning
+        // capture, 2 killer/countermove, 3 losing capture, 4 quiet.
+        int lastStage() const { return lastStageIdx; }
         // Static exchange evaluation of the move last returned by next()
         // (computed only if the picker does not know it already).
         int seeOfLast() const { return lastSeeKnown ? see[last] : eval::see(w.board, moves[last]); }
@@ -483,6 +553,9 @@ private:
         int found(int k, bool seeKnown) {
             last = k;
             lastSeeKnown = seeKnown;
+            if constexpr (kSearchStats)
+                lastStageIdx = k == ttIdx ? 0 : stage == Stage::GoodCaptures ? 1 : stage == Stage::Special ? 2
+                             : stage == Stage::LosingCaptures ? 3 : 4;
             return k;
         }
         // Splits the captures (in generation order) by the sign of their
@@ -527,6 +600,7 @@ private:
         Stage stage = Stage::Tt;
         int last = -1;
         bool lastSeeKnown = false;
+        int lastStageIdx = 0;
     };
 
     void updatePv(int ply, const Move &m) {
@@ -598,6 +672,7 @@ private:
         if (depth <= 0) return quiescence(alpha, beta, ply);
 
         ++nodes;
+        NAGS_STAT(++stats.nodes);
         selDepth = std::max(selDepth, ply);
 
         const bool excluding = !excluded.isNull();
@@ -606,14 +681,18 @@ private:
         bool ttHit = false;
         uint64_t key = board.zobrist();
         if (tt && !excluding) {
+            NAGS_STAT(++stats.ttProbes);
             if (tt->probe(key, hit)) {
+                NAGS_STAT(++stats.ttHits);
                 ttHit = true;
                 ttMove = hit.move;
                 if (!isPv && hit.depth >= depth) {
                     int s = scoreFromTT(hit.score, ply);
-                    if (hit.bound == Bound::Exact) return s;
-                    if (hit.bound == Bound::Lower && s >= beta) return s;
-                    if (hit.bound == Bound::Upper && s <= alpha) return s;
+                    if (hit.bound == Bound::Exact || (hit.bound == Bound::Lower && s >= beta) ||
+                        (hit.bound == Bound::Upper && s <= alpha)) {
+                        NAGS_STAT(++stats.ttCutoffs);
+                        return s;
+                    }
                 }
             }
         }
@@ -647,14 +726,17 @@ private:
         // Static evaluation for the pruning decisions below (a singular
         // extension search reuses its node's).
         const int staticEval = inCheck ? kNoEval : excluding ? evalStack[ply] : eval::evaluate(board);
+        NAGS_STAT(if (!inCheck && !excluding) ++stats.evals);
         evalStack[ply] = staticEval;
         const bool improving = !inCheck && (ply < 2 || evalStack[ply - 2] == kNoEval || staticEval > evalStack[ply - 2]);
 
         // Reverse futility pruning: at shallow depth, a static evaluation that
         // beats beta by a depth-scaled margin is assumed to hold.
         if (!isPv && !inCheck && !excluding && depth <= 6 && std::abs(beta) < MATE_BOUND &&
-            staticEval - 80 * (depth - improving) >= beta)
+            staticEval - 80 * (depth - improving) >= beta) {
+            NAGS_STAT(++stats.rfp);
             return staticEval;
+        }
 
         // Null-move pruning: if the side to move could pass and a reduced
         // search still fails high, the position is good enough to cut. Not in
@@ -663,12 +745,16 @@ private:
         if (!isPv && !inCheck && !excluding && depth >= 3 && !board.lastMoveWasNull() && std::abs(beta) < MATE_BOUND &&
             hasNonPawnMaterial(board.sideToMove()) && staticEval >= beta) {
             int reduction = 3 + depth / 6;
+            NAGS_STAT(++stats.nmpTries);
             plyMoves[ply] = PlyMove{};
             board.makeNullMove();
             int score = -negamax(depth - 1 - reduction, -beta, -beta + 1, ply + 1, false);
             board.unmakeNullMove();
             if (aborted) return 0;
-            if (score >= beta) return score >= TB_BOUND ? beta : score; // don't trust unproven mates or TB wins
+            if (score >= beta) {
+                NAGS_STAT(++stats.nmpCutoffs);
+                return score >= TB_BOUND ? beta : score; // don't trust unproven mates or TB wins
+            }
         }
 
         // Pseudo-legal moves; legality is checked only for moves actually
@@ -706,32 +792,51 @@ private:
             // Shallow quiet-move pruning. Only once a legal move has been
             // searched, so checkmate / stalemate detection is unaffected.
             if (!isPv && !inCheck && quiet && i > 0 && depth <= 3 && std::abs(alpha) < MATE_BOUND) {
-                if (quietsTried >= (3 + depth * depth) / (improving ? 1 : 2)) continue; // late-move pruning
-                if (staticEval + 120 * depth <= alpha) continue; // futility pruning
-                if (histScore < -4096 * depth) continue;          // history pruning
+                if (quietsTried >= (3 + depth * depth) / (improving ? 1 : 2)) { // late-move pruning
+                    NAGS_STAT(++stats.lmp);
+                    continue;
+                }
+                if (staticEval + 120 * depth <= alpha) { // futility pruning
+                    NAGS_STAT(++stats.futility);
+                    continue;
+                }
+                if (histScore < -4096 * depth) { // history pruning
+                    NAGS_STAT(++stats.historyPrunes);
+                    continue;
+                }
             }
             // SEE pruning: at low depth, skip moves that lose material by
             // force (more for captures, which win some of it back).
             if (!isPv && !inCheck && i > 0 && depth <= 8 && std::abs(alpha) < MATE_BOUND && !sameMove(m, ttMove) &&
-                picker.seeOfLast() < (quiet ? -60 * depth : -20 * depth * depth))
+                picker.seeOfLast() < (quiet ? -60 * depth : -20 * depth * depth)) {
+                NAGS_STAT(++stats.seePrunes);
                 continue;
+            }
             // Singular extension: if every other move fails low against a
             // margin below the TT score, the TT move is singular and gets one
             // more ply. If even the alternatives beat beta, cut (multi-cut).
             int extension = 0;
             if (trySingular && sameMove(m, ttMove)) {
                 int singularBeta = ttScore - 2 * depth;
+                NAGS_STAT(++stats.singularTries);
                 int s = negamax((depth - 1) / 2, singularBeta - 1, singularBeta, ply, false, m);
                 if (aborted) return 0;
-                if (s < singularBeta) extension = 1;
-                else if (singularBeta >= beta) return singularBeta;
+                if (s < singularBeta) {
+                    extension = 1;
+                    NAGS_STAT(++stats.singularExtensions);
+                } else if (singularBeta >= beta) {
+                    NAGS_STAT(++stats.multiCuts);
+                    return singularBeta;
+                }
             }
             setPlyMove(ply, m);
             board.makeMove(m);
             if (board.inCheck(us)) { // illegal: leaves our own king in check
                 board.unmakeMove();
+                NAGS_STAT(++stats.illegal);
                 continue;
             }
+            NAGS_STAT(++stats.movesSearched);
             bool givesCheck = board.inCheck();
             int score;
             if (i == 0) {
@@ -743,11 +848,16 @@ private:
                     reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1) - histScore / 8192;
                     reduction = std::clamp(reduction, 0, depth - 2);
                 }
+                NAGS_STAT(if (reduction) ++stats.lmrSearches);
                 score = -negamax(depth - 1 + extension - reduction, -alpha - 1, -alpha, ply + 1, false);
-                if (!aborted && reduction && score > alpha)
+                if (!aborted && reduction && score > alpha) {
+                    NAGS_STAT(++stats.lmrResearches);
                     score = -negamax(depth - 1 + extension, -alpha - 1, -alpha, ply + 1, false);
-                if (!aborted && score > alpha && score < beta)
+                }
+                if (!aborted && score > alpha && score < beta) {
+                    NAGS_STAT(++stats.pvsResearches);
                     score = -negamax(depth - 1 + extension, -beta, -alpha, ply + 1, true);
+                }
             }
             board.unmakeMove();
             if (aborted) return 0;
@@ -761,6 +871,8 @@ private:
                     alpha = score;
                     if (isPv) updatePv(ply, m);
                     if (alpha >= beta) {
+                        NAGS_STAT(++stats.cutNodes; ++stats.cutoffAt[std::min(i - 1, 7)];
+                                  ++stats.cutoffByStage[picker.lastStage()]);
                         if (quiet) {
                             if (!sameMove(m, killers[ply][0])) {
                                 killers[ply][1] = killers[ply][0];
@@ -796,6 +908,7 @@ private:
             if (quiet) quietsSearched[nQuietsSearched++] = static_cast<uint8_t>(idx);
         }
 
+        NAGS_STAT(if (best < beta) ++(best > originalAlpha ? stats.pvNodes : stats.allNodes));
         if (i == 0) {
             if (excluding) return alpha; // the excluded move was the only one
             return inCheck ? -MATE_SCORE + ply : 0; // checkmate or stalemate
@@ -818,6 +931,7 @@ private:
     int quiescence(int alpha, int beta, int ply) {
         if (checkStop()) return 0;
         ++nodes;
+        NAGS_STAT(++stats.qnodes);
         selDepth = std::max(selDepth, ply);
         if (ply >= MAX_PLY - 1) return eval::evaluate(board);
 
@@ -826,14 +940,18 @@ private:
         Move ttMove;
         TTHit hit;
         bool ttHit = false;
+        NAGS_STAT(if (tt) ++stats.qttProbes);
         if (tt && tt->probe(key, hit)) {
+            NAGS_STAT(++stats.qttHits);
             ttHit = true;
             ttMove = hit.move;
             if (!isPv) {
                 int s = scoreFromTT(hit.score, ply);
                 if (hit.bound == Bound::Exact || (hit.bound == Bound::Lower && s >= beta) ||
-                    (hit.bound == Bound::Upper && s <= alpha))
+                    (hit.bound == Bound::Upper && s <= alpha)) {
+                    NAGS_STAT(++stats.qttCutoffs);
                     return s;
+                }
             }
         }
 
@@ -843,6 +961,7 @@ private:
         const int originalAlpha = alpha;
         if (!inCheck) {
             stand = eval::evaluate(board);
+            NAGS_STAT(++stats.evals);
             // A TT score whose bound points the right way is a better estimate.
             if (ttHit && std::abs(hit.score) < TB_BOUND) {
                 int s = hit.score;
@@ -851,6 +970,7 @@ private:
                     stand = s;
             }
             if (stand >= beta) {
+                NAGS_STAT(++stats.qStandPat);
                 if (tt && !ttHit) tt->store(key, 0, Bound::Lower, scoreToTT(stand, ply), Move{});
                 return stand;
             }
@@ -870,9 +990,14 @@ private:
         // picker need not return them.
         for (int idx; (idx = picker.next(!inCheck)) >= 0;) {
             const Move m = picker.moveAt(idx);
-            if (!inCheck && m.promotion == Piece::None && stand + eval::capturedValue(board, m) + 200 <= alpha)
+            if (!inCheck && m.promotion == Piece::None && stand + eval::capturedValue(board, m) + 200 <= alpha) {
+                NAGS_STAT(++stats.qDelta);
                 continue; // delta pruning
-            if (!inCheck && picker.seeOfLast() < 0) continue; // losing capture
+            }
+            if (!inCheck && picker.seeOfLast() < 0) { // losing capture
+                NAGS_STAT(++stats.qSee);
+                continue;
+            }
             board.makeMove(m);
             if (board.inCheck(us)) {
                 board.unmakeMove();
@@ -887,7 +1012,10 @@ private:
                 if (score > alpha) {
                     alpha = score;
                     bestMove = m;
-                    if (alpha >= beta) break;
+                    if (alpha >= beta) {
+                        NAGS_STAT(++stats.qCutoffs);
+                        break;
+                    }
                 }
             }
         }
@@ -1071,6 +1199,17 @@ public:
 
     // Nodes of the last search or scoreRootMove call.
     uint64_t nodesSearched() const { return control.nodes.load(std::memory_order_relaxed); }
+
+    // Search statistics summed over all threads since the last reset (only
+    // counted in NAGS_STATS builds).
+    SearchStats statistics() const {
+        SearchStats total;
+        for (const auto &w : workers) total.add(w->statistics());
+        return total;
+    }
+    void resetStatistics() {
+        for (auto &w : workers) w->resetStatistics();
+    }
 
 private:
     TranspositionTable *tt;

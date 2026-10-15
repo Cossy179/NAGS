@@ -12,6 +12,12 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(NAGS_BUILD_TESTS "Build the C++ tests (run with ctest)" ON)
+# Search statistics (TT hit rates, cutoff efficiency, pruning counts) printed
+# by `bench`. For profiling builds only: off, the counters are compiled out.
+option(NAGS_STATS "Count search statistics (profiling builds)" OFF)
+if(NAGS_STATS)
+  add_compile_definitions(NAGS_STATS=1)
+endif()
 
 find_package(Threads REQUIRED)
 

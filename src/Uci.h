@@ -67,6 +67,8 @@ public:
     // One "info string" line with the static evaluation of the current
     // position (UCI command "eval").
     virtual std::string staticEvaluation() const { return "info string eval not available"; }
+    // Cost of each engine component in isolation (src/Profile.h).
+    virtual void speedtest() { send("info string speedtest not available"); }
 };
 
 // Runs the UCI loop. If argv[1] is "bench" (optionally followed by a depth),
