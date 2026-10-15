@@ -468,49 +468,23 @@ private:
         return (board.pieceBB(c, KNIGHT) | board.pieceBB(c, BISHOP) | board.pieceBB(c, ROOK) | board.pieceBB(c, QUEEN)) != 0;
     }
 
-    // Staged move ordering for one node. The moves come out in exactly the
-    // order of a stable sort by moveScore (TT move, winning/equal captures by
-    // MVV/LVA, killers, countermove, losing captures, quiet moves by history;
-    // ties in generation order), but the static exchange evaluation of the
-    // captures is only computed once they are reached (a TT move cutoff needs
-    // none) and each pick scans one stage instead of every move. Killers, the
-    // countermove and quiet scores are taken when the picker is created: the
-    // search of the earlier moves changes them.
+    // Staged move ordering for one node: TT move, winning/equal captures
+    // (MVV/LVA), killers and countermove, losing captures, quiet moves by
+    // history (ties in generation order). Moves are generated only when their
+    // stage is reached: a TT move cutoff needs no move generation at all, and
+    // quiet moves are generated and scored (with the history as it is then)
+    // only after the captures and killers.
     class MovePicker {
     public:
         MovePicker(const SearchWorker &w, const Move &ttMove, int ply, const Move &counter, const ContTable *cont1,
                    const ContTable *cont2, bool noisyOnly)
-            : w(w) {
-            const BoardT &b = w.board;
-            b.generatePseudoLegalMoves(moves, noisyOnly);
-            const bool useKillers = ply < MAX_PLY;
-            const int stm = colorIndex(b.sideToMove());
-            for (int k = 0; k < moves.size(); ++k) {
-                const Move &m = moves[k];
-                if (!ttMove.isNull() && sameMove(m, ttMove)) {
-                    ttIdx = k;
-                    continue;
-                }
-                if (eval::isNoisy(b, m)) {
-                    int s = eval::capturedValue(b, m) * 16 - eval::pieceValue(b.pieceAt(m.from)) / 16;
-                    if (m.promotion != Piece::None) s += eval::pieceValue(m.promotion) * 16;
-                    score[k] = s;
-                    good[nNoisy++] = static_cast<uint8_t>(k); // split into good/bad once reached
-                    continue;
-                }
-                if (useKillers) {
-                    if (sameMove(m, w.killers[ply][0])) { special[0] = k; continue; }
-                    if (sameMove(m, w.killers[ply][1])) { special[1] = k; continue; }
-                    if (!counter.isNull() && sameMove(m, counter)) { special[2] = k; continue; }
-                }
-                int s = w.history[stm][m.from][m.to];
-                if (cont1 || cont2) {
-                    const int piece = static_cast<int>(b.pieceAt(m.from)) - 1;
-                    if (cont1) s += (*cont1)[piece][m.to];
-                    if (cont2) s += (*cont2)[piece][m.to];
-                }
-                score[k] = s;
-                quiet[nQuiet++] = static_cast<uint8_t>(k);
+            : w(w), cont1(cont1), cont2(cont2), noisyOnly(noisyOnly) {
+            if (!ttMove.isNull() && w.board.toPseudoLegal(ttMove, tt) && (!noisyOnly || eval::isNoisy(w.board, tt)))
+                hasTt = true;
+            if (ply < MAX_PLY) {
+                special[0] = w.killers[ply][0];
+                special[1] = w.killers[ply][1];
+                special[2] = counter;
             }
         }
 
@@ -519,22 +493,34 @@ private:
         int next(bool skipLosingCaptures = false) {
             if (stage == Stage::Tt) {
                 stage = Stage::GoodCaptures;
-                if (ttIdx >= 0) return found(ttIdx, false);
+                if (hasTt) {
+                    moves.push_back(tt);
+                    return found(moves.size() - 1, false);
+                }
             }
             if (stage == Stage::GoodCaptures) {
-                if (!capturesSplit) splitCaptures();
+                if (!capturesGenerated) generateCaptures();
                 if (nGood) return found(take(good, nGood), true);
                 stage = Stage::Special;
             }
             if (stage == Stage::Special) {
-                while (specialPos < 3)
-                    if (int k = special[specialPos++]; k >= 0) return found(k, false);
+                while (specialPos < 3) {
+                    const Move &c = special[specialPos++];
+                    Move m;
+                    if (c.isNull() || isDuplicate(c, specialPos - 1) || !w.board.toPseudoLegal(c, m) ||
+                        eval::isNoisy(w.board, m))
+                        continue;
+                    emitted[specialPos - 1] = true;
+                    moves.push_back(m);
+                    return found(moves.size() - 1, false);
+                }
                 stage = Stage::LosingCaptures;
             }
             if (stage == Stage::LosingCaptures) {
                 if (nBad && !skipLosingCaptures) return found(take(bad, nBad), true);
                 stage = Stage::Quiets;
             }
+            if (!quietsGenerated) generateQuiets();
             if (nQuiet) return found(take(quiet, nQuiet), false);
             return -1;
         }
@@ -554,19 +540,54 @@ private:
             last = k;
             lastSeeKnown = seeKnown;
             if constexpr (kSearchStats)
-                lastStageIdx = k == ttIdx ? 0 : stage == Stage::GoodCaptures ? 1 : stage == Stage::Special ? 2
-                             : stage == Stage::LosingCaptures ? 3 : 4;
+                lastStageIdx = stage == Stage::GoodCaptures ? (hasTt && k == 0 ? 0 : 1)
+                             : stage == Stage::Special ? 2 : stage == Stage::LosingCaptures ? 3 : 4;
             return k;
         }
-        // Splits the captures (in generation order) by the sign of their
-        // static exchange evaluation.
-        void splitCaptures() {
-            capturesSplit = true;
-            for (int i = 0; i < nNoisy; ++i) {
-                const int k = good[i];
-                see[k] = static_cast<int16_t>(eval::see(w.board, moves[k]));
+        // Killer/countermove slot `i` repeats the TT move or an earlier slot.
+        bool isDuplicate(const Move &c, int i) const {
+            if (hasTt && sameMove(c, tt)) return true;
+            for (int j = 0; j < i; ++j)
+                if (sameMove(c, special[j])) return true;
+            return false;
+        }
+        void generateCaptures() {
+            capturesGenerated = true;
+            const BoardT &b = w.board;
+            const int start = moves.size();
+            b.generateMoves(moves, GenMode::Noisy);
+            for (int k = start; k < moves.size(); ++k) {
+                const Move &m = moves[k];
+                if (hasTt && sameMove(m, tt)) continue;
+                int s = eval::capturedValue(b, m) * 16 - eval::pieceValue(b.pieceAt(m.from)) / 16;
+                if (m.promotion != Piece::None) s += eval::pieceValue(m.promotion) * 16;
+                score[k] = s;
+                see[k] = static_cast<int16_t>(eval::see(b, m));
                 if (see[k] >= 0) good[nGood++] = static_cast<uint8_t>(k);
                 else bad[nBad++] = static_cast<uint8_t>(k);
+            }
+        }
+        void generateQuiets() {
+            quietsGenerated = true;
+            if (noisyOnly) return;
+            const BoardT &b = w.board;
+            const int stm = colorIndex(b.sideToMove());
+            const int start = moves.size();
+            b.generateMoves(moves, GenMode::Quiet);
+            for (int k = start; k < moves.size(); ++k) {
+                const Move &m = moves[k];
+                if (hasTt && sameMove(m, tt)) continue;
+                bool dup = false;
+                for (int j = 0; j < 3; ++j) dup |= emitted[j] && sameMove(m, special[j]);
+                if (dup) continue;
+                int s = w.history[stm][m.from][m.to];
+                if (cont1 || cont2) {
+                    const int piece = static_cast<int>(b.pieceAt(m.from)) - 1;
+                    if (cont1) s += (*cont1)[piece][m.to];
+                    if (cont2) s += (*cont2)[piece][m.to];
+                }
+                score[k] = s;
+                quiet[nQuiet++] = static_cast<uint8_t>(k);
             }
         }
         // Removes and returns the highest-scored entry of list[0..n), the
@@ -587,15 +608,18 @@ private:
         }
 
         const SearchWorker &w;
+        const ContTable *cont1, *cont2;
+        const bool noisyOnly;
         MoveList moves;
         int score[MoveList::kCapacity];
         int16_t see[MoveList::kCapacity];
-        // Captures: all of them in `good` until split by SEE sign.
         uint8_t good[MoveList::kCapacity], bad[MoveList::kCapacity], quiet[MoveList::kCapacity];
-        int nNoisy = 0, nGood = 0, nBad = 0, nQuiet = 0;
-        bool capturesSplit = false;
-        int ttIdx = -1;
-        int special[3] = {-1, -1, -1}; // killer 1, killer 2, countermove
+        int nGood = 0, nBad = 0, nQuiet = 0;
+        bool capturesGenerated = false, quietsGenerated = false;
+        Move tt;
+        bool hasTt = false;
+        Move special[3]; // killer 1, killer 2, countermove
+        bool emitted[3] = {false, false, false};
         int specialPos = 0;
         Stage stage = Stage::Tt;
         int last = -1;
