@@ -1014,6 +1014,11 @@ private:
         // picker need not return them.
         for (int idx; (idx = picker.next(!inCheck)) >= 0;) {
             const Move m = picker.moveAt(idx);
+            // Rook and bishop promotions only matter to avoid stalemate,
+            // which quiescence search does not detect.
+            if (!inCheck && m.promotion != Piece::None && pieceTypeOf(m.promotion) != QUEEN &&
+                pieceTypeOf(m.promotion) != KNIGHT)
+                continue;
             if (!inCheck && m.promotion == Piece::None && stand + eval::capturedValue(board, m) + 200 <= alpha) {
                 NAGS_STAT(++stats.qDelta);
                 continue; // delta pruning
