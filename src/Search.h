@@ -280,6 +280,10 @@ public:
                 return false;
             }
             if (score <= alpha && alpha > -INF_SCORE) {
+                // A fail-high earlier in this iteration was not confirmed:
+                // forget it, so an abort now falls back to the last
+                // completed iteration.
+                out = IterationResult{};
                 beta = (alpha + beta) / 2;
                 window *= 2;
                 alpha = window >= 1000 ? -INF_SCORE : std::max(-INF_SCORE, score - window);
@@ -710,7 +714,9 @@ private:
                 NAGS_STAT(++stats.ttHits);
                 ttHit = true;
                 ttMove = hit.move;
-                if (!isPv && hit.depth >= depth) {
+                // The key ignores the fifty-move counter: close to the draw a
+                // stored score may no longer hold.
+                if (!isPv && hit.depth >= depth && board.getHalfmoveClock() < 90) {
                     int s = scoreFromTT(hit.score, ply);
                     if (hit.bound == Bound::Exact || (hit.bound == Bound::Lower && s >= beta) ||
                         (hit.bound == Bound::Upper && s <= alpha)) {
@@ -958,6 +964,9 @@ private:
         NAGS_STAT(++stats.qnodes);
         selDepth = std::max(selDepth, ply);
         if (ply >= MAX_PLY - 1) return eval::evaluate(board);
+        // A capture into bare kings or a lone minor piece is a dead draw
+        // (the network has never seen such positions).
+        if (board.isInsufficientMaterial()) return 0;
 
         const bool isPv = beta - alpha > 1;
         const uint64_t key = board.zobrist();
@@ -969,7 +978,7 @@ private:
             NAGS_STAT(++stats.qttHits);
             ttHit = true;
             ttMove = hit.move;
-            if (!isPv) {
+            if (!isPv && board.getHalfmoveClock() < 90) {
                 int s = scoreFromTT(hit.score, ply);
                 if (hit.bound == Bound::Exact || (hit.bound == Bound::Lower && s >= beta) ||
                     (hit.bound == Bound::Upper && s <= alpha)) {
@@ -1022,13 +1031,16 @@ private:
                 NAGS_STAT(++stats.qSee);
                 continue;
             }
+            // A quiet check evasion can complete a repetition or the
+            // fifty-move rule (captures and promotions cannot).
+            const bool quietEvasion = inCheck && !eval::isNoisy(board, m);
             board.makeMove(m);
             if (board.inCheck(us)) {
                 board.unmakeMove();
                 continue;
             }
             ++legal;
-            int score = -quiescence(-beta, -alpha, ply + 1);
+            int score = quietEvasion && board.isDraw() ? 0 : -quiescence(-beta, -alpha, ply + 1);
             board.unmakeMove();
             if (aborted) return 0;
             if (score > best) {
