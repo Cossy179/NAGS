@@ -261,6 +261,9 @@ public:
         for (auto &side : history) for (auto &from : side) for (auto &v : from) v = 0;
         for (auto &piece : counterMoves) for (auto &mv : piece) mv = Move{};
         for (int i = 0; i < 12 * 64; ++i) for (auto &p : contHist[i]) for (auto &v : p) v = 0;
+        std::fill(corrPawn.get(), corrPawn.get() + 2 * kCorrSize, int16_t{0});
+        std::fill(corrNonPawn.get(), corrNonPawn.get() + 4 * kCorrSize, int16_t{0});
+        std::fill(corrCont.get(), corrCont.get() + 2 * 12 * 64, int16_t{0});
     }
 
     // Searches the root to `depth` (with an aspiration window around
@@ -363,6 +366,55 @@ private:
         int to = 0;
     };
     PlyMove plyMoves[MAX_PLY + 1]; // the move played at each ply
+
+    // Correction history: running averages of how far the static evaluation
+    // was from the search result in positions with the same pawn structure,
+    // the same pieces of one side, or after the same previous move (per
+    // side to move). Their weighted mean corrects the static evaluation
+    // used for pruning and stand-pat. Entries are centipawns x kCorrGrain.
+    static constexpr int kCorrSize = 16384, kCorrGrain = 64, kCorrMaxCp = 256;
+    std::unique_ptr<int16_t[]> corrPawn = std::make_unique<int16_t[]>(2 * kCorrSize);       // [stm][pawn key]
+    std::unique_ptr<int16_t[]> corrNonPawn = std::make_unique<int16_t[]>(4 * kCorrSize);    // [stm][colour][key]
+    std::unique_ptr<int16_t[]> corrCont = std::make_unique<int16_t[]>(2 * 12 * 64);         // [stm][prev piece][prev to]
+    struct CorrSlots {
+        int16_t *pawn, *white, *black, *cont; // cont may be null
+    };
+    static uint64_t mix(uint64_t x) {
+        x ^= x >> 33;
+        x *= 0xff51afd7ed558ccdULL;
+        x ^= x >> 33;
+        x *= 0xc4ceb9fe1a85ec53ULL;
+        return x ^ (x >> 33);
+    }
+    CorrSlots corrSlots(int ply) const {
+        const int stm = colorIndex(board.sideToMove());
+        const uint64_t pawns = mix(board.pieceBB(Color::White, PAWN) ^ mix(board.pieceBB(Color::Black, PAWN)));
+        uint64_t side[2];
+        for (int c = 0; c < 2; ++c) {
+            uint64_t h = 0;
+            for (int t = KNIGHT; t <= KING; ++t) h = mix(h ^ board.pieceBB(static_cast<Color>(c), t) ^ static_cast<uint64_t>(t));
+            side[c] = h;
+        }
+        CorrSlots c{&corrPawn[stm * kCorrSize + (pawns & (kCorrSize - 1))],
+                    &corrNonPawn[(stm * 2 + 0) * kCorrSize + (side[0] & (kCorrSize - 1))],
+                    &corrNonPawn[(stm * 2 + 1) * kCorrSize + (side[1] & (kCorrSize - 1))], nullptr};
+        if (ply >= 1 && plyMoves[ply - 1].piece >= 0)
+            c.cont = &corrCont[(stm * 12 + plyMoves[ply - 1].piece) * 64 + plyMoves[ply - 1].to];
+        return c;
+    }
+    static int correction(const CorrSlots &c) {
+        int sum = 2 * *c.pawn + *c.white + *c.black, weight = 4;
+        if (c.cont) sum += 2 * *c.cont, weight += 2;
+        return sum / (weight * kCorrGrain);
+    }
+    // Moves every slot towards the search result's distance from the raw
+    // static evaluation, faster for deeper results.
+    static void updateCorrection(const CorrSlots &c, int diffCp, int depth) {
+        const int target = std::clamp(diffCp, -kCorrMaxCp, kCorrMaxCp) * kCorrGrain;
+        const int w = std::min(depth + 1, 16);
+        for (int16_t *e : {c.pawn, c.white, c.black, c.cont})
+            if (e) *e = static_cast<int16_t>((*e * (256 - w) + target * w) / 256);
+    }
     // Static evaluation at each ply (kNoEval when in check), for "improving":
     // whether the side to move stands better than two plies earlier.
     static constexpr int kNoEval = -1000000;
@@ -749,7 +801,10 @@ private:
 
         // Static evaluation for the pruning decisions below (a singular
         // extension search reuses its node's).
-        const int staticEval = inCheck ? kNoEval : excluding ? evalStack[ply] : eval::evaluate(board);
+        const CorrSlots corr = corrSlots(ply);
+        const int rawEval = inCheck || excluding ? kNoEval : eval::evaluate(board);
+        const int staticEval = inCheck ? kNoEval : excluding ? evalStack[ply]
+                                                 : std::clamp(rawEval + correction(corr), -eval::kEvalLimit, eval::kEvalLimit);
         NAGS_STAT(if (!inCheck && !excluding) ++stats.evals);
         evalStack[ply] = staticEval;
         const bool improving = !inCheck && (ply < 2 || evalStack[ply - 2] == kNoEval || staticEval > evalStack[ply - 2]);
@@ -946,6 +1001,12 @@ private:
             best = tbCeiling;
             bound = Bound::Upper;
         }
+        // The search result corrects later static evaluations, when it is a
+        // usable signal: not in check, a quiet best move (captures change the
+        // material the evaluation saw), and a bound on the right side of it.
+        if (!inCheck && !excluding && std::abs(best) < TB_BOUND && (bestMove.isNull() || !eval::isNoisy(board, bestMove)) &&
+            !(bound == Bound::Lower && best <= staticEval) && !(bound == Bound::Upper && best >= staticEval))
+            updateCorrection(corr, best - rawEval, depth);
         if (tt && !excluding) tt->store(key, depth, bound, scoreToTT(best, ply), bestMove);
         return best;
     }
@@ -984,7 +1045,10 @@ private:
         int stand = 0;
         const int originalAlpha = alpha;
         if (!inCheck) {
-            stand = eval::evaluate(board);
+            {
+                const CorrSlots corr = corrSlots(0); // without the previous-move slot (not tracked in quiescence)
+                stand = std::clamp(eval::evaluate(board) + correction(corr), -eval::kEvalLimit, eval::kEvalLimit);
+            }
             NAGS_STAT(++stats.evals);
             // A TT score whose bound points the right way is a better estimate.
             if (ttHit && std::abs(hit.score) < TB_BOUND) {
