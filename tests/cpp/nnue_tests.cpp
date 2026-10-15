@@ -197,6 +197,33 @@ int main() {
     SearchResult r = s.search(b, limits, stop, nullptr);
     CHECK(moveToUciString(r.bestMove) == "f3f7" && r.score == MATE_SCORE - 1, "NNUE search missed mate in 1 (%s)", moveToUciString(r.bestMove).c_str());
 
+    // A network whose output is far beyond any real evaluation (nothing in
+    // the format bounds it) is clamped below the tablebase and mate scores,
+    // so the search never mistakes it for a proven result.
+    {
+        const char *path = "nnue_test_huge.nnue";
+        std::ofstream out(path, std::ios::binary);
+        out.write("NAGSNNUE", 8);
+        auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) out.put(static_cast<char>((v >> (8 * i)) & 0xFF)); };
+        u32(1);
+        u32(nnue::kHidden);
+        for (int i = 0; i < (nnue::kFeatures + 1 + 2) * nnue::kHidden; ++i) out.put(0), out.put(0); // weights, biases
+        u32(static_cast<uint32_t>(2000000000)); // output bias: about +49 million centipawns
+        out.close();
+        std::string error;
+        CHECK(nnue::load(path, error), "loading the huge network failed: %s", error.c_str());
+        FastBoard h;
+        CHECK(eval::evaluate(h) == eval::kEvalLimit, "evaluation not clamped: %d", eval::evaluate(h));
+        TranspositionTable tt2(4);
+        Searcher<FastBoard> s2(&tt2);
+        SearchLimits l2;
+        l2.depth = 5;
+        SearchResult r2 = s2.search(h, l2, stop, nullptr);
+        CHECK(std::abs(r2.score) < TB_BOUND, "a clamped evaluation became a proven score: %d", r2.score);
+        nnue::useEmbedded();
+        std::remove(path);
+    }
+
     // Switching off restores the classical evaluation.
     nnue::setEnabled(false);
     CHECK(nnue::network() == nullptr, "NNUE still active after disabling");

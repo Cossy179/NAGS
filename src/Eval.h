@@ -138,12 +138,18 @@ void materialAndPhase(const BoardT &b, int &score, int &phase) {
     }
 }
 
+// Largest evaluation magnitude. Scores beyond it are reserved for tablebase
+// results and mates (Search.h checks this), and the transposition table
+// stores scores in 16 bits; a network's output is not bounded by its format.
+constexpr int kEvalLimit = 30000;
+
 // Score in centipawns from the side to move's point of view: the NNUE
 // network when one is active (FastBoard), otherwise the hand-written terms.
 template <class BoardT>
 int evaluate(const BoardT &b) {
     if constexpr (HasNnue<BoardT>::value) {
-        if (nnue::network()) return nnue::evaluate(b.accumulator(), b.sideToMove(), b.occupancy());
+        if (nnue::network())
+            return std::clamp(nnue::evaluate(b.accumulator(), b.sideToMove(), b.occupancy()), -kEvalLimit, kEvalLimit);
     }
     int score, phase; // phase: 24 = all pieces on the board, 0 = bare kings and pawns
     if constexpr (HasIncrementalEval<BoardT>::value) {

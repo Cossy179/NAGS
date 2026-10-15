@@ -32,6 +32,8 @@
 #include <thread>
 #include <vector>
 
+static_assert(eval::kEvalLimit < TB_BOUND, "evaluations must stay below the tablebase and mate scores");
+
 struct SearchLimits {
     int depth = 0;        // 0 = no depth limit
     uint64_t nodes = 0;   // 0 = no node limit
@@ -666,7 +668,7 @@ private:
             int score = -negamax(depth - 1 - reduction, -beta, -beta + 1, ply + 1, false);
             board.unmakeNullMove();
             if (aborted) return 0;
-            if (score >= beta) return score >= MATE_BOUND ? beta : score; // don't trust unproven mates
+            if (score >= beta) return score >= TB_BOUND ? beta : score; // don't trust unproven mates or TB wins
         }
 
         // Pseudo-legal moves; legality is checked only for moves actually
