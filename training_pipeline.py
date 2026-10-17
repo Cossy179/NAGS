@@ -60,12 +60,14 @@ except Exception as e:  # pragma: no cover
     raise RuntimeError("torch_geometric is required.") from e
 
 from chess_graph import FEATURE_DIM, ChessGraph
-from distillation import DistillDataset, distill_losses, label_board, source_result, valid_row
-from gnn_evaluator import POLICY_DIM, GNNEvaluator, load_checkpoint, move_index, save_checkpoint
-from gnn_v3 import RelationalGNNEvaluator, load_checkpoint_v3, save_checkpoint_v3
+from gnn_evaluator import CHECKPOINT_FORMAT, POLICY_DIM, GNNEvaluator, load_checkpoint, move_index, save_checkpoint
 from meta_learner import DELTA_KEYS, MetaLearner
 
 logger = logging.getLogger("nags.training")
+
+# The v3 GNN modules (distillation, gnn_v3, relational_graph, policy_encoding)
+# are imported only by the steps that use them ('label', 'distill'), so the
+# legacy steps and their services never depend on the v3 code.
 
 ROOT = Path(__file__).resolve().parent
 
@@ -274,6 +276,26 @@ def read_jsonl(path: Path, limit: Optional[int] = None) -> List[Dict[str, Any]]:
                 out.append(json.loads(line))
                 if limit and len(out) >= limit:
                     break
+    return out
+
+
+def read_jsonl_settled(path: Path) -> List[Dict[str, Any]]:
+    """read_jsonl for a file another process may still be writing (the legacy
+    steps write data/*.jsonl line by line): a last line that does not parse
+    (cut off mid-write) is skipped."""
+    out = []
+    with open(path) as f:
+        lines = f.readlines()
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            if i != len(lines) - 1:
+                raise
+            logger.info("%s: skipped an incomplete last line", path)
     return out
 
 
@@ -614,9 +636,9 @@ class TrainingPipeline:
         as it was for the running training; for the v3 network the recommended
         objective is search-policy distillation (steps 'label' + 'distill').
         """
-        logger.warning("ppo: the self-play moves come from the alpha-beta search, not from the network's "
-                       "policy, so this is not an on-policy PPO update; 'distill' is the recommended objective "
-                       "(see ppo_training's docstring)")
+        logger.info("ppo: the self-play moves come from the alpha-beta search, not from the network's "
+                    "policy, so this is not an on-policy PPO update; 'distill' is the recommended objective "
+                    "(see ppo_training's docstring)")
         if not self_play_path.exists():
             raise FileNotFoundError(f"Self-play data not found: {self_play_path}")
         samples = read_jsonl(self_play_path)
@@ -745,12 +767,23 @@ class TrainingPipeline:
 
     # -- promotion / notifications ------------------------------------------------
     def promote_model(self, model_path: Path, elo: float, margin: float) -> None:
-        shutil.copy2(model_path, self.production_path)
+        # Only a 'nags-gnn-v2' checkpoint may become production_model.pth: the
+        # legacy steps (self-play, PPO) and older code load that file as v2. A
+        # v3 network that passes goes to its own slot.
+        target = self.production_path
+        with open(model_path, "rb") as fh:
+            payload = torch.load(fh, map_location="cpu", weights_only=False)
+        fmt = payload.get("format") if isinstance(payload, dict) else CHECKPOINT_FORMAT
+        if fmt == "nags-gnn-v3":  # gnn_v3.CHECKPOINT_FORMAT_V3 (not imported: legacy steps must not need gnn_v3)
+            target = self.model_dir / "production_model_v3.pth"
+            logger.info("%s is a %s checkpoint: promoted to %s, not to %s", model_path, fmt, target,
+                        self.production_path)
+        shutil.copy2(model_path, target)
         record = {"timestamp": datetime.now().isoformat(), "model_path": str(model_path), "elo_gain": elo,
-                  "elo_margin_95": margin, "promoted_to": str(self.production_path)}
+                  "elo_margin_95": margin, "promoted_to": str(target), "format": fmt}
         with open(self.logs_dir / "promotions.jsonl", "a") as f:
             f.write(json.dumps(record) + "\n")
-        logger.info("Model promoted to %s", self.production_path)
+        logger.info("Model promoted to %s", target)
         self.notify_team(f"New NAGS model promoted: {elo:+.0f} ± {margin:.0f} Elo vs baseline ({model_path.name})")
 
     def notify_team(self, message: str) -> None:
@@ -854,6 +887,7 @@ class TrainingPipeline:
         MultiPV top-k with exact scores to data/distill_<stamp>.jsonl, flushing
         as it goes so an interrupted run keeps what it labelled.
         """
+        from distillation import label_board, source_result
         params = self.config["distill_params"]
         paths = self.label_sources(sources)
         if not paths:
@@ -864,7 +898,7 @@ class TrainingPipeline:
         for path in paths:
             if not path.exists():
                 raise FileNotFoundError(f"Label source not found: {path}")
-            for row in read_jsonl(path):
+            for row in read_jsonl_settled(path):
                 fen = row.get("fen")
                 if not isinstance(fen, str):
                     continue
@@ -922,7 +956,8 @@ class TrainingPipeline:
         return out_path
 
     # -- v3 step 'distill': search-policy distillation ----------------------------
-    def new_v3_model(self) -> RelationalGNNEvaluator:
+    def new_v3_model(self) -> "RelationalGNNEvaluator":
+        from gnn_v3 import RelationalGNNEvaluator
         return RelationalGNNEvaluator(**self.config["distill_params"]["model"], device=self.device)
 
     def distill_training(self, dataset_path: Optional[Path] = None, model_path: Optional[Path] = None) -> Path:
@@ -935,6 +970,8 @@ class TrainingPipeline:
         (split by source game) reports policy NLL, top-1 agreement with the
         search's best move, WDL NLL and value MSE.
         """
+        from distillation import DistillDataset, distill_losses, valid_row
+        from gnn_v3 import load_checkpoint_v3, save_checkpoint_v3
         params = self.config["distill_params"]
         dataset_path = dataset_path or self.latest("distill_*.jsonl", self.data_dir)
         if dataset_path is None or not Path(dataset_path).exists():
@@ -1023,7 +1060,8 @@ class TrainingPipeline:
         return out
 
     @torch.no_grad()
-    def _distill_metrics(self, model: RelationalGNNEvaluator, loader: DataLoader) -> Dict[str, float]:
+    def _distill_metrics(self, model: "RelationalGNNEvaluator", loader: DataLoader) -> Dict[str, float]:
+        from distillation import distill_losses
         was_training = model.training
         model.eval()
         sums: Dict[str, float] = {}
