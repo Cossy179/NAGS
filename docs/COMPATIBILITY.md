@@ -89,7 +89,8 @@ is 4228. Any change to the v3 graph features or relations needs a new
 v3 checkpoints in use keep their meaning (the loader refuses versions it
 does not know). If `gnn_v3.py` cannot be imported, `rpc_server.py` logs it
 and serves v2 checkpoints through its own legacy path. `promote` writes a
-v3 network to `models/production_model_v3.pth`, never over the v2
+v3 network to `models/production_v3.pth` (a name the legacy `*_model_*.pth`
+lookups never match), never over the v2
 `production_model.pth`; `supervised_legal_mask` (default off) is the only
 change to the legacy training steps, and it is opt-in.
 

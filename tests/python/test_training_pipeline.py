@@ -141,6 +141,57 @@ def test_promotion_keeps_v3_networks_out_of_the_v2_slot(tmp_path):
     assert pipe.production_path.read_bytes() == v2.read_bytes()
     pipe.promote_model(v3, 20.0, 10.0)
     assert pipe.production_path.read_bytes() == v2.read_bytes()  # the v2 slot is untouched
-    assert (pipe.model_dir / "production_model_v3.pth").read_bytes() == v3.read_bytes()
+    assert pipe.production_v3_path.read_bytes() == v3.read_bytes()
+    # The legacy lookups of the newest '*_model_*.pth' never pick the v3 network up.
+    pipe.production_path.unlink()
+    assert pipe.latest("*_model_*.pth") is None and pipe.current_model() is None
     records = [json.loads(l) for l in (pipe.logs_dir / "promotions.jsonl").read_text().splitlines()]
     assert [r["format"] for r in records] == ["nags-gnn-v2", "nags-gnn-v3"]
+
+
+def test_v3_candidates_play_the_promoted_v3_network(tmp_path, monkeypatch):
+    """With baseline 'production', a v3 candidate plays the promoted v3 network once there is one;
+    v2 candidates (and v3 ones before any v3 promotion) play the v2 production network as before."""
+    from gnn_evaluator import GNNEvaluator, save_checkpoint
+    from gnn_v3 import RelationalGNNEvaluator, save_checkpoint_v3
+
+    pipe = tp.TrainingPipeline(tiny_config(tmp_path, baseline_engine="production",
+                                           evaluation={"num_games": 2, "time_control": "1+0.1"}))
+    served = []
+
+    class FakeService:
+        def __init__(self, script, args, log_path, startup_timeout=180.0):
+            served.append(args[args.index("--model") + 1])
+            self.port = 0
+
+        def close(self):
+            pass
+
+    class FakeEngine:
+        def configure(self, options):
+            pass
+
+        def quit(self):
+            pass
+
+    monkeypatch.setattr(tp, "ServiceProcess", FakeService)
+    monkeypatch.setattr(pipe, "open_nags", lambda *a, **k: FakeEngine())
+    monkeypatch.setattr(pipe, "play_game", lambda *a, **k: ("1/2-1/2", None, None))
+    cpu = torch.device("cpu")
+    v2, v3, v3b = tmp_path / "c_v2.pth", tmp_path / "c_v3.pth", tmp_path / "c_v3b.pth"
+    save_checkpoint(GNNEvaluator(hidden_dim=16, gnn_layers=1, policy_layers=1, value_layers=1, device=cpu), str(v2))
+    for path in (v3, v3b):
+        save_checkpoint_v3(RelationalGNNEvaluator(hidden_dim=16, layers=1, num_bases=2, device=cpu), str(path))
+    pipe.notify_team = lambda message: None
+    pipe.promote_model(v2, 20.0, 10.0)
+    for candidate in (v2, v3):
+        served.clear()
+        pipe.evaluate_against_baseline(candidate)
+        assert served == [str(candidate), str(pipe.production_path)]
+    pipe.promote_model(v3, 20.0, 10.0)
+    served.clear()
+    pipe.evaluate_against_baseline(v3b)
+    assert served == [str(v3b), str(pipe.production_v3_path)]
+    served.clear()
+    pipe.evaluate_against_baseline(v2)
+    assert served == [str(v2), str(pipe.production_path)]

@@ -299,6 +299,17 @@ def read_jsonl_settled(path: Path) -> List[Dict[str, Any]]:
     return out
 
 
+CHECKPOINT_FORMAT_V3 = "nags-gnn-v3"  # gnn_v3.CHECKPOINT_FORMAT_V3; not imported: legacy steps must not need gnn_v3
+
+
+def checkpoint_format(path: Path) -> str:
+    """The 'format' string of a GNN checkpoint ('nags-gnn-v2' when it has none)."""
+    with open(path, "rb") as fh:
+        payload = torch.load(fh, map_location="cpu", weights_only=False)
+    fmt = payload.get("format") if isinstance(payload, dict) else None
+    return fmt if isinstance(fmt, str) else CHECKPOINT_FORMAT
+
+
 def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> int:
     n = 0
     with open(path, "w") as f:
@@ -324,6 +335,9 @@ class TrainingPipeline:
         for d in (self.data_dir, self.model_dir, self.logs_dir):
             d.mkdir(parents=True, exist_ok=True)
         self.production_path = self.model_dir / "production_model.pth"
+        # The promoted 'nags-gnn-v3' network: a name the legacy '*_model_*.pth'
+        # lookups (current_model, the 'evaluate' default) never match.
+        self.production_v3_path = self.model_dir / "production_v3.pth"
         self.meta_model_path = self.model_dir / "meta_model.pth"
         self.meta_data_path = self.data_dir / "meta_training_data.json"
         logger.info("Using device: %s", self.device)
@@ -716,9 +730,14 @@ class TrainingPipeline:
             cand_rpc = ServiceProcess("rpc_server.py", ["--model", str(model_path), *mc], self.logs_dir / "eval_candidate_rpc.log")
             services.append(cand_rpc)
             candidate = self.open_nags(cand_rpc.port, None)
-            if baseline == "production" and self.production_path.exists() and \
-                    self.production_path.resolve() != Path(model_path).resolve():
-                base_rpc = ServiceProcess("rpc_server.py", ["--model", str(self.production_path), *mc],
+            # A v3 candidate plays the promoted v3 network once there is one
+            # (else the v2 production, as any candidate does).
+            production = self.production_path
+            if self.production_v3_path.exists() and checkpoint_format(model_path) == CHECKPOINT_FORMAT_V3:
+                production = self.production_v3_path
+            if baseline == "production" and production.exists() and \
+                    production.resolve() != Path(model_path).resolve():
+                base_rpc = ServiceProcess("rpc_server.py", ["--model", str(production), *mc],
                                           self.logs_dir / "eval_baseline_rpc.log")
                 services.append(base_rpc)
                 opponent = self.open_nags(base_rpc.port, None)
@@ -771,11 +790,9 @@ class TrainingPipeline:
         # legacy steps (self-play, PPO) and older code load that file as v2. A
         # v3 network that passes goes to its own slot.
         target = self.production_path
-        with open(model_path, "rb") as fh:
-            payload = torch.load(fh, map_location="cpu", weights_only=False)
-        fmt = payload.get("format") if isinstance(payload, dict) else CHECKPOINT_FORMAT
-        if fmt == "nags-gnn-v3":  # gnn_v3.CHECKPOINT_FORMAT_V3 (not imported: legacy steps must not need gnn_v3)
-            target = self.model_dir / "production_model_v3.pth"
+        fmt = checkpoint_format(model_path)
+        if fmt == CHECKPOINT_FORMAT_V3:
+            target = self.production_v3_path
             logger.info("%s is a %s checkpoint: promoted to %s, not to %s", model_path, fmt, target,
                         self.production_path)
         shutil.copy2(model_path, target)
