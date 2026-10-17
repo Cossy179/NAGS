@@ -19,10 +19,15 @@ equal the build's `NAGS_NNUE_HIDDEN`, default 256), then:
 | 1 | 16 bytes | one output layer |
 | 2 | 20 bytes | uint32 output buckets B (1-8) |
 | 3 | 92 bytes | uint32 B, uint32 king buckets K (1-32), uint32 flags (bit 0 SCReLU, bit 1 left-right mirroring), uint8 layout[64] |
+| 4 (experimental) | 100 bytes | as 3, flag bit 2 pairwise inputs, then uint32 L1, uint32 L2 (1-32); after the feature transformer a hidden stack per bucket instead of the output layer (`tools/nnue/train_v4.py`) |
 
 Body: int16 feature weights [K][768][H], int16 feature bias [H], int16
 output weights [B][2H] (side to move's half first), int32 output bias [B].
-The file size must be exact.
+The file size must be exact. Version 4 has its own trainer and reference
+(`train_v4.py`); `train.py` and `read_net` refuse it, and loading it never
+changes how a version 1-3 file loaded afterwards evaluates
+(`test_nnue_v4.py`). Its format is fixed from the first network trained
+with it, like the others.
 
 Fixed forever for versions 1-3: QA = 255, QB = 64, SCALE = 400; feature =
 own/opponent × 384 + type (P N B R Q K) × 64 + square (a1 = 0; `^56` for

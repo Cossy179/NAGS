@@ -113,9 +113,52 @@ stack and the AVX2 kernels).
 
 Checks: `nnue_tests` (incremental accumulators equal recomputed ones through
 random games, colour-mirrored positions evaluate the same, the search runs
-on a network) and `tests/python/test_nnue.py` (features, export, and exact
+on a network), `tests/python/test_nnue.py` (features, export, and exact
 agreement between the engine's `eval` and the trainer's integer reference
-`quantized_eval`).
+`quantized_eval`) and `tests/python/test_nnue_v4.py` (the same for format
+version 4, through castling, promotions and en passant).
+
+## 4. Experimental: format version 4 (a hidden stack)
+
+`tools/nnue/train_v4.py` trains, and the engine reads, a fourth format next
+to versions 1-3 (which are unchanged: `docs/COMPATIBILITY.md`). It keeps
+everything up to the accumulators (features, king buckets, mirroring, the
+feature transformer and its quantization), so the incremental updates are
+the same code, and replaces the single output layer by two small hidden
+layers per output bucket:
+
+    accumulators -> inputs (2H clipped values, their squares with
+    --activation screlu, or H pairwise products with --activation pairwise)
+    -> L1 (--l1, default 16) -> L2 (--l2, default 32) -> 1
+
+all in integers (the file format and the exact arithmetic are described at
+the top of `train_v4.py`; `quantized_eval` there is the reference the
+engine matches exactly). Nothing uses version 4 unless such a file is
+loaded with `EvalFile`, and `train.py`, its checkpoints and `run_round.py`
+are not involved.
+
+Its cost is the price of a deeper network. Most inputs are zero after the
+clipped ReLU, so the engine's AVX2 code visits only the nonzero pairs of
+inputs of each layer. With untrained H = 256, 8-bucket, 4-king-bucket
+networks (loaded machine, minimum of 6 `speedtest` runs):
+
+| Network | `evaluate` | `go nodes 1500000` from a middlegame |
+|---------|-----------:|-------------------------------------:|
+| version 3, embedded network 7 | 33 ns | 1.78M nodes/s |
+| version 4, pairwise, 16-32 | 117 ns | 1.41M nodes/s (−21%) |
+| version 4, clipped ReLU, 16-32 | 241 ns | 1.32M nodes/s (−26%) |
+
+(A trained network's inputs are usually sparser, so faster.) The 512-wide
+network above lost 48 Elo with a 25% speed loss, so a version 4 network
+must buy more than its speed costs. Test it as any design: train it and a
+version 3 network on the same data with the same epochs and settings, then
+an SPRT between the two engines at 3+0.03 (`tools/sprt.py`, each engine
+with its `EvalFile`); validation losses alone do not decide it.
+
+```bash
+python tools/nnue/train_v4.py --data "data/*.bin" --epochs 20 --buckets 8 \
+    --king-buckets 4 --activation pairwise --out nets/v4.nnue
+```
 
 ## Running it on your own machine (GPU training)
 
