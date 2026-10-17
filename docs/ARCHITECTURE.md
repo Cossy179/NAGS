@@ -298,10 +298,22 @@ torch-scatter. Heads:
   expected score.
 
 `evaluate()` returns what the v2 evaluator returns, with the same meaning:
-policy probabilities over all entries (here 4228), the value from the side to
-move's view in [−1, 1], and the uncertainty as the standard deviation of the
-value over `mc_samples` Monte-Carlo dropout samples of the WDL head (not the
-WDL entropy, which is also high in quiet drawn positions).
+policy probabilities over all entries (here 4228; with the legal masks that
+`GNNAdapterV3.build_batch` attaches, as the server does, all of the mass is
+on legal moves), the value from the side to move's view in [−1, 1], and the
+uncertainty as the standard deviation of the value over `mc_samples`
+Monte-Carlo dropout samples of the WDL head (not the WDL entropy, which is
+also high in quiet drawn positions).
+
+The value scale differs from v2's. A distilled v3 value is P(win) − P(loss)
+≈ 2σ(s/400) − 1 = tanh(s/800) for a search score s, while v2's head is
+trained towards game results. The engine uses the value only inside its MCTS
+tree and converts it to centipawns, with 400·atanh(v), only for the
+`info string` line, so a v3 network's printed MCTS score is about half the
+search score; the search is unaffected. The meta-learner's `uncertainty`
+input comes from the served network, so a meta-learner trained alongside a
+v2 network must be retrained before it is used with a v3 one (it is off by
+default).
 
 ### Checkpoints and serving
 
@@ -342,9 +354,14 @@ every line with a full window, so the k scores are exact for that search.
   (log-softmax restricted to the legal mask). The target is
   `softmax(score / T)` (T = `temperature_cp`, 50 cp) over the k scored
   moves, with mates mapped to large but finite scores (mate in n → 3000 −
-  10·(n − 1), beyond every clipped cp score), and zero mass on unscored
-  moves: they are only bounded above by the k-th score, so no value can be
-  given to them.
+  10·(n − 1), beyond every clipped cp score). The unscored moves are only
+  known to score at most the k-th score, so none of them can be given a
+  value of its own, but together they are not worthless either: they share
+  one censored "rest" bucket of weight `rest_mass_scale` (0.5) × their
+  number × exp((k-th score − best)/T), and the loss for it is
+  −p_rest · log Σ_{unscored} π(m), so the network decides how to spread
+  that mass among them. With `rest_mass_scale` 0 this is the plain target
+  over the k moves.
 * **Value:** cross-entropy of the WDL head against a WDL target from the best
   line's score s with a logistic model:
   `P(win) = σ((s − a)/b)`, `P(loss) = σ((−s − a)/b)`, `P(draw) = 1 − P(win) − P(loss)`,
