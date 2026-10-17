@@ -272,6 +272,7 @@ public:
         int window = (depth >= 5 && std::abs(prevScore) < MATE_BOUND) ? 25 : INF_SCORE;
         int alpha = window >= INF_SCORE ? -INF_SCORE : std::max(-INF_SCORE, prevScore - window);
         int beta = window >= INF_SCORE ? INF_SCORE : std::min(INF_SCORE, prevScore + window);
+        const Move previousBest = rootMoves.front(); // the last completed iteration's best move
         for (;;) {
             IterationResult attempt;
             int score = rootSearch(depth, alpha, beta, attempt);
@@ -281,9 +282,12 @@ public:
             }
             if (score <= alpha && alpha > -INF_SCORE) {
                 // A fail-high earlier in this iteration was not confirmed:
-                // forget it, so an abort now falls back to the last
-                // completed iteration.
+                // forget it and search the last completed iteration's best
+                // move first again, so an abort now falls back to it (the
+                // move searched first beats the lowered window and would
+                // count as an improvement).
                 out = IterationResult{};
+                preferRootMove(previousBest);
                 beta = (alpha + beta) / 2;
                 window *= 2;
                 alpha = window >= 1000 ? -INF_SCORE : std::max(-INF_SCORE, score - window);
@@ -995,8 +999,9 @@ private:
         if (!inCheck) {
             stand = eval::evaluate(board);
             NAGS_STAT(++stats.evals);
-            // A TT score whose bound points the right way is a better estimate.
-            if (ttHit && std::abs(hit.score) < TB_BOUND) {
+            // A TT score whose bound points the right way is a better estimate
+            // (not close to the fifty-move draw, as for the cutoffs above).
+            if (ttHit && std::abs(hit.score) < TB_BOUND && board.getHalfmoveClock() < 90) {
                 int s = hit.score;
                 if (hit.bound == Bound::Exact || (hit.bound == Bound::Lower && s > stand) ||
                     (hit.bound == Bound::Upper && s < stand))
