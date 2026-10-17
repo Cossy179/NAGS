@@ -76,6 +76,14 @@ covers move generation order and the opening playouts).
 * `nags` reports MCTS simulations per second and the round trips to
   `rpc_server.py` (count, failures, total/mean/maximum wait) in its
   `info string nags` line.
+* `tools/search_benefit.py`: what more search buys, per decision. Each
+  sample position is searched with node budgets N, 2N, 4N, ... and each
+  chosen move is scored by a deep reference search; it reports how often
+  each budget's move differs from the reference's, the value it loses, and
+  how often doubling the budget changes the move. Time-management changes
+  (and any learned time allocation) should be judged on this per-move
+  measure and then by SPRT, not by game results credited to every move of
+  a game.
 
 ## 3. Strength: SPRT matches with `tools/sprt.py`
 
