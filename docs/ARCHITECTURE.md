@@ -410,7 +410,7 @@ request.
 
 ### What the v3 network and distillation buy (move priors and values)
 
-`tools/gnn_compare.py` trains the network ways on the same positions and
+`tools/gnn_compare.py` trains the networks in several ways on the same positions and
 compares them on held-out games. One run (2026-10-17): 300 `nags_enhanced`
 self-play games at 2000 nodes per move, 4000 positions labelled with
 MultiPV 4 at 15000 nodes, 3544 for training and 456 held out (30 whole
