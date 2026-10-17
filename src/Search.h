@@ -689,7 +689,11 @@ private:
     // Searches root moves [first, end) (MultiPV skips the lines already found).
     int rootSearch(int depth, int alpha, int beta, IterationResult &out, size_t first = 0) {
         pvLength[0] = 0;
-        evalStack[0] = board.inCheck() ? kNoEval : eval::evaluate(board);
+        // Corrected like every other node's, so that "improving" at ply 2
+        // compares like with like.
+        evalStack[0] = board.inCheck() ? kNoEval
+                                       : std::clamp(eval::evaluate(board) + correction(corrSlots(0)), -eval::kEvalLimit,
+                                                    eval::kEvalLimit);
         int bestScore = -INF_SCORE;
         int originalAlpha = alpha;
         for (size_t i = first; i < rootMoves.size(); ++i) {
@@ -1002,9 +1006,12 @@ private:
             bound = Bound::Upper;
         }
         // The search result corrects later static evaluations, when it is a
-        // usable signal: not in check, a quiet best move (captures change the
-        // material the evaluation saw), and a bound on the right side of it.
-        if (!inCheck && !excluding && std::abs(best) < TB_BOUND && (bestMove.isNull() || !eval::isNoisy(board, bestMove)) &&
+        // usable signal: not in check, not decided by a capture (captures
+        // change the material the evaluation saw; a fail-low node has no
+        // real best move, only the one whose upper bound came out highest),
+        // and a bound on the right side of the static evaluation.
+        if (!inCheck && !excluding && std::abs(best) < TB_BOUND &&
+            (bound == Bound::Upper || bestMove.isNull() || !eval::isNoisy(board, bestMove)) &&
             !(bound == Bound::Lower && best <= staticEval) && !(bound == Bound::Upper && best >= staticEval))
             updateCorrection(corr, best - rawEval, depth);
         if (tt && !excluding) tt->store(key, depth, bound, scoreToTT(best, ply), bestMove);
