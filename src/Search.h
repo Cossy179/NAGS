@@ -221,6 +221,7 @@ struct IterationResult {
     int score = 0;
     std::vector<Move> pv;
     bool improved = false; // an aborted iteration still found a reliably better root move
+    bool firstFailedLow = false; // the first root move was fully searched and failed low
 };
 
 // One MultiPV line.
@@ -278,6 +279,10 @@ public:
             int score = rootSearch(depth, alpha, beta, attempt);
             if (aborted) {
                 if (attempt.improved) out = attempt;
+                // The fail-high move kept from an earlier attempt was searched
+                // first again and failed low: not confirmed, so fall back to
+                // the last completed iteration.
+                else if (attempt.firstFailedLow && out.improved) out = IterationResult{};
                 return false;
             }
             if (score <= alpha && alpha > -INF_SCORE) {
@@ -661,6 +666,7 @@ private:
             }
             board.unmakeMove();
             if (aborted) break;
+            if (i == first && score <= originalAlpha) out.firstFailedLow = true;
             if (score > bestScore) {
                 bestScore = score;
                 if (score > alpha) {
