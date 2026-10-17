@@ -27,10 +27,19 @@ Targets (all from the side to move's point of view):
     being mated in n becomes -(mate_cp - mate_step * (n - 1)), each kept
     beyond cp_clip, so mates are large but finite, outrank every cp score,
     and faster mates (slower losses) are preferred.
-  * Policy: softmax(effective_cp / temperature_cp) over the scored moves
-    only. Unscored legal moves get zero mass (they are only bounded above
-    by the k-th score); illegal moves are masked out of the network's
-    log-softmax.
+  * Policy: softmax(effective_cp / temperature_cp) over the scored moves,
+    plus one pooled "rest" bucket for the legal moves that were not scored.
+    Each of those is only known to score at most the k-th (lowest scored)
+    score s_k, so together they hold at most n_rest * exp(s_k / T) of the
+    softmax weight; giving them none (the earlier target) made the target
+    too sharp whenever s_k is within a few T of the best score. The rest
+    bucket gets rest_mass_scale (default 0.5) times that upper bound: an
+    estimate between the lower bound 0 and the upper bound, as if the
+    unscored moves were spread out below s_k. The network is trained on
+    the summed probability of the unscored moves for that bucket, not on
+    any of them individually (they are censored, not known). Illegal moves
+    are masked out of the network's log-softmax. Rows with a line the
+    engine reported as a bound are not used.
   * WDL from the search score s (the best line's effective cp) with a
     logistic model:
         P(win)  = sigmoid((s - wdl_a) / wdl_b)
@@ -111,11 +120,33 @@ def _cp_kwargs(params: Dict[str, Any]) -> Dict[str, float]:
             "mate_step": float(params["mate_step"])}
 
 
+def policy_with_rest(scored: Sequence[Dict[str, Any]], n_rest: int, temperature: float, rest_scale: float,
+                     **cp_kwargs) -> Tuple[List[Tuple[str, float]], float]:
+    """([(uci, probability)] over the scored moves, probability of the pooled
+    unscored moves): see the module docstring."""
+    if not scored:
+        return [], 0.0
+    if temperature <= 0:
+        raise ValueError("temperature_cp must be > 0")
+    cps = [effective_cp(r, **cp_kwargs) for r in scored]
+    top = max(cps)
+    weights = [math.exp((c - top) / temperature) for c in cps]
+    rest = n_rest * rest_scale * math.exp((min(cps) - top) / temperature) if n_rest > 0 and rest_scale > 0 else 0.0
+    total = sum(weights) + rest
+    return [(r["move"], w / total) for r, w in zip(scored, weights)], rest / total
+
+
 def row_targets(row: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
     """Policy / WDL / value targets of one label row (see the module docstring)."""
     kw = _cp_kwargs(params)
     scored = row["scored"]
-    policy = policy_target(scored, float(params["temperature_cp"]), **kw)
+    legal = row.get("legal")
+    if legal is not None:
+        n_legal = len(legal)
+    else:  # label rows carry "legal"; without it or a FEN no unscored move is known
+        n_legal = chess.Board(row["fen"]).legal_moves.count() if "fen" in row else len(scored)
+    policy, rest = policy_with_rest(scored, n_legal - len(scored), float(params["temperature_cp"]),
+                                    float(params.get("rest_mass_scale", 0.5)), **kw)
     best = max(scored, key=lambda r: effective_cp(r, **kw))
     search_cp = effective_cp(best, **kw)
     a, b = float(params["wdl_a"]), float(params["wdl_b"])
@@ -126,7 +157,7 @@ def row_targets(row: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
     if weight > 0 and result in (1, 0, -1, 1.0, 0.0, -1.0):
         one_hot = {1: (1.0, 0.0, 0.0), 0: (0.0, 1.0, 0.0), -1: (0.0, 0.0, 1.0)}[int(result)]
         wdl = [(1 - weight) * s + weight * o for s, o in zip(search_wdl, one_hot)]
-    return {"policy": policy, "best": best["move"], "search_cp": search_cp, "wdl": wdl,
+    return {"policy": policy, "rest": rest, "best": best["move"], "search_cp": search_cp, "wdl": wdl,
             "value": wdl[0] - wdl[2], "search_value": search_wdl[0] - search_wdl[2]}
 
 
@@ -151,9 +182,14 @@ class DistillDataset(Dataset):
         data = build_graph(board)
         data.legal = legal_mask_v3(board).unsqueeze(0)
         target = torch.zeros(1, POLICY_V3_DIM)
+        rest = data.legal.clone()  # the legal moves that were not scored
         for uci, p in t["policy"]:
             target[0, move_index_v3(uci)] += p
+        for r in row["scored"]:
+            rest[0, move_index_v3(r["move"])] = False
         data.target_policy = target
+        data.rest = rest
+        data.target_rest = torch.tensor([t["rest"]], dtype=torch.float)
         data.target_wdl = torch.tensor([t["wdl"]], dtype=torch.float)
         data.target_value = torch.tensor([t["value"]], dtype=torch.float)
         data.search_value = torch.tensor([t["search_value"]], dtype=torch.float)
@@ -172,6 +208,8 @@ def valid_row(row: Dict[str, Any]) -> bool:
         for r in scored:
             if chess.Move.from_uci(r["move"]) not in legal or ("cp" not in r and "mate" not in r):
                 return False
+            if r.get("bound"):  # only a bound, not an exact score
+                return False
         return True
     except (KeyError, ValueError, TypeError):
         return False
@@ -187,6 +225,13 @@ def distill_losses(policy_logits: torch.Tensor, wdl_logits: torch.Tensor, score:
     """Per-position losses / statistics of a batch (not reduced)."""
     logp = masked_log_softmax(policy_logits, batch.legal)
     policy_nll = -(batch.target_policy * logp).sum(dim=1)
+    # The unscored legal moves as one bucket: log of their summed probability.
+    rest = getattr(batch, "rest", None)
+    if rest is not None:
+        has_rest = rest.any(dim=1)
+        # (a finite fill: a row of -inf would give NaN gradients even where unused)
+        log_rest = torch.logsumexp(logp.masked_fill(~rest, -1e9), dim=1)
+        policy_nll = policy_nll - torch.where(has_rest, batch.target_rest * log_rest, torch.zeros_like(policy_nll))
     wdl_logp = torch.log_softmax(wdl_logits, dim=1)
     wdl_nll = -(batch.target_wdl * wdl_logp).sum(dim=1)
     p = wdl_logp.exp()

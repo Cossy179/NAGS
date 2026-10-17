@@ -114,6 +114,7 @@ DISTILL_DEFAULTS: Dict[str, Any] = {
     "clear_hash": True,           # clear the hash before each position (reproducible labels)
     # targets (see distillation.py)
     "temperature_cp": 50.0,       # policy target = softmax(cp / T) over the scored moves
+    "rest_mass_scale": 0.5,       # unscored moves: this fraction of their upper-bound softmax mass (0 = none)
     "cp_clip": 2000.0,
     "mate_cp": 3000.0,            # mate in n -> mate_cp - mate_step * (n - 1)
     "mate_step": 10.0,

@@ -17,7 +17,10 @@ import chess.pgn
 import pytest
 import torch
 
+import distillation
 import training_pipeline as tp
+import training_pipeline
+from policy_encoding import POLICY_V3_DIM
 from distillation import effective_cp, policy_target, row_targets, wdl_from_cp
 from gnn_v3 import GNNAdapterV3, load_any_checkpoint
 
@@ -294,3 +297,39 @@ def test_label_with_the_real_engine(tmp_path):
         assert all(chess.Move.from_uci(s["move"]) in board.legal_moves for s in r["scored"])
         assert all(isinstance(s.get("cp", s.get("mate")), int) for s in r["scored"])
         assert len({s["move"] for s in r["scored"]}) == len(r["scored"])
+
+
+def test_unscored_moves_share_a_censored_rest_bucket():
+    # 20 legal moves, 2 scored (30 and 20 cp): the 18 others score at most
+    # 20 cp, so together they hold at most 18 * exp(-10 / 50) of the weight;
+    # the target gives them half of that as one bucket.
+    row = {"fen": chess.STARTING_FEN, "legal": [m.uci() for m in chess.Board().legal_moves],
+           "scored": [{"move": "e2e4", "cp": 30}, {"move": "d2d4", "cp": 20}]}
+    params = dict(training_pipeline.DISTILL_DEFAULTS)
+    t = distillation.row_targets(row, params)
+    w = [1.0, math.exp(-10 / 50), 0.5 * 18 * math.exp(-10 / 50)]
+    assert abs(t["rest"] - w[2] / sum(w)) < 1e-9
+    assert abs(dict(t["policy"])["e2e4"] - w[0] / sum(w)) < 1e-9
+    assert abs(sum(p for _, p in t["policy"]) + t["rest"] - 1) < 1e-9
+    # rest_mass_scale 0 gives the scored-moves-only target.
+    t0 = distillation.row_targets(row, {**params, "rest_mass_scale": 0.0})
+    assert t0["rest"] == 0 and abs(sum(p for _, p in t0["policy"]) - 1) < 1e-9
+    # A row whose only scores are bounds is not used.
+    assert not distillation.valid_row({**row, "scored": [{"move": "e2e4", "cp": 30, "bound": "lower"}]})
+
+
+def test_rest_loss_is_finite_with_and_without_unscored_moves():
+    from torch_geometric.data import Batch
+
+    params = dict(training_pipeline.DISTILL_DEFAULTS)
+    full = {"fen": "7k/8/8/8/8/8/8/K7 w - - 0 1"}  # every legal move scored: no rest bucket
+    board = chess.Board(full["fen"])
+    full["scored"] = [{"move": m.uci(), "cp": 0} for m in board.legal_moves]
+    full["legal"] = [m.uci() for m in board.legal_moves]
+    part = {"fen": chess.STARTING_FEN, "legal": [m.uci() for m in chess.Board().legal_moves],
+            "scored": [{"move": "e2e4", "cp": 30}]}
+    batch = Batch.from_data_list([distillation.DistillDataset([r], params)[0] for r in (full, part)])
+    logits = torch.zeros(2, POLICY_V3_DIM, requires_grad=True)
+    out = distillation.distill_losses(logits, torch.zeros(2, 3), None, batch)
+    out["policy_nll"].sum().backward()
+    assert torch.isfinite(out["policy_nll"]).all() and torch.isfinite(logits.grad).all()
