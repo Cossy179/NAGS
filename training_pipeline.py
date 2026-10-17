@@ -11,6 +11,16 @@ NAGS Training Pipeline
   meta        train the meta-learner on (features, deltas, game result) samples
   full        all of the above in order
 
+  label       v3: score positions from the jsonl datasets with the alpha-beta
+              engine (MultiPV k, fixed nodes) -> data/distill_*.jsonl
+  distill     v3: train the relational 'nags-gnn-v3' network on those labels
+              (search-policy distillation; see distillation.py)
+
+'label' and 'distill' are new and separate: the steps above, and 'full',
+are unchanged and train 'nags-gnn-v2' networks. For v3 networks 'distill' is
+the recommended objective (see ppo_training for why PPO on these games is not
+an on-policy update).
+
 Values are always from the side to move's point of view in [-1, 1]
 (+1 win, 0 draw, -1 loss), matching the network's tanh value head and the
 negamax convention of the engine.
@@ -50,10 +60,14 @@ except Exception as e:  # pragma: no cover
     raise RuntimeError("torch_geometric is required.") from e
 
 from chess_graph import FEATURE_DIM, ChessGraph
-from gnn_evaluator import POLICY_DIM, GNNEvaluator, load_checkpoint, move_index, save_checkpoint
+from gnn_evaluator import CHECKPOINT_FORMAT, POLICY_DIM, GNNEvaluator, load_checkpoint, move_index, save_checkpoint
 from meta_learner import DELTA_KEYS, MetaLearner
 
 logger = logging.getLogger("nags.training")
+
+# The v3 GNN modules (distillation, gnn_v3, relational_graph, policy_encoding)
+# are imported only by the steps that use them ('label', 'distill'), so the
+# legacy steps and their services never depend on the v3 code.
 
 ROOT = Path(__file__).resolve().parent
 
@@ -83,6 +97,43 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "meta_params": {"train_steps": 200},
     "evaluation": {"num_games": 50, "time_control": "1+0.1", "opening_book": "book.bin"},
     "notifications": {"slack_webhook": ""},
+}
+
+# Defaults of the v3 steps 'label' and 'distill'. They are merged under the
+# 'distill_params' key of the loaded config (deep_merge), so a config file
+# only needs the values it changes; DEFAULT_CONFIG (and so a newly written
+# training_config.json) does not contain them.
+DISTILL_DEFAULTS: Dict[str, Any] = {
+    # label
+    "label_sources": [],          # jsonl files / globs with a 'fen' field; empty: data/training_data.jsonl
+                                  # and data/self_play_*.jsonl
+    "label_positions": 20000,     # at most this many distinct positions per run (seeded random subset)
+    "multipv": 5,                 # k: moves scored exactly per position
+    "nodes": 50000,               # node budget per position
+    "engine_path": "",            # empty: config 'engine_path', else build/nags_enhanced
+    "engine_command": None,       # full command (string or list) overriding engine_path
+    "hash_mb": 16,
+    "clear_hash": True,           # clear the hash before each position (reproducible labels)
+    # targets (see distillation.py)
+    "temperature_cp": 50.0,       # policy target = softmax(cp / T) over the scored moves
+    "rest_mass_scale": 0.5,       # unscored moves: this fraction of their upper-bound softmax mass (0 = none)
+    "cp_clip": 2000.0,
+    "mate_cp": 3000.0,            # mate in n -> mate_cp - mate_step * (n - 1)
+    "mate_step": 10.0,
+    "wdl_a": 400.0,               # P(win) = sigmoid((cp - a) / b), P(loss) = sigmoid((-cp - a) / b)
+    "wdl_b": 250.0,
+    "result_weight": 0.0,         # blend of the game result into the WDL target, when known
+    # training
+    "max_rows": 1000000,
+    "epochs": 10,
+    "batch_size": 64,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "validation_fraction": 0.05,  # split by source game (by position when there is no game id)
+    "value_weight": 1.0,
+    "aux_score_weight": 0.25,
+    "model": {"hidden_dim": 128, "layers": 6, "num_bases": 4, "ffn_mult": 2, "dropout": 0.0,
+              "value_dropout": 0.2, "aux_score": True},
 }
 
 
@@ -228,6 +279,26 @@ def read_jsonl(path: Path, limit: Optional[int] = None) -> List[Dict[str, Any]]:
     return out
 
 
+def read_jsonl_settled(path: Path) -> List[Dict[str, Any]]:
+    """read_jsonl for a file another process may still be writing (the legacy
+    steps write data/*.jsonl line by line): a last line that does not parse
+    (cut off mid-write) is skipped."""
+    out = []
+    with open(path) as f:
+        lines = f.readlines()
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            if i != len(lines) - 1:
+                raise
+            logger.info("%s: skipped an incomplete last line", path)
+    return out
+
+
 def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> int:
     n = 0
     with open(path, "w") as f:
@@ -243,6 +314,7 @@ def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> int:
 class TrainingPipeline:
     def __init__(self, config_file: str = "training_config.json"):
         self.config = self.load_config(config_file)
+        self.config["distill_params"] = deep_merge(DISTILL_DEFAULTS, self.config.get("distill_params") or {})
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.rng = random.Random(self.config["seed"])
         torch.manual_seed(self.config["seed"])
@@ -356,12 +428,17 @@ class TrainingPipeline:
         train = [s for i, s in enumerate(samples) if s.get("game_id", i) not in val_games]
         val = [s for i, s in enumerate(samples) if s.get("game_id", i) in val_games]
         logger.info("Supervised training on %d positions (%d validation)", len(train), len(val))
+        # Opt-in (default off, which is the behaviour this step always had):
+        # restrict the policy softmax to the legal moves.
+        masked = bool(self.config.get("supervised_legal_mask", False))
+        if masked:
+            logger.info("supervised_legal_mask: policy loss over legal moves only")
 
         model = self.new_model()
         opt = torch.optim.AdamW(model.parameters(), lr=float(self.config["learning_rate"]), weight_decay=1e-4)
         bs = int(self.config["batch_size"])
-        train_loader = DataLoader(PositionDataset(train), batch_size=bs, shuffle=True)
-        val_loader = DataLoader(PositionDataset(val), batch_size=bs) if val else None
+        train_loader = DataLoader(PositionDataset(train, with_mask=masked), batch_size=bs, shuffle=True)
+        val_loader = DataLoader(PositionDataset(val, with_mask=masked), batch_size=bs) if val else None
 
         best_val = float("inf")
         best_path = self.model_dir / f"supervised_model_{self.stamp()}.pth"
@@ -371,6 +448,8 @@ class TrainingPipeline:
             for step, batch in enumerate(train_loader):
                 batch = batch.to(self.device)
                 logits, values = model(batch)
+                if masked:
+                    logits = logits.masked_fill(~batch.legal, -1e9)
                 p_loss = F.cross_entropy(logits, batch.y_policy)
                 v_loss = F.mse_loss(values, batch.y_value)
                 loss = p_loss + v_loss
@@ -385,7 +464,7 @@ class TrainingPipeline:
                     logger.info("Epoch %d step %d: policy %.4f value %.4f", epoch, step, p_loss.item(), v_loss.item())
             msg = f"Epoch {epoch}: train policy {totals[0] / totals[2]:.4f} value {totals[1] / totals[2]:.4f}"
             if val_loader is not None:
-                vp, vv, acc = self._validate(model, val_loader)
+                vp, vv, acc = self._validate(model, val_loader, masked)
                 msg += f" | val policy {vp:.4f} value {vv:.4f} top-1 {acc:.1%}"
                 if vp + vv < best_val:
                     best_val = vp + vv
@@ -397,12 +476,14 @@ class TrainingPipeline:
         return best_path
 
     @torch.no_grad()
-    def _validate(self, model: GNNEvaluator, loader: DataLoader) -> Tuple[float, float, float]:
+    def _validate(self, model: GNNEvaluator, loader: DataLoader, masked: bool = False) -> Tuple[float, float, float]:
         model.eval()
         p_sum = v_sum = correct = n = 0.0
         for batch in loader:
             batch = batch.to(self.device)
             logits, values = model(batch)
+            if masked:
+                logits = logits.masked_fill(~batch.legal, -1e9)
             p_sum += F.cross_entropy(logits, batch.y_policy, reduction="sum").item()
             v_sum += F.mse_loss(values, batch.y_value, reduction="sum").item()
             correct += (logits.argmax(dim=1) == batch.y_policy).sum().item()
@@ -543,6 +624,21 @@ class TrainingPipeline:
 
     # -- step 4: PPO -----------------------------------------------------------
     def ppo_training(self, self_play_path: Path, model_path: Optional[Path] = None) -> Path:
+        """Clipped PPO-style update of a 'nags-gnn-v2' network on self-play games (unchanged).
+
+        Caveat: this is not a valid on-policy (PPO) update. The self-play moves
+        are chosen by the engine's alpha-beta search (with the network only
+        guiding the MCTS arm), not sampled from the network's policy, so the
+        behaviour policy is not the network: the ratio exp(logp - old_logp)
+        is not an importance ratio against the policy that produced the data,
+        and the clipped surrogate does not estimate the policy gradient. In
+        effect it is advantage-weighted imitation of the engine's moves. Kept
+        as it was for the running training; for the v3 network the recommended
+        objective is search-policy distillation (steps 'label' + 'distill').
+        """
+        logger.info("ppo: the self-play moves come from the alpha-beta search, not from the network's "
+                    "policy, so this is not an on-policy PPO update; 'distill' is the recommended objective "
+                    "(see ppo_training's docstring)")
         if not self_play_path.exists():
             raise FileNotFoundError(f"Self-play data not found: {self_play_path}")
         samples = read_jsonl(self_play_path)
@@ -671,12 +767,23 @@ class TrainingPipeline:
 
     # -- promotion / notifications ------------------------------------------------
     def promote_model(self, model_path: Path, elo: float, margin: float) -> None:
-        shutil.copy2(model_path, self.production_path)
+        # Only a 'nags-gnn-v2' checkpoint may become production_model.pth: the
+        # legacy steps (self-play, PPO) and older code load that file as v2. A
+        # v3 network that passes goes to its own slot.
+        target = self.production_path
+        with open(model_path, "rb") as fh:
+            payload = torch.load(fh, map_location="cpu", weights_only=False)
+        fmt = payload.get("format") if isinstance(payload, dict) else CHECKPOINT_FORMAT
+        if fmt == "nags-gnn-v3":  # gnn_v3.CHECKPOINT_FORMAT_V3 (not imported: legacy steps must not need gnn_v3)
+            target = self.model_dir / "production_model_v3.pth"
+            logger.info("%s is a %s checkpoint: promoted to %s, not to %s", model_path, fmt, target,
+                        self.production_path)
+        shutil.copy2(model_path, target)
         record = {"timestamp": datetime.now().isoformat(), "model_path": str(model_path), "elo_gain": elo,
-                  "elo_margin_95": margin, "promoted_to": str(self.production_path)}
+                  "elo_margin_95": margin, "promoted_to": str(target), "format": fmt}
         with open(self.logs_dir / "promotions.jsonl", "a") as f:
             f.write(json.dumps(record) + "\n")
-        logger.info("Model promoted to %s", self.production_path)
+        logger.info("Model promoted to %s", target)
         self.notify_team(f"New NAGS model promoted: {elo:+.0f} ± {margin:.0f} Elo vs baseline ({model_path.name})")
 
     def notify_team(self, message: str) -> None:
@@ -719,6 +826,257 @@ class TrainingPipeline:
         meta.save_model()
         return loss
 
+    # -- v3 step 'label': search scores for distillation --------------------------
+    def label_sources(self, sources: Optional[Sequence[Path]] = None) -> List[Path]:
+        if sources:
+            return [Path(s) for s in sources]
+        patterns = self.config["distill_params"].get("label_sources") or []
+        if patterns:
+            found: List[Path] = []
+            for pattern in patterns:
+                path = self._path(pattern)
+                matches = sorted(path.parent.glob(path.name)) if any(c in path.name for c in "*?[") else [path]
+                found.extend(p for p in matches if p not in found)
+            return found
+        default = [self.data_dir / "training_data.jsonl"] + sorted(self.data_dir.glob("self_play_*.jsonl"))
+        return [p for p in default if p.exists()]
+
+    def label_engine_command(self) -> Any:
+        """The alpha-beta engine for labelling: distill_params engine_command / engine_path, the
+        config's engine_path, else build/nags_enhanced (or nags, run without the network)."""
+        params = self.config["distill_params"]
+        if params.get("engine_command"):
+            return params["engine_command"]
+        if params.get("engine_path"):
+            path = self._path(params["engine_path"])
+            if not path.exists():
+                raise FileNotFoundError(f"distill_params.engine_path not found: {path}")
+            return str(path)
+        if self.config.get("engine_path"):
+            return str(self.engine_path())
+        candidates = [ROOT / "build" / "nags_enhanced", ROOT / "build" / "Release" / "nags_enhanced.exe",
+                      ROOT / "build" / "Release" / "nags_enhanced", ROOT / "build" / "nags_enhanced.exe",
+                      ROOT / "build" / "nags", ROOT / "build" / "Release" / "nags.exe"]
+        for c in candidates:
+            if c.exists():
+                return str(c)
+        raise FileNotFoundError("No engine for labelling (looked at: " + ", ".join(map(str, candidates)) +
+                                "). Build it with: cmake -B build -DCMAKE_BUILD_TYPE=Release && "
+                                "cmake --build build --config Release")
+
+    def open_label_engine(self):
+        params = self.config["distill_params"]
+        engine = chess.engine.SimpleEngine.popen_uci(self.label_engine_command())
+        options: Dict[str, Any] = {}
+        for name, value in (("Threads", 1), ("Hash", int(params["hash_mb"])), ("UseNN", False),
+                            ("UseMetaLearner", False)):
+            if name in engine.options:
+                options[name] = value
+        try:
+            engine.configure(options)
+        except Exception:
+            engine.quit()
+            raise
+        return engine
+
+    def label_positions(self, sources: Optional[Sequence[Path]] = None) -> Path:
+        """Scores positions with the alpha-beta engine for 'distill' (row format: distillation.py).
+
+        Reads 'fen' rows from jsonl files (parse / self-play outputs or any jsonl
+        with a 'fen' field), keeps distinct positions, and writes the engine's
+        MultiPV top-k with exact scores to data/distill_<stamp>.jsonl, flushing
+        as it goes so an interrupted run keeps what it labelled.
+        """
+        from distillation import label_board, source_result
+        params = self.config["distill_params"]
+        paths = self.label_sources(sources)
+        if not paths:
+            raise FileNotFoundError(f"No positions to label (no data/training_data.jsonl or self_play_*.jsonl in "
+                                    f"{self.data_dir}; pass --data or set distill_params.label_sources)")
+        candidates: List[Tuple[Path, Dict[str, Any]]] = []
+        seen = set()
+        for path in paths:
+            if not path.exists():
+                raise FileNotFoundError(f"Label source not found: {path}")
+            for row in read_jsonl_settled(path):
+                fen = row.get("fen")
+                if not isinstance(fen, str):
+                    continue
+                key = " ".join(fen.split()[:4])
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append((path, row))
+        limit = int(params["label_positions"])
+        if len(candidates) > limit:
+            keep = sorted(self.rng.sample(range(len(candidates)), limit))
+            candidates = [candidates[i] for i in keep]
+        k, nodes = int(params["multipv"]), int(params["nodes"])
+        out_path = self.data_dir / f"distill_{self.stamp()}.jsonl"
+        logger.info("Labelling %d positions from %s: MultiPV %d at %d nodes -> %s", len(candidates),
+                    ", ".join(map(str, paths)), k, nodes, out_path)
+        written = skipped = 0
+        start = time.time()
+        engine = self.open_label_engine()
+        clear = bool(params["clear_hash"]) and "Clear Hash" in engine.options
+        try:
+            with open(out_path, "w") as out:
+                for path, row in candidates:
+                    try:
+                        board = chess.Board(row["fen"])
+                    except ValueError:
+                        skipped += 1
+                        continue
+                    if clear:
+                        engine.configure({"Clear Hash": None})
+                    rec = label_board(engine, board, k, nodes)
+                    if rec is None:
+                        skipped += 1
+                        continue
+                    rec["result"] = source_result(row, board)
+                    rec["source"] = path.name
+                    for key in ("game_id", "ply"):
+                        if key in row:
+                            rec[key] = row[key]
+                    out.write(json.dumps(rec) + "\n")
+                    out.flush()
+                    written += 1
+                    if written % 100 == 0:
+                        logger.info("Labelled %d/%d positions (%.1f/s)", written, len(candidates),
+                                    written / max(1e-9, time.time() - start))
+        except chess.engine.EngineError as e:
+            logger.error("Engine failed after %d positions: %s", written, e)
+        finally:
+            try:
+                engine.quit()
+            except chess.engine.EngineError:
+                pass
+        if written == 0:
+            raise RuntimeError(f"No position could be labelled ({skipped} skipped)")
+        logger.info("Labelling complete: %d positions (%d skipped) -> %s", written, skipped, out_path)
+        return out_path
+
+    # -- v3 step 'distill': search-policy distillation ----------------------------
+    def new_v3_model(self) -> "RelationalGNNEvaluator":
+        from gnn_v3 import RelationalGNNEvaluator
+        return RelationalGNNEvaluator(**self.config["distill_params"]["model"], device=self.device)
+
+    def distill_training(self, dataset_path: Optional[Path] = None, model_path: Optional[Path] = None) -> Path:
+        """Trains a 'nags-gnn-v3' network on 'label' rows; returns the best checkpoint.
+
+        Policy loss: cross-entropy against the soft search target over the legal
+        moves (log_softmax restricted to the legal mask). Value loss: WDL
+        cross-entropy against the logistic WDL of the search score (optionally
+        blended with the game result). Targets: distillation.py. Validation
+        (split by source game) reports policy NLL, top-1 agreement with the
+        search's best move, WDL NLL and value MSE.
+        """
+        from distillation import DistillDataset, distill_losses, valid_row
+        from gnn_v3 import load_checkpoint_v3, save_checkpoint_v3
+        params = self.config["distill_params"]
+        dataset_path = dataset_path or self.latest("distill_*.jsonl", self.data_dir)
+        if dataset_path is None or not Path(dataset_path).exists():
+            raise FileNotFoundError(f"Distillation data not found: {dataset_path or self.data_dir / 'distill_*.jsonl'} "
+                                    f"(run the 'label' step first)")
+        rows = read_jsonl(Path(dataset_path), limit=int(params["max_rows"]))
+        usable = [r for r in rows if valid_row(r)]
+        if len(usable) < len(rows):
+            logger.warning("Ignoring %d label rows without legal scored moves", len(rows) - len(usable))
+        if len(usable) < 2:
+            raise RuntimeError(f"{dataset_path} has too few usable rows ({len(usable)})")
+
+        def group(i: int, r: Dict[str, Any]) -> str:
+            if r.get("game_id") is not None:
+                return f"{r.get('source', '')}#{r['game_id']}"
+            return f"row#{i}"
+
+        groups = sorted({group(i, r) for i, r in enumerate(usable)})
+        self.rng.shuffle(groups)
+        fraction = float(params["validation_fraction"])
+        n_val = max(1, round(len(groups) * fraction)) if fraction > 0 and len(groups) > 1 else 0
+        val_groups = set(groups[:n_val])
+        train = [r for i, r in enumerate(usable) if group(i, r) not in val_groups]
+        val = [r for i, r in enumerate(usable) if group(i, r) in val_groups]
+        logger.info("Distillation on %d positions (%d validation, %d groups)", len(train), len(val), len(groups))
+
+        if model_path:
+            try:
+                model = load_checkpoint_v3(str(model_path), device=self.device)
+            except ValueError as e:
+                raise RuntimeError(f"'distill' continues only from a nags-gnn-v3 checkpoint: {e}") from e
+        else:
+            model = self.new_v3_model()
+        opt = torch.optim.AdamW(model.parameters(), lr=float(params["learning_rate"]),
+                                weight_decay=float(params["weight_decay"]))
+        bs = int(params["batch_size"])
+        train_loader = DataLoader(DistillDataset(train, params), batch_size=bs, shuffle=True)
+        val_loader = DataLoader(DistillDataset(val, params), batch_size=bs) if val else None
+        value_w, aux_w = float(params["value_weight"]), float(params["aux_score_weight"])
+
+        best_val = float("inf")
+        best_path = self.model_dir / f"gnn_v3_distill_{self.stamp()}.pth"  # not matched by '*_model_*.pth'
+        for epoch in range(int(params["epochs"])):
+            model.train()
+            sums: Dict[str, float] = {}
+            n = 0
+            for step, batch in enumerate(train_loader):
+                batch = batch.to(self.device)
+                policy_logits, wdl_logits, score = model(batch)
+                parts = distill_losses(policy_logits, wdl_logits, score, batch)
+                loss = parts["policy_nll"].mean() + value_w * parts["wdl_nll"].mean()
+                if "score_se" in parts and aux_w > 0:
+                    loss = loss + aux_w * parts["score_se"].mean()
+                opt.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+                for key, v in parts.items():
+                    sums[key] = sums.get(key, 0.0) + float(v.detach().sum())
+                n += batch.num_graphs
+                if step % 100 == 0:
+                    logger.info("Distill epoch %d step %d: policy %.4f wdl %.4f", epoch, step,
+                                parts["policy_nll"].mean().item(), parts["wdl_nll"].mean().item())
+            metrics: Dict[str, Any] = {"train": self._distill_summary(sums, n)}
+            if val_loader is not None:
+                metrics["val"] = self._distill_metrics(model, val_loader)
+                score_val = metrics["val"]["policy_nll"] + value_w * metrics["val"]["wdl_nll"]
+            else:
+                score_val = -float(epoch)  # no validation: keep the latest epoch
+            logger.info("Distill epoch %d: %s", epoch, json.dumps(metrics))
+            if score_val < best_val:
+                best_val = score_val
+                save_checkpoint_v3(model, str(best_path), {"stage": "distill", "epoch": epoch, "metrics": metrics,
+                                                           "dataset": str(dataset_path),
+                                                           "parent": str(model_path) if model_path else None})
+        logger.info("Distilled 'nags-gnn-v3' model saved: %s", best_path)
+        return best_path
+
+    @staticmethod
+    def _distill_summary(sums: Dict[str, float], n: int) -> Dict[str, float]:
+        n = max(1, n)
+        out = {"positions": n, "policy_nll": sums.get("policy_nll", 0.0) / n, "top1": sums.get("top1", 0.0) / n,
+               "wdl_nll": sums.get("wdl_nll", 0.0) / n, "value_mse": sums.get("value_se", 0.0) / n}
+        if "score_se" in sums:
+            out["score_mse"] = sums["score_se"] / n
+        return out
+
+    @torch.no_grad()
+    def _distill_metrics(self, model: "RelationalGNNEvaluator", loader: DataLoader) -> Dict[str, float]:
+        from distillation import distill_losses
+        was_training = model.training
+        model.eval()
+        sums: Dict[str, float] = {}
+        n = 0
+        try:
+            for batch in loader:
+                batch = batch.to(self.device)
+                parts = distill_losses(*model(batch), batch)
+                for key, v in parts.items():
+                    sums[key] = sums.get(key, 0.0) + float(v.sum())
+                n += batch.num_graphs
+        finally:
+            model.train(was_training)
+        return self._distill_summary(sums, n)
+
     # -- full pipeline ---------------------------------------------------------
     def run_full_pipeline(self) -> None:
         start = time.time()
@@ -741,10 +1099,13 @@ def setup_logging(logs_dir: Path) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="NAGS Training Pipeline")
     parser.add_argument("--config", default="training_config.json", help="Config file path")
-    parser.add_argument("--step", choices=["parse", "supervised", "selfplay", "ppo", "evaluate", "meta", "full"],
-                        default="full", help="Pipeline step to run")
+    parser.add_argument("--step", choices=["parse", "supervised", "selfplay", "ppo", "evaluate", "meta", "full",
+                                           "label", "distill"],
+                        default="full", help="Pipeline step to run ('label' and 'distill' train the v3 network)")
     parser.add_argument("--model", help="Checkpoint to use instead of the latest one")
     parser.add_argument("--games", type=int, help="Override the number of self-play / evaluation games")
+    parser.add_argument("--data", nargs="+", help="label: jsonl files with 'fen' rows to label; "
+                                                  "distill: the labelled jsonl (default: the newest data/distill_*.jsonl)")
     args = parser.parse_args(argv)
 
     config = TrainingPipeline.load_config(args.config)
@@ -777,6 +1138,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             pipeline.evaluate_and_maybe_promote(target)
         elif args.step == "meta":
             pipeline.update_meta_learner()
+        elif args.step == "label":
+            pipeline.label_positions([Path(p) for p in args.data] if args.data else None)
+        elif args.step == "distill":
+            pipeline.distill_training(Path(args.data[0]) if args.data else None, model)
     except (FileNotFoundError, RuntimeError) as e:
         logger.error("%s", e)
         return 1

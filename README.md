@@ -16,7 +16,8 @@ pipeline:
 | `rpc_client` | Smoke test for the GNN service. |
 | `rpc_server.py` | Serves GNN policy priors / values / uncertainty over TCP. |
 | `meta_learner.py` | Serves (and learns) per-move hyperparameter adjustments. |
-| `training_pipeline.py` | PGN parsing, supervised training, self-play, PPO, match-based evaluation and model promotion. |
+| `training_pipeline.py` | PGN parsing, supervised training, self-play, PPO, match-based evaluation and model promotion; `label` / `distill` for the experimental v3 network. |
+| `gnn_v3.py` | Experimental v3 GNN (`nags-gnn-v3`): typed-relation graph, promotion-aware policy, WDL value, trained by search-policy distillation. v2 checkpoints keep working unchanged. |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the pieces work and
 fit together.
@@ -159,13 +160,17 @@ python training_pipeline.py --help
 | `ppo` | Clipped PPO update of the network on the self-play games (advantage = result - old value estimate, legal-move-masked policy). |
 | `evaluate` | Plays a match (paired openings, both colours) against the baseline, estimates Elo with a 95% interval, and promotes the model to `models/production_model.pth` if it beats `elo_threshold`. |
 | `meta` | Trains the meta-learner on the self-play samples (reward = game result). |
+| `label` | v3, not part of `full`: scores positions from the jsonl datasets (or `--data FILE`) with `nags_enhanced` (MultiPV, fixed node budget) into `data/distill_*.jsonl`. |
+| `distill` | v3, not part of `full`: trains the relational `nags-gnn-v3` network on those scores (soft policy target over the scored legal moves, WDL value target) into `models/gnn_v3_distill_*.pth`, which `rpc_server.py --model` serves as it does v2 checkpoints. |
 
 `training_config.json` holds every setting (directories, engine path, batch
 size, epochs, self-play games and time per move, `model_params`, `ppo_params`,
 evaluation games, time control, opening book, `baseline_engine`, Slack
 webhook). `baseline_engine` is `heuristic` (`nags` without the network, which
 measures whether the network helps), `production` (the current production
-model) or the command of any UCI engine, e.g. `stockfish`.
+model) or the command of any UCI engine, e.g. `stockfish`. The `label` /
+`distill` settings have defaults in code (`DISTILL_DEFAULTS` in
+`training_pipeline.py`); override any of them under a `distill_params` key.
 
 ## License
 

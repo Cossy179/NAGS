@@ -125,3 +125,22 @@ def test_self_play_smoke(tmp_path):
     assert rows and all(chess.Move.from_uci(r["move"]) in chess.Board(r["fen"]).legal_moves for r in rows)
     meta = pipe.latest("meta_samples_*.jsonl", pipe.data_dir)
     assert meta is not None and tp.read_jsonl(meta)
+
+
+def test_promotion_keeps_v3_networks_out_of_the_v2_slot(tmp_path):
+    from gnn_evaluator import GNNEvaluator, save_checkpoint
+    from gnn_v3 import RelationalGNNEvaluator, save_checkpoint_v3
+
+    pipe = tp.TrainingPipeline(tiny_config(tmp_path))
+    pipe.notify_team = lambda message: None
+    v2, v3 = tmp_path / "candidate_v2.pth", tmp_path / "candidate_v3.pth"
+    save_checkpoint(GNNEvaluator(hidden_dim=16, gnn_layers=1, policy_layers=1, value_layers=1,
+                                 device=torch.device("cpu")), str(v2))
+    save_checkpoint_v3(RelationalGNNEvaluator(hidden_dim=16, layers=1, num_bases=2, device=torch.device("cpu")), str(v3))
+    pipe.promote_model(v2, 20.0, 10.0)
+    assert pipe.production_path.read_bytes() == v2.read_bytes()
+    pipe.promote_model(v3, 20.0, 10.0)
+    assert pipe.production_path.read_bytes() == v2.read_bytes()  # the v2 slot is untouched
+    assert (pipe.model_dir / "production_model_v3.pth").read_bytes() == v3.read_bytes()
+    records = [json.loads(l) for l in (pipe.logs_dir / "promotions.jsonl").read_text().splitlines()]
+    assert [r["format"] for r in records] == ["nags-gnn-v2", "nags-gnn-v3"]

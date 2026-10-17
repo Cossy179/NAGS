@@ -16,13 +16,14 @@ PYTHON="${PYTHON:-python3}"
 usage() {
     echo "Usage: $0 [step] [pipeline options]"
     echo "Steps: parse, supervised, selfplay, ppo, evaluate, meta, full (default: full)"
+    echo "v3 network (not part of 'full'): label (engine scores for positions), distill (train on them)"
     echo "Options are passed to training_pipeline.py (see: $PYTHON training_pipeline.py --help)"
 }
 
 STEP="${1:-full}"
 case "$STEP" in
     help|-h|--help) usage; exit 0 ;;
-    parse|supervised|selfplay|ppo|evaluate|meta|full) ;;
+    parse|supervised|selfplay|ppo|evaluate|meta|full|label|distill) ;;
     *) echo "Unknown step: $STEP" >&2; usage >&2; exit 1 ;;
 esac
 [[ $# -gt 0 ]] && shift
