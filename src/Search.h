@@ -222,6 +222,7 @@ struct IterationResult {
     int score = 0;
     std::vector<Move> pv;
     bool improved = false; // an aborted iteration still found a reliably better root move
+    uint64_t bestMoveNodes = 0, nodes = 0; // nodes spent on the best root move, and on all of them
 };
 
 // One MultiPV line.
@@ -641,8 +642,10 @@ private:
         evalStack[0] = board.inCheck() ? kNoEval : eval::evaluate(board);
         int bestScore = -INF_SCORE;
         int originalAlpha = alpha;
+        const uint64_t startNodes = nodes;
         for (size_t i = first; i < rootMoves.size(); ++i) {
             const Move m = rootMoves[i];
+            const uint64_t moveStart = nodes;
             setPlyMove(0, m);
             board.makeMove(m);
             int score;
@@ -661,6 +664,7 @@ private:
                     updatePv(0, m);
                     out.bestMove = m;
                     out.score = score;
+                    out.bestMoveNodes = nodes - moveStart;
                     out.pv.assign(pvTable[0], pvTable[0] + pvLength[0]);
                     // Beating the window's lower bound means this move is at
                     // least as good as anything searched so far.
@@ -675,7 +679,9 @@ private:
             out.pv = {rootMoves[first]};
             out.score = bestScore;
             out.improved = false;
+            out.bestMoveNodes = 0;
         }
+        out.nodes = nodes - startNodes;
         return bestScore;
     }
 
@@ -1190,6 +1196,13 @@ public:
                 static constexpr double kStability[5] = {2.0, 1.5, 1.2, 1.0, 0.85};
                 double scale = kStability[std::min(stableIterations, 4)];
                 if (scoreDrop > 20) scale *= 1.0 + std::min(scoreDrop, 120) / 240.0;
+                // Node share of the best move in the last iteration: a move
+                // that took nearly all of the search is clear, one that took
+                // little of it was contested, so search on.
+                if (!multi && depth >= 7 && r.nodes > 0) {
+                    const double share = static_cast<double>(r.bestMoveNodes) / static_cast<double>(r.nodes);
+                    scale *= (1.5 - share) * 1.35;
+                }
                 if (limits.softMs > 0 && !control.pondering() &&
                     control.elapsedMs() >= static_cast<int64_t>(limits.softMs * scale))
                     break; // next depth won't fit
