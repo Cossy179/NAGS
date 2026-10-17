@@ -1156,6 +1156,7 @@ public:
         int maxDepth = limits.depth > 0 ? std::min(limits.depth, MAX_PLY - 8) : MAX_PLY - 8;
         int prevScore = 0;
         int stableIterations = 0; // completed iterations since the best move last changed
+        bool mainImproved = false; // the result comes from an interrupted iteration (r.improved)
         for (int depth = 1; depth <= maxDepth; ++depth) {
             IterationResult r;
             if (multi) {
@@ -1175,6 +1176,7 @@ public:
                         result.bestMove = r.bestMove;
                         result.pv = r.pv;
                         result.score = r.score;
+                        mainImproved = true;
                         report(depth, r.score, r.pv, 0);
                     }
                     break;
@@ -1212,14 +1214,20 @@ public:
         // With helpers, the threads vote: each completed result adds
         // (score - lowest score + 14) * depth to its move, and the move with
         // the most votes is played (the main thread's on a tie). A deeper or
-        // better-scored line elsewhere can so replace the main thread's. Not
-        // with a depth limit or MultiPV, where the main thread's result is
-        // the one asked for.
-        if (!helpers.empty() && !multi && limits.depth == 0 && result.depth > 0) {
+        // better-scored line elsewhere can so replace the main thread's. A
+        // proven win is decided by mate distance instead: the shortest mate
+        // found by any thread is played. Not with a depth limit or MultiPV,
+        // where the main thread's result is the one asked for, nor when the
+        // main thread's move comes from its last, interrupted iteration (it
+        // beat the previous best at a depth the others have not finished).
+        if (!helpers.empty() && !multi && limits.depth == 0 && result.depth > 0 && !mainImproved) {
             completed[0] = {result.depth, IterationResult{result.bestMove, result.score, result.pv}};
-            int lowest = INF_SCORE;
+            int lowest = INF_SCORE, highest = -INF_SCORE;
             for (const auto &c : completed)
-                if (c.depth > 0) lowest = std::min(lowest, c.result.score);
+                if (c.depth > 0) {
+                    lowest = std::min(lowest, c.result.score);
+                    highest = std::max(highest, c.result.score);
+                }
             auto votesFor = [&](const Move &m) {
                 int64_t v = 0;
                 for (const auto &c : completed)
@@ -1231,6 +1239,10 @@ public:
             int64_t bestVotes = votesFor(result.bestMove);
             for (size_t i = 1; i < completed.size(); ++i) {
                 if (completed[i].depth == 0) continue;
+                if (highest >= MATE_BOUND) { // the shortest proven mate; the main thread's on a tie
+                    if (completed[i].result.score > completed[best].result.score) best = i;
+                    continue;
+                }
                 const int64_t v = votesFor(completed[i].result.bestMove);
                 // Among threads with the winning move, the deepest one's line is reported.
                 if (v > bestVotes || (v == bestVotes && sameMove(completed[i].result.bestMove, completed[best].result.bestMove) &&
