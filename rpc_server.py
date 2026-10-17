@@ -33,9 +33,42 @@ import torch
 
 from chess_graph import FEATURE_DIM, ChessGraph
 from gnn_evaluator import POLICY_DIM, GNNEvaluator, legal_move_priors, load_checkpoint
-from gnn_v3 import GNNAdapter, GNNAdapterV2, as_adapter, load_any_checkpoint
-
 logger = logging.getLogger("rpc_server")
+
+try:
+    from gnn_v3 import GNNAdapter, GNNAdapterV2, as_adapter, load_any_checkpoint
+except Exception as _v3_error:  # the v3 code must never stop v2 networks being served
+    _V3_IMPORT_ERROR: Optional[Exception] = _v3_error
+
+    class GNNAdapter:  # type: ignore[no-redef]
+        """Legacy-only stand-in for gnn_v3's adapters: 'nags-gnn-v2' served exactly as before."""
+        format = "nags-gnn-v2"
+        policy_dim = POLICY_DIM
+
+        def __init__(self, model: GNNEvaluator, builder: ChessGraph):
+            self.model = model
+            self.builder = builder
+
+        def build_batch(self, positions):
+            return self.builder.fens_to_batch(positions)
+
+        def evaluate(self, batch, mc_samples: int = 5):
+            return self.model.evaluate(batch, mc_samples=mc_samples)
+
+        def move_priors(self, policy_row, moves):
+            return legal_move_priors(policy_row, moves)
+
+    GNNAdapterV2 = GNNAdapter  # type: ignore[misc]
+
+    def as_adapter(model, builder=None):  # type: ignore[no-redef]
+        if isinstance(model, GNNAdapter):
+            return model
+        return GNNAdapter(model, builder if builder is not None else ChessGraph(device=model.device))
+
+    def load_any_checkpoint(path, device=None):  # type: ignore[no-redef]
+        raise RuntimeError(f"gnn_v3 unavailable ({_V3_IMPORT_ERROR})")
+else:
+    _V3_IMPORT_ERROR = None
 
 DEFAULT_MODEL = os.path.join("models", "production_model.pth")
 MAX_BATCH = 256
@@ -107,6 +140,10 @@ def load_served_model(path: Optional[str], device: torch.device, hidden_dim: int
     """load_model for either checkpoint format: a 'nags-gnn-v2' or 'nags-gnn-v3' file is served
     with its own graph builder and move encoding; without a file, the untrained legacy model."""
     if path and os.path.exists(path):
+        if _V3_IMPORT_ERROR is not None:
+            logger.warning("gnn_v3 could not be imported (%s); serving %s as a nags-gnn-v2 checkpoint.",
+                           _V3_IMPORT_ERROR, path)
+            return GNNAdapterV2(load_model(path, device, hidden_dim), ChessGraph(device=device))
         adapter = load_any_checkpoint(path, device=device)
         logger.info("Loaded %s model from %s (%s)", adapter.format, path, adapter.model.config)
         return adapter

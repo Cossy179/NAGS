@@ -140,3 +140,39 @@ def test_server_process_serves_a_v3_checkpoint(tmp_path):
     assert reply["policy_dim"] == 4228 and reply["model_format"] == "nags-gnn-v3"
     assert len(reply["results"][0]["move_priors"]) == len(moves)
     assert "Loaded nags-gnn-v3 model" in (tmp_path / "rpc.log").read_text()
+
+
+def test_v3_full_policy_is_on_legal_moves(v3_service):
+    from policy_encoding import legal_mask_v3
+
+    fens = [PROMO_W, PROMO_B, chess.STARTING_FEN]
+    reply = v3_service.handle({"fens": fens})
+    for fen, item in zip(fens, reply["results"]):
+        policy = torch.tensor(item["policy"])
+        legal = legal_mask_v3(chess.Board(fen))
+        assert abs(float(policy.sum()) - 1) < 1e-5 and float(policy[~legal].sum()) == 0.0
+
+
+def test_v2_is_served_when_gnn_v3_cannot_be_imported(tmp_path):
+    """A broken or missing gnn_v3 (or one of its dependencies) must not stop v2 networks being served."""
+    import subprocess
+    import sys
+
+    (tmp_path / "gnn_v3.py").write_text("raise ImportError('simulated')\n")
+    root = Path(__file__).resolve().parents[2]
+    script = f"""
+import json, sys
+sys.path[:0] = [{str(tmp_path)!r}, {str(root)!r}]
+import torch, rpc_server
+assert rpc_server._V3_IMPORT_ERROR is not None
+cases = json.loads(open({str(FIXTURES / 'gnn_v2_expected.json')!r}).read())
+adapter = rpc_server.load_served_model({str(FIXTURES / 'gnn_v2.pt')!r}, torch.device('cpu'))
+reply = rpc_server.EvaluationService(adapter, mc_samples=1).handle(
+    {{"fens": [c["fen"] for c in cases], "moves": [c["moves"] for c in cases]}})
+assert reply["policy_dim"] == 4096 and reply["model_format"] == "nags-gnn-v2", reply
+for c, r in zip(cases, reply["results"]):
+    assert max(abs(a - b) for a, b in zip(r["move_priors"], c["priors"])) < 1e-5 and abs(r["value"] - c["value"]) < 1e-5
+print("ok")
+"""
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, cwd=tmp_path, timeout=300)
+    assert out.returncode == 0 and out.stdout.strip().endswith("ok"), out.stderr
