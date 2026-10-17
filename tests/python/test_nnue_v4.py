@@ -98,7 +98,8 @@ def _engine_evals(commands):
     return out, [int(l.split()[3]) for l in out.splitlines() if l.startswith("info string eval")]
 
 
-GAMES = [  # positions reached by moves, so the engine's accumulators are updated incrementally
+GAMES = [  # positions after castling, promotions and en passant (the engine's 'eval' refreshes its
+          # accumulators; incremental updates of version 4 are covered by tests/cpp/nnue_tests.cpp)
     (chess.STARTING_FEN, "e2e4 d7d5 e4d5 g8f6 f1b5 c7c6 d5c6 d8d2 b1d2 b7c6 g1f3 c6b5 e1g1 e7e5 f1e1".split()),
     ("r3k2r/pPpp1ppp/8/8/8/8/PpPP1PPP/R3K2R w KQkq - 0 1", "b7a8n b2a1n e1g1 e8g8 a8c7 a1c2".split()),
     ("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", "e5d6 e8d7 e1e2 d7d6".split()),
@@ -129,6 +130,14 @@ def test_engine_matches_reference(tmp_path, buckets, king, activation, l1, l2):
     assert len(set(expected)) > 3  # a network that evaluates, not a constant
 
 
+def _v4_bytes(l1, l2, hidden=256, buckets=1):
+    """A version 4 file of the right size for its header, all weights zero (no king buckets, clipped ReLU)."""
+    inputs = 2 * hidden
+    body = 2 * (768 * hidden + hidden) + buckets * (2 * (l1 * inputs + l2 * l1 + l2) + 4 * (l1 + l2 + 1))
+    return (train.MAGIC + struct.pack("<IIIII", 4, hidden, buckets, 1, 0) + bytes(64) + struct.pack("<II", l1, l2)
+            + bytes(body))
+
+
 @pytest.mark.skipif(_engine() is None, reason="nags_enhanced not built")
 def test_engine_rejects_bad_files_and_keeps_older_formats(tmp_path):
     out = _train(tmp_path, 256, 2, "none", "pairwise", 8, 8, lr="0.01")
@@ -137,8 +146,12 @@ def test_engine_rejects_bad_files_and_keeps_older_formats(tmp_path):
     short.write_bytes(data[:-1])
     both = tmp_path / "both.nnue"  # pairwise and SCReLU together: not a valid design
     both.write_bytes(data[:24] + struct.pack("<I", 5) + data[28:])
-    big = tmp_path / "big.nnue"  # l1 above the limit
-    big.write_bytes(data[:92] + struct.pack("<I", 33) + data[96:])
+    big = tmp_path / "big.nnue"  # l1 above the limit, in a file of the right size for it
+    big.write_bytes(_v4_bytes(l1=33, l2=8))
+    ok = tmp_path / "ok.nnue"  # the same with l1 = 32 loads, so only the limit refuses the other
+    ok.write_bytes(_v4_bytes(l1=32, l2=8))
+    text, _ = _engine_evals(f"setoption name EvalFile value {ok}\n")
+    assert "NNUE evaluation" in text, text
     for bad in (short, both, big):
         text, _ = _engine_evals(f"setoption name EvalFile value {bad}\n")
         assert "EvalFile:" in text and "NNUE evaluation" not in text, (bad.name, text)
