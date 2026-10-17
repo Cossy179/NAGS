@@ -33,3 +33,17 @@ bool plausibleEpSquare(const BoardT &b, int sq, Color stm) {
     const Bitboard occ = b.occupancy();
     return !(occ & ((1ULL << sq) | (1ULL << fromSq))) && (b.pieceBB(opposite(stm), PAWN) & (1ULL << pawnSq));
 }
+
+// Whether a pawn of `stm` could capture en passant on `sq` (it stands next to
+// the pawn that has just been pushed two squares). An en-passant square no
+// pawn can use is not part of the position: FEN parsing and makeMove drop
+// it, so that it never makes two otherwise equal positions differ (for
+// repetitions, the hash and the TT).
+template <class BoardT>
+bool epCapturable(const BoardT &b, int sq, Color stm) {
+    const int pawnSq = stm == Color::White ? sq - 8 : sq + 8;
+    Bitboard adjacent = 0;
+    if (fileOf(pawnSq) > 0) adjacent |= 1ULL << (pawnSq - 1);
+    if (fileOf(pawnSq) < 7) adjacent |= 1ULL << (pawnSq + 1);
+    return (b.pieceBB(stm, PAWN) & adjacent) != 0;
+}

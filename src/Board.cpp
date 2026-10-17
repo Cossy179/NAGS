@@ -224,7 +224,8 @@ bool Board::setFromFEN(const std::string &fen) {
         if (sq < 0 || ep.size() != 2) return false;
         // An impossible en-passant square is ignored (most engines do the
         // same); an en-passant capture would remove a pawn that is not there.
-        if (plausibleEpSquare(b, sq, b.side)) b.epSquare = sq;
+        // So is one no pawn could capture on (FenChecks.h).
+        if (plausibleEpSquare(b, sq, b.side) && epCapturable(b, sq, b.side)) b.epSquare = sq;
     }
     // The side that just moved must not be in check.
     if (b.inCheck(opposite(b.side))) return false;
@@ -506,6 +507,7 @@ void Board::makeMove(const Move &m) {
 
     if (moving == Piece::WP && m.to - m.from == 16) epSquare = m.from + 8;
     else if (moving == Piece::BP && m.from - m.to == 16) epSquare = m.from - 8;
+    if (epSquare != -1 && !epCapturable(*this, epSquare, opposite(side))) epSquare = -1;  // FenChecks.h
     if (epSquare != -1) hash ^= zEnpassant[epSquare & 7];
 
     if (moving == Piece::WP || moving == Piece::BP || he.captured != Piece::None) halfmoveClock = 0;
