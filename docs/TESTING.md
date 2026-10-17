@@ -51,8 +51,8 @@ of writing:
 |--------|-------------|
 | `nags_basic` | 1416774 |
 | `nags_fast` | 1071658 |
-| `nags_enhanced` | 1595609 |
-| `nags` | 1595609 |
+| `nags_enhanced` | 1053769 |
+| `nags` | 1053769 |
 
 When search improvements make a run much faster, raise the depth (in the
 engine's `main` file) and record the new fingerprints. `bench` always
@@ -365,6 +365,7 @@ speed log), openings from `nags_balanced.epd` and resign adjudication
 | Null-move reduction 4 + depth/6 + min((eval − beta)/200, 3) alone (gentler than the rejected one above) | SPRT [0, 10], 3+0.03 | H0 after 1148 games (+302 =512 -334) | −9.7 ± 13.9 | – (not adopted) |
 | Razoring alone at depth ≤ 2 (eval + 300·depth ≤ alpha: quiescence decides) | SPRT [0, 10], 3+0.03 | H0 after 720 games (+188 =303 -229) | −19.8 ± 18.0 | – (not adopted) |
 | Moves generated and scored only when their stage is reached: TT move before any generation, captures at the capture stage, quiet moves after the killers and scored with the history as it is then (`10d3d5a`) | SPRT [0, 10], 3+0.03, 3 at a time on the 4-core VM | H1 after 1246 games (+400 =516 -330) | +19.5 ± 13.8 | 1595609 |
+| Fail-low nodes store no TT move (the stored move had just the highest fail-soft upper bound; it also kept IIR from applying), against `10d3d5a` (`b5bc3b5`) | SPRT [0, 10], 3+0.03, 3 at a time on the 4-core VM | H1 after 1200 games (+402 =470 -328; 1 loss on time by the candidate) | +21.5 ± 14.6 | 1053769 |
 
 ### Experiment record
 
@@ -379,6 +380,11 @@ whether it touches anything a network in training depends on
 | Experiment (branch) | Hypothesis | Bench / speed | Test | Decision | Training impact |
 |---|---|---|---|---|---|
 | Lazy move generation (`exp/lazy-picker`) | Fresher history for quiet moves orders them better; no generation at TT cutoffs saves time | 1947402 → 1595609 at depth 10, 1.044× nodes/s | SPRT [0, 10]: H1, +19.5 ± 13.8 (1246 games) | accepted (`10d3d5a`) | changes future datagen games (better search), not their format |
+| No TT move at fail-low nodes (`exp/faillow-ttmove`, audit finding) | The stored move at an all-node is noise: it misorders re-visits and disables IIR | 1595609 → 1053769 | SPRT [0, 10]: H1, +21.5 ± 14.6 (1200 games) | accepted (`b5bc3b5`) | as above |
+
+Experiments in this batch are each tested against `10d3d5a` and merged in
+turn; the combination is checked by a final match of the new head against
+`10d3d5a`.
 
 `nags` benches like `nags_enhanced` (without the Python services the MCTS
 arm does not run); before `nags` was rebuilt on FastBoard (see below) its
