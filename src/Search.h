@@ -248,6 +248,8 @@ public:
         unflushed = 0;
         selDepth = 0;
         aborted = false;
+        rootMoveNodes.clear(); // also filled by MultiPV iterations, which do not reset it
+        iterationNodes = 0;
         tbHits.store(0, std::memory_order_relaxed);
     }
 
