@@ -244,6 +244,7 @@ public:
         unflushed = 0;
         selDepth = 0;
         aborted = false;
+        std::fill(std::begin(doubleExtensions), std::end(doubleExtensions), 0);
         tbHits.store(0, std::memory_order_relaxed);
     }
 
@@ -772,6 +773,7 @@ private:
             int reduction = 3 + depth / 6;
             NAGS_STAT(++stats.nmpTries);
             plyMoves[ply] = PlyMove{};
+            doubleExtensions[ply + 1] = doubleExtensions[ply]; // the null move's subtree continues this line
             board.makeNullMove();
             int score = -negamax(depth - 1 - reduction, -beta, -beta + 1, ply + 1, false);
             board.unmakeNullMove();
