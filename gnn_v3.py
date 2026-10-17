@@ -54,7 +54,7 @@ from gnn_evaluator import CHECKPOINT_FORMAT as CHECKPOINT_FORMAT_V2
 from gnn_evaluator import POLICY_DIM as POLICY_DIM_V2
 from gnn_evaluator import GNNEvaluator, legal_move_priors, load_checkpoint
 from policy_encoding import (FROM_TO_DIM, NUM_PROMOTION_PAIRS, POLICY_V3_DIM, PROMOTION_FROM, PROMOTION_TO,
-                             move_index_v3)
+                             legal_mask_v3, move_index_v3)
 from relational_graph import (FEATURE_DIM_V3, GRAPH_VERSION, KIND_GLOBAL, KIND_SQUARE, NUM_RELATIONS,
                               RelationalChessGraph)
 
@@ -176,17 +176,27 @@ class RelationalGNNEvaluator(nn.Module):
         return p[..., 0] - p[..., 2]
 
     @torch.no_grad()
-    def evaluate(self, graph: Data, mc_samples: int = 5) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def evaluate(self, graph: Data, mc_samples: int = 5,
+                 legal: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """(policy probabilities [B, 4228], value mean [B], value std over MC-dropout samples [B]) on the CPU.
 
-        Restores the module's previous train/eval mode.
+        With `legal` ([B, 4228] bool) the probabilities are over the legal
+        moves only. Training masks illegal moves out of the loss, so their
+        logits get no gradient and drift; without the mask they can take
+        almost all of the softmax mass. Rows without a legal move are left
+        unmasked. Restores the module's previous train/eval mode.
         """
         was_training = self.training
         try:
             self.eval()
             graph = graph.to(self.device)
             squares, glob, pooled = self._embed(graph)
-            probs = F.softmax(self._policy(squares, glob), dim=-1)
+            logits = self._policy(squares, glob)
+            if legal is not None:
+                legal = legal.to(logits.device)
+                usable = legal & legal.any(dim=1, keepdim=True)
+                logits = logits.masked_fill(~usable & legal.any(dim=1, keepdim=True), float("-inf"))
+            probs = F.softmax(logits, dim=-1)
             samples = max(1, mc_samples)
             if samples > 1:
                 self.wdl_head.train()  # dropout on, gradients still disabled
@@ -313,6 +323,15 @@ class GNNAdapterV3(GNNAdapter):
     """'nags-gnn-v3': RelationalGNNEvaluator + RelationalChessGraph + 4228-entry promotion-aware priors."""
     format = CHECKPOINT_FORMAT_V3
     policy_dim = POLICY_V3_DIM
+
+    def build_batch(self, positions: Sequence[Any]) -> Batch:
+        batch = self.builder.fens_to_batch(positions)
+        # The legal moves of each position: probabilities are taken over them.
+        batch.legal_v3 = torch.stack([legal_mask_v3(chess.Board(f) if isinstance(f, str) else f) for f in positions])
+        return batch
+
+    def evaluate(self, batch: Data, mc_samples: int = 5) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.model.evaluate(batch, mc_samples=mc_samples, legal=getattr(batch, "legal_v3", None))
 
     def move_priors(self, policy_row: torch.Tensor, moves: Sequence[str]) -> List[float]:
         return legal_move_priors_v3(policy_row, moves)
