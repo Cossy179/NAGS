@@ -2,6 +2,7 @@
 
 #include "BitOps.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -103,6 +104,97 @@ NAGS_AVX2 int32_t outputSumAvx2(const int16_t *us, const int16_t *them, const in
     s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0xB1));
     return _mm_cvtsi128_si32(s);
 }
+// Version 4 inputs from one accumulator, 16 values at a time: clamp(a, 0,
+// QA), or its square / QA, or (pairwise) the product of the two halves / QA.
+// A product p <= 255^2 fits in an unsigned 16-bit lane, and p / 255 is
+// exactly (p + (p >> 8) + 1) >> 8 for every such p.
+NAGS_AVX2 inline __m256i div255(__m256i p) {
+    return _mm256_srli_epi16(_mm256_add_epi16(_mm256_add_epi16(p, _mm256_srli_epi16(p, 8)), _mm256_set1_epi16(1)), 8);
+}
+NAGS_AVX2 inline __m256i clip(const int16_t *p) {
+    return _mm256_min_epi16(_mm256_max_epi16(ld(p), _mm256_setzero_si256()), _mm256_set1_epi16(QA));
+}
+NAGS_AVX2 int stackInputsAvx2(const int16_t *a, int16_t *x, bool screlu, bool pairwise) {
+    if (pairwise) {
+        constexpr int half = kHidden / 2;
+        for (int i = 0; i < half; i += 16) st(x + i, div255(_mm256_mullo_epi16(clip(a + i), clip(a + half + i))));
+        return half;
+    }
+    for (int i = 0; i < kHidden; i += 16) {
+        const __m256i c = clip(a + i);
+        st(x + i, screlu ? div255(_mm256_mullo_epi16(c, c)) : c);
+    }
+    return kHidden;
+}
+
+// Positions of the nonzero entries among 8: kNonzero[mask] lists them.
+struct NonzeroTable {
+    alignas(16) uint16_t index[256][8];
+    uint8_t count[256];
+    NonzeroTable() {
+        for (int m = 0; m < 256; ++m) {
+            count[m] = 0;
+            for (int b = 0; b < 8; ++b) index[m][b] = 0;
+            for (int b = 0; b < 8; ++b)
+                if (m >> b & 1) index[m][count[m]++] = static_cast<uint16_t>(b);
+        }
+    }
+};
+const NonzeroTable kNonzero;
+
+// A hidden layer from sparse inputs: s[j] = bias[j] + sum_i x[i] * w[i][j],
+// visiting only the pairs of inputs that are not both zero (after a clipped
+// ReLU most are). w holds, for each pair, the V * 8 outputs' two weights side
+// by side, so one madd adds a pair's contribution to 8 outputs. Integer
+// sums: the same results as the portable loop.
+template <int V>
+NAGS_AVX2 void sparseLayerAvx2(const int16_t *x, int inputs, const int16_t *w, const int32_t *bias, int32_t *s) {
+    alignas(32) uint16_t nz[kHidden + 8]; // up to `inputs / 2` <= kHidden pairs, plus room for an 8-index store
+    int count = 0;
+    const __m256i zero = _mm256_setzero_si256();
+    for (int i = 0; i < inputs; i += 16) { // 8 pairs: a pair is an int32, nonzero iff > 0 (inputs are >= 0)
+        const __m256i v = _mm256_load_si256(reinterpret_cast<const __m256i *>(x + i));
+        const int mask = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpgt_epi32(v, zero)));
+        // Store all 8 table entries (no branch on the count) and keep the first `count[mask]`.
+        const __m128i idx = _mm_add_epi16(_mm_load_si128(reinterpret_cast<const __m128i *>(kNonzero.index[mask])),
+                                          _mm_set1_epi16(static_cast<int16_t>(i / 2)));
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(nz + count), idx);
+        count += kNonzero.count[mask];
+    }
+    __m256i acc[V];
+    for (int v = 0; v < V; ++v) acc[v] = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(bias + 8 * v));
+    for (int k = 0; k < count; ++k) {
+        const int c = nz[k];
+        int32_t pair;
+        std::memcpy(&pair, x + 2 * c, 4);
+        const __m256i xp = _mm256_set1_epi32(pair);
+        const int16_t *col = w + static_cast<size_t>(c) * V * 16;
+        for (int v = 0; v < V; ++v) acc[v] = _mm256_add_epi32(acc[v], _mm256_madd_epi16(xp, ld(col + 16 * v)));
+    }
+    for (int v = 0; v < V; ++v) _mm256_storeu_si256(reinterpret_cast<__m256i *>(s + 8 * v), acc[v]);
+}
+
+// h = clamp(s >> 6, 0, QA) as int16 (s / QH; a negative sum gives 0 either
+// way), 16 values at a time. packs saturates to int16, which keeps the order.
+NAGS_AVX2 void activateAvx2(const int32_t *s, int16_t *h, int n) {
+    const __m256i zero = _mm256_setzero_si256(), qa = _mm256_set1_epi16(QA);
+    for (int i = 0; i < n; i += 16) {
+        const __m256i a = _mm256_srai_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i *>(s + i)), 6);
+        const __m256i b = _mm256_srai_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i *>(s + i + 8)), 6);
+        const __m256i p = _mm256_permute4x64_epi64(_mm256_packs_epi32(a, b), 0xD8); // back in order
+        st(h + i, _mm256_min_epi16(_mm256_max_epi16(p, zero), qa));
+    }
+}
+
+// sum of x[i] * w[i] for n values (a multiple of 16).
+NAGS_AVX2 int32_t dotAvx2(const int16_t *x, const int16_t *w, int n) {
+    __m256i sum = _mm256_setzero_si256();
+    for (int i = 0; i < n; i += 16) sum = _mm256_add_epi32(sum, _mm256_madd_epi16(ld(x + i), ld(w + i)));
+    __m128i r = _mm_add_epi32(_mm256_castsi256_si128(sum), _mm256_extracti128_si256(sum, 1));
+    r = _mm_add_epi32(r, _mm_shuffle_epi32(r, 0x4E));
+    r = _mm_add_epi32(r, _mm_shuffle_epi32(r, 0xB1));
+    return _mm_cvtsi128_si32(r);
+}
 } // namespace
 #endif
 
@@ -124,12 +216,16 @@ T readLe(const unsigned char *p) {
 //   3: hidden size, output buckets, king buckets, flags (bit 0 SCReLU, bit 1
 //      mirroring), the king-square layout (64 bytes); feature weights for
 //      every king bucket
+//   4: experimental, see parseV4
+bool parseV4(const unsigned char *data, size_t size, Network &net, std::string &error);
+
 bool parse(const unsigned char *data, size_t size, Network &net, std::string &error) {
     if (size < 16 || std::memcmp(data, "NAGSNNUE", 8) != 0) {
         error = "not a NAGS NNUE file";
         return false;
     }
     const uint32_t version = readLe<uint32_t>(data + 8);
+    if (version == 4) return parseV4(data, size, net, error);
     size_t header = 16;
     int buckets = 1, kingBuckets = 1;
     uint32_t flags = 0;
@@ -164,6 +260,10 @@ bool parse(const unsigned char *data, size_t size, Network &net, std::string &er
     net.kingBuckets = kingBuckets;
     net.screlu = flags & 1;
     net.mirror = flags & 2;
+    net.stack = net.l1 = net.l2 = 0; // a version 4 network loaded before
+    net.pairwise = false;
+    for (auto *v : {&net.l1Weights, &net.l2Weights, &net.l3Weights}) v->clear();
+    for (auto *v : {&net.l1Bias, &net.l2Bias, &net.l3Bias}) v->clear();
     std::memcpy(net.kingLayout, layout, 64);
     net.ftWeights.resize(ftCount);
     const unsigned char *p = data + header;
@@ -173,6 +273,152 @@ bool parse(const unsigned char *data, size_t size, Network &net, std::string &er
         for (int i = 0; i < 2 * kHidden; ++i, p += 2) net.outWeights[k][i] = static_cast<int16_t>(readLe<uint16_t>(p));
     for (int k = 0; k < buckets; ++k, p += 4) net.outBias[k] = static_cast<int32_t>(readLe<uint32_t>(p));
     return true;
+}
+
+// Version 4: the version 3 header (hidden size, output buckets B, king
+// buckets K, flags, layout) with flag bit 2 = pairwise inputs (not with
+// SCReLU), then uint32 l1 and l2 (1-32 each); the feature transformer as in
+// version 3; then for each output bucket: int16 w1[l1][I] (I = 2H, or H with
+// pairwise inputs; x QH), int32 b1[l1] (x QA x QH), int16 w2[l2][l1] (x QH),
+// int32 b2[l2] (x QA x QH), int16 w3[l2] (x QH), int32 b3 (x QA x QH).
+bool parseV4(const unsigned char *data, size_t size, Network &net, std::string &error) {
+    constexpr size_t header = 100;
+    if (size < header) {
+        error = "network file has the wrong size";
+        return false;
+    }
+    const int buckets = static_cast<int>(readLe<uint32_t>(data + 16));
+    const int kingBuckets = static_cast<int>(readLe<uint32_t>(data + 20));
+    const uint32_t flags = readLe<uint32_t>(data + 24);
+    const int l1 = static_cast<int>(readLe<uint32_t>(data + 92)), l2 = static_cast<int>(readLe<uint32_t>(data + 96));
+    if (readLe<uint32_t>(data + 12) != kHidden || buckets < 1 || buckets > kMaxBuckets || kingBuckets < 1 ||
+        kingBuckets > kMaxKingBuckets || flags > 7 || (flags & 5) == 5 || l1 < 1 || l1 > kMaxLayer || l2 < 1 ||
+        l2 > kMaxLayer || ((flags & 4) && kHidden % 32 != 0)) {
+        error = "unsupported network version or size (this build expects hidden size " + std::to_string(kHidden) + ")";
+        return false;
+    }
+    uint8_t layout[64];
+    std::memcpy(layout, data + 28, 64);
+    for (int sq = 0; sq < 64; ++sq)
+        if (layout[sq] >= kingBuckets) {
+            error = "bad king bucket layout";
+            return false;
+        }
+    const int inputs = (flags & 4) ? kHidden : 2 * kHidden;
+    const size_t ftCount = static_cast<size_t>(kingBuckets) * kFeatures * kHidden;
+    const size_t perBucket = 2 * (static_cast<size_t>(l1) * inputs + static_cast<size_t>(l2) * l1 + l2) +
+                             4 * (static_cast<size_t>(l1) + l2 + 1);
+    if (size != header + 2 * (ftCount + kHidden) + buckets * perBucket) {
+        error = "network file has the wrong size";
+        return false;
+    }
+    net = Network{};
+    net.buckets = buckets;
+    net.kingBuckets = kingBuckets;
+    net.screlu = flags & 1;
+    net.mirror = flags & 2;
+    net.pairwise = flags & 4;
+    net.stack = 1;
+    net.l1 = l1;
+    net.l2 = l2;
+    const auto roundUp16 = [](int n) { return (n + 15) / 16 * 16; };
+    net.l1Rows = roundUp16(l1);
+    net.l2Rows = roundUp16(l2);
+    std::memcpy(net.kingLayout, layout, 64);
+    const unsigned char *p = data + header;
+    net.ftWeights.resize(ftCount);
+    for (size_t i = 0; i < ftCount; ++i, p += 2) net.ftWeights[i] = static_cast<int16_t>(readLe<uint16_t>(p));
+    for (int i = 0; i < kHidden; ++i, p += 2) net.ftBias[i] = static_cast<int16_t>(readLe<uint16_t>(p));
+    net.l1Weights.assign(static_cast<size_t>(buckets) * inputs * net.l1Rows, 0);
+    net.l1Bias.assign(static_cast<size_t>(buckets) * net.l1Rows, 0);
+    net.l2Weights.assign(static_cast<size_t>(buckets) * net.l1Rows * net.l2Rows, 0);
+    net.l2Bias.assign(static_cast<size_t>(buckets) * net.l2Rows, 0);
+    net.l3Weights.assign(static_cast<size_t>(buckets) * net.l2Rows, 0);
+    net.l3Bias.assign(buckets, 0);
+    auto i16 = [&]() {
+        const auto v = static_cast<int16_t>(readLe<uint16_t>(p));
+        p += 2;
+        return v;
+    };
+    auto i32 = [&]() {
+        const auto v = static_cast<int32_t>(readLe<uint32_t>(p));
+        p += 4;
+        return v;
+    };
+    // Weight of input i for output j, stored by pairs of inputs.
+    const auto paired = [](int16_t *w, int rows, int i, int j) -> int16_t & {
+        return w[(static_cast<size_t>(i / 2) * rows + j) * 2 + i % 2];
+    };
+    for (int k = 0; k < buckets; ++k) {
+        int16_t *w1 = net.l1Weights.data() + static_cast<size_t>(k) * inputs * net.l1Rows;
+        int16_t *w2 = net.l2Weights.data() + static_cast<size_t>(k) * net.l1Rows * net.l2Rows;
+        for (int j = 0; j < l1; ++j)
+            for (int i = 0; i < inputs; ++i) paired(w1, net.l1Rows, i, j) = i16();
+        for (int j = 0; j < l1; ++j) net.l1Bias[k * net.l1Rows + j] = i32();
+        for (int j = 0; j < l2; ++j)
+            for (int i = 0; i < l1; ++i) paired(w2, net.l2Rows, i, j) = i16();
+        for (int j = 0; j < l2; ++j) net.l2Bias[k * net.l2Rows + j] = i32();
+        for (int j = 0; j < l2; ++j) net.l3Weights[k * net.l2Rows + j] = i16();
+        net.l3Bias[k] = i32();
+    }
+    return true;
+}
+
+// Version 4 evaluation: centipawns for the side to move.
+int evaluateStack(const Network &net, const int16_t *us, const int16_t *them, int k) {
+    // Inputs in [0, QA]: clipped accumulators, their squares / QA, or the
+    // products of their two halves / QA; side to move first.
+    alignas(32) int16_t x[2 * kHidden], h1[kMaxLayer], h2[kMaxLayer];
+    alignas(32) int32_t s1[kMaxLayer], s2[kMaxLayer];
+    const int half = kHidden / 2, inputs = net.pairwise ? kHidden : 2 * kHidden;
+    const int16_t *w1 = net.l1Weights.data() + static_cast<size_t>(k) * inputs * net.l1Rows;
+    const int32_t *b1 = net.l1Bias.data() + static_cast<size_t>(k) * net.l1Rows;
+    const int16_t *w2 = net.l2Weights.data() + static_cast<size_t>(k) * net.l1Rows * net.l2Rows;
+    const int32_t *b2 = net.l2Bias.data() + static_cast<size_t>(k) * net.l2Rows;
+    const int16_t *w3 = net.l3Weights.data() + static_cast<size_t>(k) * net.l2Rows;
+#ifdef NAGS_NNUE_AVX2
+    if (kAvx2) {
+        const int n = stackInputsAvx2(us, x, net.screlu, net.pairwise);
+        stackInputsAvx2(them, x + n, net.screlu, net.pairwise);
+        if (net.l1Rows == 16) sparseLayerAvx2<2>(x, inputs, w1, b1, s1);
+        else sparseLayerAvx2<4>(x, inputs, w1, b1, s1);
+        activateAvx2(s1, h1, net.l1Rows);
+        if (net.l2Rows == 16) sparseLayerAvx2<2>(h1, net.l1Rows, w2, b2, s2);
+        else sparseLayerAvx2<4>(h1, net.l1Rows, w2, b2, s2);
+        activateAvx2(s2, h2, net.l2Rows);
+        const int64_t out = static_cast<int64_t>(net.l3Bias[k]) + dotAvx2(h2, w3, net.l2Rows);
+        return static_cast<int>(out * SCALE / (QA * QH));
+    }
+#endif
+    int n = 0;
+    for (const int16_t *a : {us, them}) {
+        if (net.pairwise) {
+            for (int i = 0; i < half; ++i) {
+                const int c0 = std::clamp<int>(a[i], 0, QA), c1 = std::clamp<int>(a[half + i], 0, QA);
+                x[n++] = static_cast<int16_t>(c0 * c1 / QA);
+            }
+        } else {
+            for (int i = 0; i < kHidden; ++i) {
+                const int c = std::clamp<int>(a[i], 0, QA);
+                x[n++] = static_cast<int16_t>(net.screlu ? c * c / QA : c);
+            }
+        }
+    }
+    // s = bias + sum x[i] * w(i, j) with the weights stored by pairs of inputs;
+    // h = clamp(s / QH, 0, QA) (a shift: a negative sum gives 0 either way).
+    const auto layer = [](const int16_t *in, int n, const int16_t *w, const int32_t *bias, int rows, int16_t *h) {
+        int32_t sum[kMaxLayer];
+        for (int j = 0; j < rows; ++j) sum[j] = bias[j];
+        for (int i = 0; i < n; ++i)
+            if (in[i])
+                for (int j = 0; j < rows; ++j) sum[j] += in[i] * w[(static_cast<size_t>(i / 2) * rows + j) * 2 + i % 2];
+        for (int j = 0; j < rows; ++j) h[j] = static_cast<int16_t>(std::clamp(sum[j] >> 6, 0, QA));
+    };
+    layer(x, inputs, w1, b1, net.l1Rows, h1);
+    layer(h1, net.l1Rows, w2, b2, net.l2Rows, h2);
+    int64_t out = net.l3Bias[k];
+    for (int j = 0; j < net.l2Rows; ++j) out += h2[j] * w3[j];
+    return static_cast<int>(out * SCALE / (QA * QH));
 }
 
 void select() {
@@ -226,6 +472,7 @@ int evaluate(const Accumulator &acc, Color stm, uint64_t occupied) {
     const int16_t *w = net.outWeights[k];
     const int16_t *us = acc.v[colorIndex(stm)];
     const int16_t *them = acc.v[colorIndex(stm) ^ 1];
+    if (net.stack) return evaluateStack(net, us, them, k);
     int64_t total;
 #ifdef NAGS_NNUE_AVX2
     if (kAvx2) {

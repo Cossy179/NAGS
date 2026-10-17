@@ -60,6 +60,112 @@ static std::string writeRandomNet(bool kingBuckets) {
     return path;
 }
 
+// A version 4 network with random weights, kept in file order for a plain
+// reference evaluation: 2 king buckets (by rank), 3 output buckets.
+struct StackNet {
+    int flags, l1, l2, inputs;
+    std::vector<int> w1, b1, w2, b2, w3, b3; // [bucket][out][in] ...
+};
+
+static std::string writeStackNet(StackNet &n, unsigned seed) {
+    const int buckets = 3, sets = 2, H = nnue::kHidden;
+    n.inputs = (n.flags & 4) ? H : 2 * H;
+    std::string path = "nnue_test_stack.nnue";
+    std::ofstream out(path, std::ios::binary);
+    out.write("NAGSNNUE", 8);
+    auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) out.put(static_cast<char>((v >> (8 * i)) & 0xFF)); };
+    auto i16 = [&](int v) { uint16_t u = static_cast<uint16_t>(v); out.put(static_cast<char>(u & 0xFF)); out.put(static_cast<char>(u >> 8)); };
+    u32(4);
+    u32(H);
+    u32(buckets);
+    u32(sets);
+    u32(static_cast<uint32_t>(n.flags));
+    for (int sq = 0; sq < 64; ++sq) out.put(static_cast<char>(sq < 16 ? 0 : 1));
+    u32(static_cast<uint32_t>(n.l1));
+    u32(static_cast<uint32_t>(n.l2));
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> fw(-60, 60), fb(0, 200), w(-127, 127);
+    std::uniform_int_distribution<int> b1(-255 * 64 / 4, 255 * 64), b2(-255 * 64 / 2, 255 * 64 / 2);
+    for (int i = 0; i < sets * nnue::kFeatures * H; ++i) i16(fw(rng));
+    for (int i = 0; i < H; ++i) i16(fb(rng));
+    for (int k = 0; k < buckets; ++k) {
+        auto put16 = [&](std::vector<int> &v, int count, std::uniform_int_distribution<int> &d) {
+            for (int i = 0; i < count; ++i) v.push_back(d(rng)), i16(v.back());
+        };
+        auto put32 = [&](std::vector<int> &v, int count, std::uniform_int_distribution<int> &d) {
+            for (int i = 0; i < count; ++i) v.push_back(d(rng)), u32(static_cast<uint32_t>(v.back()));
+        };
+        put16(n.w1, n.l1 * n.inputs, w);
+        put32(n.b1, n.l1, b1);
+        put16(n.w2, n.l2 * n.l1, w);
+        put32(n.b2, n.l2, b2);
+        put16(n.w3, n.l2, w);
+        put32(n.b3, 1, b2);
+    }
+    return path;
+}
+
+// The version 4 evaluation written out plainly from the file's layout, with
+// C++ division (truncation) wherever the format divides.
+static int stackReference(const StackNet &n, const nnue::Accumulator &acc, Color stm, uint64_t occupied) {
+    const int H = nnue::kHidden, k = nnue::bucketOf(popcount(occupied), 3);
+    std::vector<int> x;
+    for (const int16_t *a : {acc.v[colorIndex(stm)], acc.v[colorIndex(stm) ^ 1]}) {
+        auto c = [&](int i) { return a[i] < 0 ? 0 : a[i] > 255 ? 255 : a[i]; };
+        if (n.flags & 4)
+            for (int i = 0; i < H / 2; ++i) x.push_back(c(i) * c(H / 2 + i) / 255);
+        else
+            for (int i = 0; i < H; ++i) x.push_back((n.flags & 1) ? c(i) * c(i) / 255 : c(i));
+    }
+    auto layer = [](const std::vector<int> &in, const int *w, const int *b, int outs) {
+        std::vector<int> h;
+        for (int j = 0; j < outs; ++j) {
+            int64_t s = b[j];
+            for (size_t i = 0; i < in.size(); ++i) s += static_cast<int64_t>(in[i]) * w[j * in.size() + i];
+            const int64_t v = s / 64;
+            h.push_back(static_cast<int>(v < 0 ? 0 : v > 255 ? 255 : v));
+        }
+        return h;
+    };
+    const auto h1 = layer(x, n.w1.data() + static_cast<size_t>(k) * n.l1 * n.inputs, n.b1.data() + k * n.l1, n.l1);
+    const auto h2 = layer(h1, n.w2.data() + static_cast<size_t>(k) * n.l2 * n.l1, n.b2.data() + k * n.l2, n.l2);
+    int64_t out = n.b3[k];
+    for (int j = 0; j < n.l2; ++j) out += static_cast<int64_t>(h2[j]) * n.w3[k * n.l2 + j];
+    return static_cast<int>(out * 400 / (255 * 64));
+}
+
+// The engine's version 4 evaluation (AVX2 or portable, whichever this
+// machine runs) equals the plain reference through random games.
+static void checkStackNetwork(int flags, int l1, int l2, unsigned seed) {
+    StackNet n{flags, l1, l2, 0, {}, {}, {}, {}, {}, {}};
+    std::string error;
+    const std::string path = writeStackNet(n, seed);
+    CHECK(nnue::load(path, error), "loading the version 4 network failed: %s", error.c_str());
+    std::remove(path.c_str());
+    std::mt19937 rng(seed);
+    int checked = 0, distinct = 0, last = 0;
+    for (const char *start : {"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                              "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1"}) {
+        for (int game = 0; game < 6; ++game) {
+            FastBoard b;
+            b.setFromFEN(start);
+            for (int ply = 0; ply < 80; ++ply) {
+                auto moves = b.generateLegalMoves();
+                if (moves.empty()) break;
+                b.makeMove(moves[rng() % moves.size()]);
+                const int got = nnue::evaluate(b.accumulator(), b.sideToMove(), b.occupancy());
+                const int want = stackReference(n, b.accumulator(), b.sideToMove(), b.occupancy());
+                CHECK(got == want, "version 4 (flags %d, %d-%d): %d, reference %d at %s", flags, l1, l2, got, want,
+                      b.getFEN().c_str());
+                distinct += got != last;
+                last = got;
+                ++checked;
+            }
+        }
+    }
+    CHECK(checked > 500 && distinct > checked / 4, "version 4 test too weak: %d positions, %d changes", checked, distinct);
+}
+
 static bool sameAccumulator(const FastBoard &b) {
     FastBoard copy = b;
     copy.refreshAccumulator();
@@ -191,6 +297,33 @@ int main() {
     if (kNagsEmbeddedNetSize > 0) CHECK(nnue::embedded() != nullptr, "the embedded network does not load in this build");
     checkNetwork(false);
     checkNetwork(true);
+
+    // Version 4 (experimental): every activation, mirroring, padded and
+    // unpadded layer sizes. A version 3 network loaded afterwards evaluates
+    // exactly as before.
+    {
+        std::string error;
+        const std::string v3 = writeRandomNet(true);
+        CHECK(nnue::load(v3, error), "loading the random network failed: %s", error.c_str());
+        std::vector<int> before;
+        FastBoard p;
+        for (const char *fen : {"r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 2 3", "8/8/1k6/8/8/8/6K1/7Q b - - 0 1"}) {
+            p.setFromFEN(fen);
+            before.push_back(eval::evaluate(p));
+        }
+        checkStackNetwork(0, 16, 32, 1);
+        checkStackNetwork(1 | 2, 8, 16, 2);
+        checkStackNetwork(4, 24, 20, 3);
+        checkStackNetwork(4 | 2, 32, 1, 4);
+        CHECK(nnue::load(v3, error), "reloading the random network failed: %s", error.c_str());
+        std::vector<int> after;
+        for (const char *fen : {"r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 2 3", "8/8/1k6/8/8/8/6K1/7Q b - - 0 1"}) {
+            p.setFromFEN(fen);
+            after.push_back(eval::evaluate(p));
+        }
+        CHECK(before == after, "a version 3 network evaluates differently after a version 4 one was loaded");
+        nnue::useEmbedded();
+    }
 
     // The search runs on the network (mate detection does not depend on it).
     TranspositionTable tt(16);

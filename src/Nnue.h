@@ -9,7 +9,10 @@
 // transformer turns them into two accumulators (one per perspective), which
 // the board keeps up to date incrementally as pieces are put and removed;
 // evaluation applies a clipped ReLU (or its square, SCReLU) and one of up to
-// 8 output layers, chosen by the number of pieces. The network is global to
+// 8 output layers, chosen by the number of pieces. Version 4 networks
+// (experimental, tools/nnue/train_v4.py) have the same inputs and
+// accumulators, followed by two small hidden layers per output bucket
+// instead of the single output layer. The network is global to
 // the process: load()/setEnabled() must not be called while a search is
 // running, and boards created before a change must call refresh() (the
 // search does this for its root).
@@ -32,6 +35,8 @@ constexpr int kHidden = NAGS_NNUE_HIDDEN; // networks of another size are reject
 constexpr int QA = 255, QB = 64, SCALE = 400;
 constexpr int kMaxBuckets = 8;
 constexpr int kMaxKingBuckets = 32;
+constexpr int kMaxLayer = 32; // version 4: largest hidden layer after the accumulators
+constexpr int QH = 64;        // version 4: scale of the hidden layers' weights (as QB)
 
 // Output bucket for a position with `pieces` pieces (1 bucket: always 0).
 inline int bucketOf(int pieces, int buckets) {
@@ -49,6 +54,22 @@ struct Network {
     uint8_t kingLayout[64] = {}; // king square (from the perspective) -> input set
     bool mirror = false;    // king on files e-h: the perspective's squares are mirrored left-right
     bool screlu = false;    // activation: squared clipped ReLU instead of clipped ReLU
+    // Version 4 (stack > 0): per output bucket, inputs (2H, or H with pairwise
+    // products) -> l1 -> l2 -> 1, clipped ReLU in between; outWeights and
+    // outBias are unused. In memory the two hidden layers are padded to a
+    // multiple of 16 with zero weights and biases (which changes no result),
+    // and their weights are stored by pairs of inputs: for each pair, every
+    // output's two weights side by side.
+    int stack = 0;          // 0: versions 1-3 (one output layer)
+    bool pairwise = false;  // inputs: products of the two halves of each accumulator
+    int l1 = 0, l2 = 0;     // layer sizes in the file
+    int l1Rows = 0, l2Rows = 0; // padded sizes
+    std::vector<int16_t> l1Weights; // [bucket][inputs / 2][l1Rows][2]
+    std::vector<int32_t> l1Bias;    // [bucket][l1Rows]
+    std::vector<int16_t> l2Weights; // [bucket][l1Rows / 2][l2Rows][2]
+    std::vector<int32_t> l2Bias;    // [bucket][l2Rows]
+    std::vector<int16_t> l3Weights; // [bucket][l2Rows]
+    std::vector<int32_t> l3Bias;    // [bucket]
 };
 
 struct Accumulator {
