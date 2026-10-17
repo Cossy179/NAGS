@@ -148,7 +148,11 @@ bool playGame(const Options &o, std::mt19937_64 &rng, Searcher<FastBoard> &searc
             result = board.inCheck() ? (board.sideToMove() == Color::White ? 0.0 : 1.0) : 0.5;
             return true;
         }
-        if (board.isDraw() || ply >= 400) {
+        // A repetition ends the game at its third occurrence, as the rules
+        // say and as the search plays (a second occurrence before its root
+        // is not a draw to it), so a side that repeats once while ahead is
+        // not labelled with a draw.
+        if (board.isDraw(0) || ply >= 400) {
             result = 0.5;
             return true;
         }

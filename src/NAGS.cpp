@@ -187,7 +187,7 @@ void NAGSController::simulate() {
     float value; // side to move at `node`
     if (node->terminal) {
         value = node->terminalValue;
-    } else if (depth > 0 && mctsBoard.isDraw()) {
+    } else if (depth > 0 && mctsBoard.isDraw(depth)) { // the same repetition rule as the alpha-beta search
         node->terminal = true;
         node->terminalValue = 0.0f;
         value = 0.0f;
