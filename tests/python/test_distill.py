@@ -302,12 +302,17 @@ def test_label_with_the_real_engine(tmp_path):
 def test_unscored_moves_share_a_censored_rest_bucket():
     # 20 legal moves, 2 scored (30 and 20 cp): the 18 others score at most
     # 20 cp, so together they hold at most 18 * exp(-10 / 50) of the weight;
-    # the target gives them half of that as one bucket.
+    # the target gives them rest_mass_scale of that as one bucket.
     row = {"fen": chess.STARTING_FEN, "legal": [m.uci() for m in chess.Board().legal_moves],
            "scored": [{"move": "e2e4", "cp": 30}, {"move": "d2d4", "cp": 20}]}
     params = dict(training_pipeline.DISTILL_DEFAULTS)
+    assert params["rest_mass_scale"] == 0.02
+    for scale in (0.02, 0.5):
+        t = distillation.row_targets(row, {**params, "rest_mass_scale": scale})
+        w = [1.0, math.exp(-10 / 50), scale * 18 * math.exp(-10 / 50)]
+        assert abs(t["rest"] - w[2] / sum(w)) < 1e-9
     t = distillation.row_targets(row, params)
-    w = [1.0, math.exp(-10 / 50), 0.5 * 18 * math.exp(-10 / 50)]
+    w = [1.0, math.exp(-10 / 50), 0.02 * 18 * math.exp(-10 / 50)]
     assert abs(t["rest"] - w[2] / sum(w)) < 1e-9
     assert abs(dict(t["policy"])["e2e4"] - w[0] / sum(w)) < 1e-9
     assert abs(sum(p for _, p in t["policy"]) + t["rest"] - 1) < 1e-9

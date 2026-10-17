@@ -33,9 +33,12 @@ Targets (all from the side to move's point of view):
     score s_k, so together they hold at most n_rest * exp(s_k / T) of the
     softmax weight; giving them none (the earlier target) made the target
     too sharp whenever s_k is within a few T of the best score. The rest
-    bucket gets rest_mass_scale (default 0.5) times that upper bound: an
-    estimate between the lower bound 0 and the upper bound, as if the
-    unscored moves were spread out below s_k. The network is trained on
+    bucket gets rest_mass_scale (default 0.02) times that upper bound: an
+    estimate between the lower bound 0 and the upper bound (most unscored
+    moves score far below s_k). Half the bound (0.5, the first default)
+    gave the bucket more target mass on average than the engine's best
+    move and the worst held-out policy of 0.5 / 0.1 / 0.02 / 0, while 0
+    lost value accuracy (tools/gnn_compare.py, docs/ARCHITECTURE.md). The network is trained on
     the summed probability of the unscored moves for that bucket, not on
     any of them individually (they are censored, not known). Illegal moves
     are masked out of the network's log-softmax. Rows with a line the
@@ -146,7 +149,7 @@ def row_targets(row: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
     else:  # label rows carry "legal"; without it or a FEN no unscored move is known
         n_legal = chess.Board(row["fen"]).legal_moves.count() if "fen" in row else len(scored)
     policy, rest = policy_with_rest(scored, n_legal - len(scored), float(params["temperature_cp"]),
-                                    float(params.get("rest_mass_scale", 0.5)), **kw)
+                                    float(params.get("rest_mass_scale", 0.02)), **kw)
     best = max(scored, key=lambda r: effective_cp(r, **kw))
     search_cp = effective_cp(best, **kw)
     a, b = float(params["wdl_a"]), float(params["wdl_b"])

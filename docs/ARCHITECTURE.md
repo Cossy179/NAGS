@@ -357,7 +357,7 @@ every line with a full window, so the k scores are exact for that search.
   10·(n − 1), beyond every clipped cp score). The unscored moves are only
   known to score at most the k-th score, so none of them can be given a
   value of its own, but together they are not worthless either: they share
-  one censored "rest" bucket of weight `rest_mass_scale` (0.5) × their
+  one censored "rest" bucket of weight `rest_mass_scale` (0.02) × their
   number × exp((k-th score − best)/T), and the loss for it is
   −p_rest · log Σ_{unscored} π(m), so the network decides how to spread
   that mass among them. With `rest_mass_scale` 0 this is the plain target
@@ -422,14 +422,23 @@ games), 8 epochs each, default model sizes, CPU:
 | A2: A with `supervised_legal_mask` | 11.8% | 11.6% | 2.92 | 0.313 | 0.660 |
 | B: v3, distilled from the search | 22.8% | 23.9% | 2.50 | 0.058 | 0.379 |
 | C: v3, played moves and results | 22.8% | 25.7% | 2.47 | 0.090 | 0.434 |
+| B with `rest_mass_scale` 0.1 | 23.0% | 25.9% | 2.46 | 0.060 | 0.388 |
+| B with `rest_mass_scale` 0.02 (the default since) | 24.8% | 25.4% | 2.45 | 0.058 | 0.387 |
+| B with `rest_mass_scale` 0 | 24.1% | 24.6% | 2.45 | 0.070 | 0.413 |
 | uniform prior / constant 0 value | 8.4% | – | 2.94 | – | 0.658 |
 
 * The v3 network is the large gain for the move prior: about twice the
   top-1 agreement of v2 and a much lower NLL with the same data and
   epochs; masking illegal moves alone helps v2 little.
-* For the policy, distillation did not beat training on the moves played
-  at this scale (B and C are equal within noise; the moves played came
-  from the same engine at 2000 nodes, so they are already search moves).
+* For the policy, distillation with the first default (`rest_mass_scale`
+  0.5, B) did not beat training on the moves played (B and C equal; the
+  moves played came from the same engine at 2000 nodes, so they are
+  already search moves). That default gave the unscored moves' bucket 39%
+  of the target on average, more than the engine's best move (37%);
+  smaller weights improved the held-out policy steadily (NLL 2.50, 2.46,
+  2.45 at 0.5, 0.1, 0.02), and 0.02 is ahead of training on played moves
+  on both policy and value. With no bucket at all (0) the value got worse.
+  The policy margins are small against the noise of 456 positions.
 * For the value, distillation is better even judged by game results
   (0.379 against 0.434), and both v2 value heads ended no better than
   predicting 0.
