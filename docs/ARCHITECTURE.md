@@ -408,6 +408,36 @@ none. Building the graphs costs about the same in both (2–5 ms a
 position in Python), so at small batches it is a large share of a v3
 request.
 
+### What the v3 network and distillation buy (move priors and values)
+
+`tools/gnn_compare.py` trains the network ways on the same positions and
+compares them on held-out games. One run (2026-10-17): 300 `nags_enhanced`
+self-play games at 2000 nodes per move, 4000 positions labelled with
+MultiPV 4 at 15000 nodes, 3544 for training and 456 held out (30 whole
+games), 8 epochs each, default model sizes, CPU:
+
+| Arm | Top-1 = engine's best | Top-1 = move played | NLL of engine's best | Value MSE vs search | Value MSE vs game result |
+|-----|----:|----:|----:|----:|----:|
+| A: v2, played moves (legacy `supervised`) | 10.1% | 12.5% | 3.29 | 0.231 | 0.574 |
+| A2: A with `supervised_legal_mask` | 11.8% | 11.6% | 2.92 | 0.313 | 0.660 |
+| B: v3, distilled from the search | 22.8% | 23.9% | 2.50 | 0.058 | 0.379 |
+| C: v3, played moves and results | 22.8% | 25.7% | 2.47 | 0.090 | 0.434 |
+| uniform prior / constant 0 value | 8.4% | – | 2.94 | – | 0.658 |
+
+* The v3 network is the large gain for the move prior: about twice the
+  top-1 agreement of v2 and a much lower NLL with the same data and
+  epochs; masking illegal moves alone helps v2 little.
+* For the policy, distillation did not beat training on the moves played
+  at this scale (B and C are equal within noise; the moves played came
+  from the same engine at 2000 nodes, so they are already search moves).
+* For the value, distillation is better even judged by game results
+  (0.379 against 0.434), and both v2 value heads ended no better than
+  predicting 0.
+* Small and correlated samples (456 positions from 30 games: about ±2-4%
+  on top-1), self-play positions only, no playing strength measured: these
+  say which training to use for a first real v3 network, not that it will
+  help the hybrid play better.
+
 ### Why PPO on these games is not on-policy
 
 The `ppo` step updates the network on self-play positions with the move
