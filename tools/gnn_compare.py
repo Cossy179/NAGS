@@ -47,6 +47,7 @@ ENGINE = ""
 GAMES, PLAY_NODES = 300, 2000
 LABEL_POSITIONS, MULTIPV, LABEL_NODES = 4000, 4, 15000
 EPOCHS = 8
+REST_SCALES = []
 log = logging.getLogger("gnn_compare")
 
 
@@ -95,7 +96,7 @@ def pipeline(name, distill=None, **cfg):
 
 
 def main(argv=None):
-    global EXP, ENGINE, GAMES, PLAY_NODES, LABEL_POSITIONS, MULTIPV, LABEL_NODES, EPOCHS
+    global EXP, ENGINE, GAMES, PLAY_NODES, LABEL_POSITIONS, MULTIPV, LABEL_NODES, EPOCHS, REST_SCALES
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True, help="working directory for games, labels, models and results")
     ap.add_argument("--engine", default=str(ROOT / "build" / "nags_enhanced"))
@@ -105,6 +106,8 @@ def main(argv=None):
     ap.add_argument("--multipv", type=int, default=4)
     ap.add_argument("--label-nodes", type=int, default=15000)
     ap.add_argument("--epochs", type=int, default=8)
+    ap.add_argument("--rest-mass-scales", type=float, nargs="*", default=[],
+                    help="extra B arms with these distillation rest_mass_scale values (B itself uses the default)")
     ap.add_argument("--threads", type=int, default=1, help="torch threads")
     args = ap.parse_args(argv)
     EXP = Path(args.out).resolve()
@@ -112,6 +115,7 @@ def main(argv=None):
     ENGINE = str(Path(args.engine).resolve())
     GAMES, PLAY_NODES = args.games, args.play_nodes
     LABEL_POSITIONS, MULTIPV, LABEL_NODES, EPOCHS = args.label_positions, args.multipv, args.label_nodes, args.epochs
+    REST_SCALES = args.rest_mass_scales
     torch.set_num_threads(args.threads)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
                         handlers=[logging.FileHandler(EXP / "run.log"), logging.StreamHandler()])
@@ -164,6 +168,12 @@ def main(argv=None):
     if not list((EXP / "B/models").glob("gnn_v3_distill_*.pth")):
         pb.distill_training(write(EXP / "B/data/train.jsonl", train))
     models["B v3, distilled from search"] = sorted((EXP / "B/models").glob("gnn_v3_distill_*.pth"))[-1]
+    for scale in REST_SCALES:  # B with other weights for the unscored moves' pooled bucket
+        name = f"B_rest{scale:g}"
+        pbx = pipeline(name, distill={"rest_mass_scale": scale})
+        if not list((EXP / name / "models").glob("gnn_v3_distill_*.pth")):
+            pbx.distill_training(write(EXP / name / "data" / "train.jsonl", train))
+        models[f"B v3, distilled, rest_mass_scale {scale:g}"] = sorted((EXP / name / "models").glob("gnn_v3_distill_*.pth"))[-1]
     # C: v3 on the played moves (one-hot policy) and game results.
     pc = pipeline("C", distill={"rest_mass_scale": 0.0, "result_weight": 1.0, "aux_score_weight": 0.0})
     if not list((EXP / "C/models").glob("gnn_v3_distill_*.pth")):
