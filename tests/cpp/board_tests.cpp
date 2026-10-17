@@ -224,6 +224,7 @@ static void testNullMove() {
     TestBoard flipped;
     flipped.setFromFEN("rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR b KQkq - 1 3");
     CHECK(b.zobrist() == flipped.zobrist(), "null-move hash differs from the side-flipped position");
+    CHECK(b.getFEN() == flipped.getFEN(), "null move left the en-passant square set: %s", b.getFEN().c_str());
     b.unmakeNullMove();
     CHECK(b.getFEN() == fen && b.zobrist() == hash, "unmakeNullMove did not restore the position");
 
