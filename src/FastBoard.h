@@ -84,6 +84,12 @@ public:
     // Fifty-move rule, repetition (one earlier occurrence) or insufficient material.
     bool isDraw() const;
     bool isRepetition() const;
+    // The same inside a search whose root is `pliesFromRoot` plies back: a
+    // repetition of a position from the search tree is a draw (either side
+    // could repeat it again), one from before the root only if it is the
+    // third occurrence.
+    bool isDraw(int pliesFromRoot) const;
+    bool isRepetition(int pliesFromRoot) const;
     bool isInsufficientMaterial() const;
 
     static bool isValidSquare(int sq) { return sq >= 0 && sq < 64; }

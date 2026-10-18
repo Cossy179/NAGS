@@ -161,6 +161,16 @@ static void testFenValidation() {
     CHECK(b.setFromFEN("rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3") &&
               b.getFEN() == "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3",
           "dropped a valid en-passant square: %s", b.getFEN().c_str());
+    // An en-passant square no pawn can use is dropped, as after the move itself.
+    CHECK(b.setFromFEN("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1") &&
+              b.getFEN() == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+          "kept an unusable en-passant square: %s", b.getFEN().c_str());
+    b.setStartPos();
+    CHECK(b.applyMovesUCI({"e2e4"}) && b.getFEN() == "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+          "unusable en-passant square after e2e4: %s", b.getFEN().c_str());
+    CHECK(b.setFromFEN("rnbqkbnr/ppp1pppp/8/8/3p4/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1") && b.applyMovesUCI({"e2e4"}) &&
+              b.getFEN() == "rnbqkbnr/ppp1pppp/8/8/3pP3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+          "usable en-passant square lost after e2e4: %s", b.getFEN().c_str());
     // Move counters: "0 0" (written by some tools) is accepted.
     CHECK(b.setFromFEN("4k3/8/8/8/8/8/8/R3K3 w Q - 0 0") && b.getFEN() == "4k3/8/8/8/8/8/8/R3K3 w Q - 0 1",
           "fullmove number 0 not accepted: %s", b.getFEN().c_str());
@@ -172,9 +182,29 @@ static void testDraws() {
     CHECK(!b.isDraw(), "start position reported as draw");
     CHECK(b.applyMovesUCI({"g1f3", "g8f6", "f3g1", "f6g8"}), "knight shuffle rejected");
     CHECK(b.isRepetition(), "repetition of the start position not detected");
+    // In a search: a repetition inside the tree is a draw, one of a position
+    // from before the root (or of the root) only on its third occurrence.
+    CHECK(!b.isRepetition(0) && !b.isRepetition(4), "second occurrence of a pre-root position counted as a draw");
+    CHECK(b.isRepetition(5), "repetition inside the search tree not detected");
+    CHECK(b.applyMovesUCI({"g1f3", "g8f6", "f3g1", "f6g8"}) && b.isRepetition(0), "third occurrence not detected");
+    // A threefold whose first occurrence follows a double push (an
+    // en-passant square no pawn can use) is a third occurrence too.
     b.setStartPos();
-    CHECK(b.applyMovesUCI({"e2e4", "g8f6", "g1f3", "f6g8", "f3g1"}), "moves rejected");
-    CHECK(!b.isRepetition(), "false repetition after a pawn move");
+    CHECK(b.applyMovesUCI({"e2e4", "g8f6", "g1f3", "f6g8", "f3g1", "g8f6", "g1f3", "f6g8", "f3g1"}) && b.isRepetition(0),
+          "third occurrence after a double push not detected");
+    // After pawn moves, a knight shuffle repeats the position reached by them.
+    b.setStartPos();
+    CHECK(b.applyMovesUCI({"e2e4", "e7e5", "g1f3", "g8f6", "f3g1", "f6g8"}) && b.isRepetition(),
+          "repetition after pawn moves not detected");
+    // No black pawn can take on e3, so the position after e2e4 has no
+    // en-passant right and recurs after the knight shuffle...
+    b.setStartPos();
+    CHECK(b.applyMovesUCI({"e2e4", "g8f6", "g1f3", "f6g8"}) && !b.isRepetition(), "false repetition");
+    CHECK(b.applyMovesUCI({"f3g1"}) && b.isRepetition(), "repetition missed: unusable en-passant square counted");
+    // ...but with a pawn on d4 it has one, and the later position differs.
+    CHECK(b.setFromFEN("rnbqkb1r/ppp1pppp/5n2/8/3p4/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1") &&
+              b.applyMovesUCI({"e2e4", "f6g8", "g1f3", "g8f6", "f3g1"}) && !b.isRepetition(),
+          "false repetition: a usable en-passant right ignored");
     CHECK(b.setFromFEN("8/8/4k3/8/8/3NK3/8/8 w - - 0 1") && b.isInsufficientMaterial(), "KN vs K not a draw");
     CHECK(b.setFromFEN("8/8/4k3/8/8/3RK3/8/8 w - - 0 1") && !b.isInsufficientMaterial(), "KR vs K treated as draw");
     CHECK(b.setFromFEN("8/8/4k3/8/8/3RK3/8/8 w - - 100 80") && b.isDraw(), "fifty-move rule not detected");
@@ -194,14 +224,17 @@ static void testApplyMoves() {
 
 static void testNullMove() {
     TestBoard b;
-    b.setFromFEN("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2");
+    // A usable en-passant square (the e5 pawn can take on d6), which the null move must clear.
+    b.setFromFEN("rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3");
     const std::string fen = b.getFEN();
+    CHECK(fen.find(" d6 ") != std::string::npos, "test position lost its en-passant square: %s", fen.c_str());
     const uint64_t hash = b.zobrist();
     b.makeNullMove();
     CHECK(b.sideToMove() == Color::Black && b.lastMoveWasNull(), "null move did not pass the turn");
     TestBoard flipped;
-    flipped.setFromFEN("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 1 2");
+    flipped.setFromFEN("rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR b KQkq - 1 3");
     CHECK(b.zobrist() == flipped.zobrist(), "null-move hash differs from the side-flipped position");
+    CHECK(b.getFEN() == flipped.getFEN(), "null move left the en-passant square set: %s", b.getFEN().c_str());
     b.unmakeNullMove();
     CHECK(b.getFEN() == fen && b.zobrist() == hash, "unmakeNullMove did not restore the position");
 

@@ -418,7 +418,8 @@ bool FastBoard::setFromFEN(const std::string &fen) {
         if (sq < 0 || ep.size() != 2) return false;
         // An impossible en-passant square is ignored (most engines do the
         // same); an en-passant capture would remove a pawn that is not there.
-        if (plausibleEpSquare(b, sq, b.side)) b.epSquare = sq;
+        // So is one no pawn could capture on (FenChecks.h).
+        if (plausibleEpSquare(b, sq, b.side) && epCapturable(b, sq, b.side)) b.epSquare = sq;
     }
     if (b.inCheck(opposite(b.side))) return false;
 
@@ -729,8 +730,11 @@ void FastBoard::makeMove(const Move &m) {
 
     int movingType = pieceTypeOf(moving);
     if (movingType == PAWN && (m.to - m.from == 16 || m.from - m.to == 16)) {
-        epSquare = (m.from + m.to) / 2;
-        hash ^= zEnpassant[epSquare & 7];
+        const int ep = (m.from + m.to) / 2;
+        if (epCapturable(*this, ep, opposite(side))) {  // FenChecks.h
+            epSquare = ep;
+            hash ^= zEnpassant[epSquare & 7];
+        }
     }
 
     if (movingType == PAWN || entry.captured != Piece::None) halfmoveClock = 0;
@@ -851,6 +855,21 @@ bool FastBoard::isRepetition() const {
     for (int i = n - 2; i >= stop; i -= 2)
         if (history[i].hash == hash) return true;
     return false;
+}
+
+bool FastBoard::isRepetition(int pliesFromRoot) const {
+    int n = static_cast<int>(history.size());
+    int stop = n - std::min(halfmoveClock, pliesFromNull);
+    if (stop < 0) stop = 0;
+    int earlier = 0;
+    for (int i = n - 2; i >= stop; i -= 2)
+        if (history[i].hash == hash && (i > n - pliesFromRoot || ++earlier >= 2)) return true;
+    return false;
+}
+
+bool FastBoard::isDraw(int pliesFromRoot) const {
+    if (halfmoveClock >= 100) return !inCheck() || !generateLegalMoves().empty();
+    return isRepetition(pliesFromRoot) || isInsufficientMaterial();
 }
 
 bool FastBoard::isInsufficientMaterial() const {
