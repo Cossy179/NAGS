@@ -17,17 +17,38 @@ On a bad request the response is {"error": "..."} and the connection stays open.
 
 --model takes either checkpoint format (gnn_v3.load_any_checkpoint); each is
 served with its own graph builder and move encoding.
+
+Speed (none of these changes a reply's fields or meaning):
+  * --backend: 'nags-gnn-v3' networks are served by default through
+    gnn_infer's torch backend on relational_fast graphs, which gives
+    bit-identical replies to the reference path ('legacy') in a third
+    less time; 'onnx' runs the network with ONNX Runtime (--providers
+    cpu, cuda, tensorrt). v2 networks always use the legacy path.
+  * --threads: torch / ONNX Runtime threads (default 1). A request is one
+    or a few positions, so more threads mostly synchronise: 4 threads made
+    a single-position request 3x slower than 1 on a 4-core machine.
+  * --batch-wait-ms: requests from all connections that arrive within
+    this window are evaluated as one batch (a GPU evaluates a batch of 64
+    in about the time of one position), and each connection may send its
+    next request before the reply to the previous one arrives.
+  * --cache-size: replies to repeated requests (same FEN, same moves) come
+    from a cache. With --mc-samples > 1 a cached value repeats one draw of
+    the Monte-Carlo dropout.
 """
 
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import logging
 import os
+import queue
 import socketserver
 import threading
-from typing import Any, Dict, List, Optional
+import time
+from concurrent.futures import Future
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import torch
 
@@ -74,19 +95,99 @@ DEFAULT_MODEL = os.path.join("models", "production_model.pth")
 MAX_BATCH = 256
 
 
-class EvaluationService:
-    """Serves a GNNEvaluator with its ChessGraph (as before) or any GNNAdapter ('nags-gnn-v2' / 'nags-gnn-v3')."""
+class _Batcher:
+    """Evaluates requests from all connections that arrive within `wait_ms` of each other as one batch."""
 
-    def __init__(self, model: GNNEvaluator | GNNAdapter, builder: Optional[ChessGraph] = None, mc_samples: int = 5):
+    def __init__(self, backend: Any, mc_samples: int, wait_ms: float, max_batch: int, lock: threading.Lock):
+        from relational_fast import collate
+
+        self.collate = collate
+        self.backend = backend
+        self.mc_samples = mc_samples
+        self.wait = max(0.0, wait_ms) / 1000.0
+        self.max_batch = max(1, max_batch)
+        self.lock = lock
+        self.jobs: "queue.Queue[tuple]" = queue.Queue()
+        self.batches = 0
+        self.positions = 0
+        # Open connections: once each has a request in the batch, waiting longer gains nothing.
+        self.connections = 0
+        self.connections_lock = threading.Lock()
+        threading.Thread(target=self._loop, name="batcher", daemon=True).start()
+
+    def connected(self, delta: int) -> None:
+        with self.connections_lock:
+            self.connections += delta
+
+    def submit(self, graphs: Sequence[Any]) -> Future:
+        future: Future = Future()
+        self.jobs.put((list(graphs), future))
+        return future
+
+    def _loop(self) -> None:
+        while True:
+            jobs = [self.jobs.get()]
+            count = len(jobs[0][0])
+            deadline = time.monotonic() + self.wait
+            while count < self.max_batch and len(jobs) < self.connections:
+                remaining = deadline - time.monotonic()
+                try:
+                    job = self.jobs.get(timeout=remaining) if remaining > 0 else self.jobs.get_nowait()
+                except queue.Empty:
+                    break
+                jobs.append(job)
+                count += len(job[0])
+            try:
+                graphs = [g for gs, _ in jobs for g in gs]
+                with self.lock:
+                    probs, values, unc = self.backend.run(self.collate(graphs), mc_samples=self.mc_samples)
+                self.batches += 1
+                self.positions += len(graphs)
+                start = 0
+                for gs, future in jobs:
+                    end = start + len(gs)
+                    future.set_result((probs[start:end], values[start:end], unc[start:end]))
+                    start = end
+            except Exception as e:  # every waiting request gets the error
+                for _, future in jobs:
+                    if not future.done():
+                        future.set_exception(e)
+
+
+class EvaluationService:
+    """Serves a GNNEvaluator with its ChessGraph (as before) or any GNNAdapter ('nags-gnn-v2' / 'nags-gnn-v3').
+
+    backend: None serves through the adapter exactly as before; a gnn_infer
+    backend (v3 only) evaluates relational_fast graphs instead. cache_size
+    > 0 keeps that many replies; batch_wait_ms > 0 batches concurrent
+    requests (see the module docstring).
+    """
+
+    def __init__(self, model: GNNEvaluator | GNNAdapter, builder: Optional[ChessGraph] = None, mc_samples: int = 5,
+                 backend: Any = None, cache_size: int = 0, batch_wait_ms: float = 0.0, max_batch: int = MAX_BATCH):
         self.adapter = as_adapter(model, builder)
         self.model = self.adapter.model
         self.builder = self.adapter.builder
         self.mc_samples = mc_samples
+        if backend is not None and self.adapter.format != "nags-gnn-v3":
+            raise ValueError(f"backend {getattr(backend, 'name', backend)!r} serves nags-gnn-v3 networks only, "
+                             f"not {self.adapter.format}")
+        self.backend = backend
+        if backend is not None:
+            from relational_fast import build_arrays
+            self._build_arrays = build_arrays
         # MC dropout flips the value head between train/eval mode, so
         # concurrent requests must not interleave.
         self.lock = threading.Lock()
+        self.batcher = _Batcher(backend, mc_samples, batch_wait_ms, max_batch, self.lock) \
+            if backend is not None and batch_wait_ms > 0 else None
+        self.cache_size = max(0, int(cache_size))
+        self.cache: "collections.OrderedDict[Any, Dict[str, Any]]" = collections.OrderedDict()
+        self.cache_lock = threading.Lock()
+        self.cache_hits = 0
 
-    def handle(self, payload: Any) -> Dict[str, Any]:
+    @staticmethod
+    def _parse(payload: Any):
         if not isinstance(payload, dict):
             raise ValueError("request must be a JSON object")
         fens = payload.get("fens", [])
@@ -100,22 +201,71 @@ class EvaluationService:
         if moves is not None:
             if not isinstance(moves, list) or len(moves) != len(fens) or not all(isinstance(m, list) for m in moves):
                 raise ValueError("'moves' must be a list with one move list per FEN")
+        return fens, moves
+
+    def handle(self, payload: Any) -> Dict[str, Any]:
+        return self.handle_async(payload)()
+
+    def handle_async(self, payload: Any) -> Callable[[], Dict[str, Any]]:
+        """Validates the request and starts its evaluation; the returned function waits for the reply.
+
+        Raises ValueError for a bad request (before anything is evaluated).
+        """
+        fens, moves = self._parse(payload)
         if not fens:
-            return self._reply([])
+            reply = self._reply([])
+            return lambda: reply
 
-        batch = self.adapter.build_batch(fens)  # raises ValueError for malformed FENs
-        with self.lock:
-            probs, values, uncertainty = self.adapter.evaluate(batch, mc_samples=self.mc_samples)
+        keys = None
+        cached: List[Optional[Dict[str, Any]]] = [None] * len(fens)
+        if self.cache_size:
+            keys = [(f, tuple(str(m) for m in moves[i]) if moves is not None else None) for i, f in enumerate(fens)]
+            with self.cache_lock:
+                for i, k in enumerate(keys):
+                    item = self.cache.get(k)
+                    if item is not None:
+                        self.cache.move_to_end(k)
+                        cached[i] = item
+                        self.cache_hits += 1
+        todo = [i for i in range(len(fens)) if cached[i] is None]
+        wanted = [fens[i] for i in todo]
 
-        results: List[Dict[str, Any]] = []
-        for i in range(len(fens)):
-            item: Dict[str, Any] = {"value": float(values[i]), "uncertainty": float(uncertainty[i])}
-            if moves is not None:
-                item["move_priors"] = self.adapter.move_priors(probs[i], [str(m) for m in moves[i]])
+        if not wanted:
+            evaluated = None
+        elif self.backend is None:
+            batch = self.adapter.build_batch(wanted)  # raises ValueError for malformed FENs
+            with self.lock:
+                evaluated = self.adapter.evaluate(batch, mc_samples=self.mc_samples)
+        else:
+            graphs = [self._build_arrays(f) for f in wanted]  # ValueError for malformed FENs, as above
+            if self.batcher is not None:
+                evaluated = self.batcher.submit(graphs)
             else:
-                item["policy"] = probs[i].tolist()
-            results.append(item)
-        return self._reply(results)
+                from relational_fast import collate
+                with self.lock:
+                    evaluated = self.backend.run(collate(graphs), mc_samples=self.mc_samples)
+
+        def finish() -> Dict[str, Any]:
+            results = list(cached)
+            if todo:
+                probs, values, uncertainty = evaluated.result() if isinstance(evaluated, Future) else evaluated
+            for j, i in enumerate(todo):
+                item: Dict[str, Any] = {"value": float(values[j]), "uncertainty": float(uncertainty[j])}
+                if moves is not None:
+                    item["move_priors"] = self.adapter.move_priors(probs[j], [str(m) for m in moves[i]])
+                else:
+                    item["policy"] = probs[j].tolist()
+                results[i] = item
+            if keys is not None and todo:
+                with self.cache_lock:
+                    for i in todo:
+                        self.cache[keys[i]] = results[i]
+                        self.cache.move_to_end(keys[i])
+                    while len(self.cache) > self.cache_size:
+                        self.cache.popitem(last=False)
+            return self._reply(results)
+
+        return finish
 
     def _reply(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         # model_format is new (additive); the other fields are as they always were.
@@ -152,7 +302,14 @@ def load_served_model(path: Optional[str], device: torch.device, hidden_dim: int
 
 def make_server(service: EvaluationService, host: str, port: int) -> socketserver.ThreadingTCPServer:
     class Handler(socketserver.StreamRequestHandler):
+        # TCP_NODELAY: with Nagle's algorithm a reply that follows another one
+        # (pipelined requests) waits for the client's ACK of the first, which
+        # a client with nothing more to send delays by up to 40 ms.
+        disable_nagle_algorithm = True
+
         def handle(self) -> None:
+            if service.batcher is not None:
+                return self.handle_pipelined()
             for raw in self.rfile:
                 line = raw.strip()
                 if not line:
@@ -166,6 +323,51 @@ def make_server(service: EvaluationService, host: str, port: int) -> socketserve
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     return
+
+        def handle_pipelined(self) -> None:
+            # Requests are read (and their graphs built) while earlier ones are still being
+            # evaluated; replies go out in request order.
+            pending: "queue.Queue[Optional[Callable[[], Dict[str, Any]]]]" = queue.Queue()
+            broken = threading.Event()
+
+            def writer() -> None:
+                while True:
+                    finish = pending.get()
+                    if finish is None:
+                        return
+                    try:
+                        response = finish()
+                    except Exception as e:
+                        response = {"error": f"{type(e).__name__}: {e}"}
+                    if broken.is_set():
+                        continue
+                    try:
+                        self.wfile.write((json.dumps(response) + "\n").encode('utf-8'))
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        broken.set()
+
+            out = threading.Thread(target=writer, daemon=True)
+            out.start()
+            service.batcher.connected(+1)
+            try:
+                for raw in self.rfile:
+                    if broken.is_set():
+                        break
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        pending.put(service.handle_async(json.loads(line.decode('utf-8'))))
+                    except Exception as e:
+                        error = {"error": f"{type(e).__name__}: {e}"}
+                        pending.put(lambda error=error: error)
+            except (ConnectionResetError, OSError):
+                pass
+            finally:
+                service.batcher.connected(-1)
+                pending.put(None)
+                out.join()
 
     class Server(socketserver.ThreadingTCPServer):
         allow_reuse_address = True
@@ -183,12 +385,49 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--mc-samples", type=int, default=5, help="MC-dropout samples for the value uncertainty")
     parser.add_argument("--hidden-dim", type=int, default=128, help="width of the untrained fallback model")
     parser.add_argument("--device", default=None, help="cpu / cuda (default: cuda if available)")
+    parser.add_argument("--backend", default="auto", choices=["auto", "legacy", "torch", "onnx"],
+                        help="how nags-gnn-v3 networks are evaluated: auto = torch (bit-identical to legacy, faster); "
+                             "v2 networks always use legacy")
+    parser.add_argument("--providers", default=None,
+                        help="ONNX Runtime providers for --backend onnx, in order of preference "
+                             "(tensorrt,cuda,cpu; default: cuda,cpu on a CUDA device, else cpu)")
+    parser.add_argument("--onnx-cache", default=os.path.join("models", "onnx_cache"),
+                        help="directory for exported .onnx files and TensorRT engines")
+    parser.add_argument("--fp16", action="store_true",
+                        help="half precision on the GPU (torch autocast / TensorRT); outputs change slightly")
+    parser.add_argument("--threads", type=int, default=1, help="CPU threads for the network (0: library default)")
+    parser.add_argument("--batch-wait-ms", type=float, default=0.0,
+                        help="batch requests arriving within this many ms (v3; 0 = off)")
+    parser.add_argument("--max-batch", type=int, default=MAX_BATCH, help="largest batch formed by --batch-wait-ms")
+    parser.add_argument("--cache-size", type=int, default=0, help="replies kept for repeated requests (0 = off)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    if args.threads > 0:
+        torch.set_num_threads(args.threads)
     device = torch.device(args.device) if args.device else (
         torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
-    service = EvaluationService(load_served_model(args.model, device, args.hidden_dim), mc_samples=args.mc_samples)
+    adapter = load_served_model(args.model, device, args.hidden_dim)
+    backend = None
+    kind = args.backend
+    if kind == "auto":
+        kind = "torch" if adapter.format == "nags-gnn-v3" else "legacy"
+    if kind != "legacy":
+        if adapter.format != "nags-gnn-v3":
+            logger.warning("--backend %s serves nags-gnn-v3 networks only; serving %s through the legacy path",
+                           kind, adapter.format)
+        else:
+            from gnn_infer import make_backend
+
+            providers = (args.providers or ("cuda,cpu" if device.type == "cuda" else "cpu")).split(",")
+            backend = make_backend(adapter.model, kind, providers=providers, threads=args.threads, fp16=args.fp16,
+                                   cache_dir=args.onnx_cache)
+            detail = f" ({', '.join(backend.providers)})" if kind == "onnx" else ""
+            logger.info("Backend %s%s on %s, %d thread(s)", kind, detail, device, torch.get_num_threads())
+    if args.batch_wait_ms > 0 and backend is None:
+        logger.warning("--batch-wait-ms needs a nags-gnn-v3 network and a fast backend; requests are not batched")
+    service = EvaluationService(adapter, mc_samples=args.mc_samples, backend=backend, cache_size=args.cache_size,
+                                batch_wait_ms=args.batch_wait_ms, max_batch=args.max_batch)
     with make_server(service, args.host, args.port) as srv:
         print(f"RPC server listening on tcp://{args.host}:{args.port} (line-delimited JSON over TCP)", flush=True)
         srv.serve_forever()

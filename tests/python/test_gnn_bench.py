@@ -26,3 +26,18 @@ def test_positions_are_distinct_and_playable():
 
     fens = gnn_bench.positions(40, seed=1)
     assert len(set(fens)) == 40 and all(any(chess.Board(f).legal_moves) for f in fens)
+
+
+def test_bench_fast_backends(tmp_path, capsys):
+    from test_gnn_infer import _onnx_available
+
+    backends = "legacy,torch" + (",onnx" if _onnx_available() else "")
+    rows = gnn_bench.run(["--tiny", "--models", "v2,v3", "--backends", backends, "--batch-sizes", "1,4",
+                          "--repeats", "1", "--warmup", "0", "--device", "cpu", "--mc-samples", "2",
+                          "--onnx-cache", str(tmp_path)])
+    by = {(r["model"], r["backend"], r["batch"]): r for r in rows}
+    assert ("nags-gnn-v2", "torch", 1) not in by  # the fast backends serve v3 only
+    assert by[("nags-gnn-v3", "torch", 4)]["max_dp"] == 0.0 and by[("nags-gnn-v3", "torch", 4)]["max_dv"] == 0.0
+    if "onnx" in backends:
+        assert by[("nags-gnn-v3", "onnx", 4)]["max_dp"] < 1e-5 and by[("nags-gnn-v3", "onnx", 1)]["max_dv"] < 1e-5
+    assert "max_dp" in capsys.readouterr().out
