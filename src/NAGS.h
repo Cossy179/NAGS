@@ -178,6 +178,17 @@ struct NagsSettings {
     int nnBatch = 1;
     bool nnPipeline = false;
     int nnCacheMb = 32;
+
+    // Hybrid search (all off / at their old values by default; see
+    // docs/ARCHITECTURE.md "Hybrid search options").
+    bool mctsReuse = false;       // keep the tree and continue from the new root's subtree next move
+    int cpuctBase = 0;            // > 0: PUCT constant grows as cpuct + ln((1 + N + base) / base)
+    double fpuReduction = 0.2;    // unvisited children start this far below the parent's value
+    float policyTemp = 1.0f;      // priors become p^(1/T) (renormalised) at expansion
+    bool smartStop = false;       // stop MCTS once its most visited move cannot be overtaken
+    int abSharePct = 85;          // alpha-beta's share of the time when MCTS runs
+    int ttValueDepth = 0;         // > 0: leaves with an exact TT score this deep use it for their value
+    bool nnRootOrder = false;     // alpha-beta searches root moves in the order of the network's prior
 };
 
 struct NagsResult {
@@ -225,6 +236,13 @@ private:
     bool mctsUsedNetwork = false;
     long long mctsCollisions = 0; // batched MCTS: selections that ran into a leaf already queued
     long long mctsBatches = 0;
+    long long mctsTTValues = 0;   // leaves valued by an exact TT score
+    int mctsReusedVisits = 0;     // visits the root brought along from the previous search
+    bool mctsSmartStopped = false;
+    // Tree reuse: the previous search's tree and the FEN of its root.
+    std::string reuseRootFen;
+    std::chrono::steady_clock::time_point mctsDeadline{}; // the alpha-beta arm's hard limit (smart stop)
+    std::chrono::steady_clock::time_point mctsStart{};
     static constexpr size_t kMaxMctsNodes = 2000000; // ~150 MB
 
     // A leaf waiting for the network, with the moves leading to it (to
@@ -232,6 +250,8 @@ private:
     struct PendingLeaf {
         MCTSNode *node = nullptr;
         uint64_t key = 0; // EvalCache key of its position
+        bool hasTTValue = false;
+        float ttValue = 0.0f; // its value from an exact TT score (MctsTTValue)
         std::vector<Move> path;
         EvalRequest request;
     };
@@ -244,6 +264,9 @@ private:
     void backup(MCTSNode *leaf, float value, bool virtualLoss);
     void revertVirtualLoss(MCTSNode *leaf);
     void evaluateWithFallback(std::vector<PendingLeaf> &batch);
+    bool shouldSmartStop(long long budget) const;
+    bool ttValue(const FastBoard &board, float &value) const;
+    std::unique_ptr<MCTSNode> reuseSubtree(const FastBoard &root);
     MCTSNode *selectChild(MCTSNode *node) const;
     void expand(MCTSNode *node, const std::vector<Move> &legal, const EvalResult &eval);
     const MCTSNode *mostVisitedRootChild() const;

@@ -354,6 +354,8 @@ void NAGSController::newGame() {
     lastUncertainty = 0.1f;
     rng.seed(kSeed);
     network.resetCache();
+    mctsRoot.reset();
+    reuseRootFen.clear();
 }
 
 float NAGSController::tacticalRatio(const FastBoard &root) const {
@@ -379,23 +381,55 @@ void NAGSController::expand(MCTSNode *node, const std::vector<Move> &legal, cons
         child.parent = node;
         child.prior = i < e.priors.size() ? e.priors[i] : 1.0f / legal.size();
     }
+    if (config.policyTemp != 1.0f && !node->children.empty()) {
+        // Softmax temperature on the priors: T > 1 flattens them, T < 1 sharpens them.
+        const double inv = 1.0 / std::max(0.05f, config.policyTemp);
+        double sum = 0.0;
+        for (MCTSNode &c : node->children) sum += std::pow(std::max(0.0f, c.prior), inv);
+        for (MCTSNode &c : node->children)
+            c.prior = sum > 0 ? static_cast<float>(std::pow(std::max(0.0f, c.prior), inv) / sum)
+                              : 1.0f / static_cast<float>(node->children.size());
+    }
     node->expanded = true;
     mctsNodes += legal.size();
+}
+
+bool NAGSController::ttValue(const FastBoard &board, float &value) const {
+    // An exact alpha-beta score of the position at least ttValueDepth deep,
+    // as a value: P(win) - P(loss) under the logistic WDL model the v3
+    // network is distilled towards (docs/ARCHITECTURE.md), mates as +-1.
+    TranspositionTable *tt = searcher.table();
+    TTHit hit;
+    if (config.ttValueDepth <= 0 || !tt || !tt->probe(board.zobrist(), hit) || hit.bound != Bound::Exact ||
+        hit.depth < config.ttValueDepth)
+        return false;
+    const int s = scoreFromTT(hit.score, 0);
+    if (std::abs(s) >= TB_BOUND) {
+        value = s > 0 ? 1.0f : -1.0f;
+        return true;
+    }
+    auto sigmoid = [](double x) { return 1.0 / (1.0 + std::exp(-x)); };
+    value = static_cast<float>(sigmoid((s - 400.0) / 250.0) - sigmoid((-s - 400.0) / 250.0));
+    return true;
 }
 
 MCTSNode *NAGSController::selectChild(MCTSNode *node) const {
     double sqrtN = std::sqrt(std::max(1, node->visits));
     // First-play urgency: unvisited children start slightly below the
     // parent's own value (from the side to move at `node`).
-    double fpu = (node->visits > 0 ? -node->q() : 0.0) - 0.2;
+    double fpu = (node->visits > 0 ? -node->q() : 0.0) - config.fpuReduction;
+    // With cpuctBase the exploration constant grows with the visits (AlphaZero).
+    const double c = config.cpuctBase > 0
+                         ? cpuct + std::log((1.0 + node->visits + config.cpuctBase) / config.cpuctBase)
+                         : cpuct;
     MCTSNode *best = nullptr;
     double bestScore = -std::numeric_limits<double>::infinity();
-    for (auto &c : node->children) {
-        double q = c.visits > 0 ? c.q() : fpu;
-        double u = cpuct * c.prior * sqrtN / (1.0 + c.visits);
+    for (auto &child : node->children) {
+        double q = child.visits > 0 ? child.q() : fpu;
+        double u = c * child.prior * sqrtN / (1.0 + child.visits);
         if (q + u > bestScore) {
             bestScore = q + u;
-            best = &c;
+            best = &child;
         }
     }
     return best;
@@ -428,6 +462,11 @@ void NAGSController::simulate() {
             mctsUsedNetwork = mctsUsedNetwork || network.lastUsedNetwork();
             expand(node, legal, e);
             value = e.value;
+            float tv;
+            if (ttValue(mctsBoard, tv)) { // the alpha-beta arm already searched this position
+                value = tv;
+                ++mctsTTValues;
+            }
         }
     }
 
@@ -442,16 +481,90 @@ void NAGSController::simulate() {
 }
 
 void NAGSController::runMcts(long long budget, const std::atomic<bool> &stopMcts) {
-    const auto start = std::chrono::steady_clock::now();
+    mctsStart = std::chrono::steady_clock::now();
     // Batched until the search ends or the network fails; then (as with
     // NNBatch 1) one simulation at a time, the evaluator falling back to the
     // heuristic.
     if (config.nnBatch > 1) runMctsBatched(budget, stopMcts);
-    while (mctsSims < budget && mctsNodes < kMaxMctsNodes && !stopMcts.load(std::memory_order_relaxed)) {
+    while (mctsSims < budget && mctsNodes < kMaxMctsNodes && !stopMcts.load(std::memory_order_relaxed) &&
+           !mctsSmartStopped) {
         simulate();
         ++mctsSims;
+        if ((mctsSims & 15) == 0 && shouldSmartStop(budget)) mctsSmartStopped = true;
     }
-    mctsMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    mctsMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - mctsStart).count();
+}
+
+bool NAGSController::shouldSmartStop(long long budget) const {
+    // The most visited root move cannot change once its lead over the second
+    // is larger than the simulations still possible: those left in the
+    // budget, and those the current rate fits in before the alpha-beta arm's
+    // hard limit.
+    if (!config.smartStop || !mctsRoot || mctsRoot->children.size() < 2) return false;
+    int first = 0, second = 0;
+    for (const MCTSNode &c : mctsRoot->children) {
+        if (c.visits > first) {
+            second = first;
+            first = c.visits;
+        } else if (c.visits > second) {
+            second = c.visits;
+        }
+    }
+    double remaining = static_cast<double>(budget - mctsSims);
+    if (mctsDeadline != std::chrono::steady_clock::time_point{}) {
+        const auto now = std::chrono::steady_clock::now();
+        const double ran = std::chrono::duration<double, std::milli>(now - mctsStart).count();
+        const double left = std::chrono::duration<double, std::milli>(mctsDeadline - now).count();
+        if (ran <= 0.0 || mctsSims == 0) return false;
+        remaining = std::min(remaining, mctsSims / ran * std::max(0.0, left));
+    }
+    return first - second > remaining;
+}
+
+std::unique_ptr<MCTSNode> NAGSController::reuseSubtree(const FastBoard &root) {
+    // The node of the previous tree whose position is the new root: the
+    // root itself (the same position searched again), one of its children,
+    // or a grandchild (our move and the reply). Its subtree becomes the new
+    // tree; the rest is freed.
+    std::unique_ptr<MCTSNode> out;
+    FastBoard b;
+    if (!mctsRoot || reuseRootFen.empty() || !b.setFromFEN(reuseRootFen)) return out;
+    const std::string target = root.getFEN();
+    const uint64_t key = root.zobrist();
+    MCTSNode *found = nullptr;
+    auto matches = [&](const FastBoard &x) { return x.zobrist() == key && x.getFEN() == target; };
+    if (matches(b)) {
+        return std::move(mctsRoot);
+    }
+    for (MCTSNode &c : mctsRoot->children) {
+        if (found) break;
+        b.makeMove(c.move);
+        if (matches(b)) {
+            found = &c;
+        } else {
+            for (MCTSNode &g : c.children) {
+                b.makeMove(g.move);
+                const bool hit = matches(b);
+                b.unmakeMove();
+                if (hit) {
+                    found = &g;
+                    break;
+                }
+            }
+        }
+        b.unmakeMove();
+    }
+    if (!found || !found->expanded) return out;
+    out = std::make_unique<MCTSNode>();
+    out->children = std::move(found->children); // the children keep their addresses
+    out->visits = found->visits;
+    out->valueSum = found->valueSum;
+    out->expanded = true;
+    out->terminal = found->terminal;
+    out->terminalValue = found->terminalValue;
+    for (MCTSNode &c : out->children) c.parent = out.get();
+    found->expanded = false;
+    return out;
 }
 
 void NAGSController::backup(MCTSNode *leaf, float value, bool virtualLoss) {
@@ -512,12 +625,16 @@ NAGSController::Selected NAGSController::selectLeaf(std::vector<PendingLeaf> &ba
         } else if (network.cache().probe(key, legal, cached)) {
             expand(node, legal, cached);
             mctsUsedNetwork = true;
-            backup(node, cached.value, true);
+            float tv;
+            const bool fromTT = ttValue(mctsBoard, tv);
+            mctsTTValues += fromTT;
+            backup(node, fromTT ? tv : cached.value, true);
         } else {
             node->pending = true;
             PendingLeaf leaf;
             leaf.node = node;
             leaf.key = key;
+            leaf.hasTTValue = ttValue(mctsBoard, leaf.ttValue);
             leaf.path = std::move(path);
             leaf.request.fen = mctsBoard.getFEN();
             leaf.request.legal = std::move(legal);
@@ -536,7 +653,8 @@ void NAGSController::evaluateWithFallback(std::vector<PendingLeaf> &batch) {
         for (size_t i = 0; i < leaf.path.size(); ++i) mctsBoard.unmakeMove();
         leaf.node->pending = false;
         expand(leaf.node, leaf.request.legal, e);
-        backup(leaf.node, e.value, true);
+        mctsTTValues += leaf.hasTTValue;
+        backup(leaf.node, leaf.hasTTValue ? leaf.ttValue : e.value, true);
         ++mctsSims;
     }
 }
@@ -545,7 +663,9 @@ void NAGSController::runMctsBatched(long long budget, const std::atomic<bool> &s
     const size_t maxInFlight = config.nnPipeline ? 2 : 1;
     std::deque<std::vector<PendingLeaf>> inFlight;
     long long queued = 0; // leaves in flight
-    auto running = [&] { return !stopMcts.load(std::memory_order_relaxed) && mctsNodes < kMaxMctsNodes; };
+    auto running = [&] {
+        return !stopMcts.load(std::memory_order_relaxed) && mctsNodes < kMaxMctsNodes && !mctsSmartStopped;
+    };
     auto requests = [](const std::vector<PendingLeaf> &batch) {
         std::vector<const EvalRequest *> r;
         r.reserve(batch.size());
@@ -570,6 +690,10 @@ void NAGSController::runMctsBatched(long long budget, const std::atomic<bool> &s
         // Fill the pipeline: select leaves (terminal and cached ones are
         // backed up at once) and send them as one request.
         while (running() && inFlight.size() < maxInFlight && mctsSims + queued < budget) {
+            if (shouldSmartStop(budget)) { // the leaves in flight are still received
+                mctsSmartStopped = true;
+                break;
+            }
             const int want = network.batchLimit(config.nnBatch);
             std::vector<PendingLeaf> batch;
             int collisions = 0;
@@ -605,7 +729,8 @@ void NAGSController::runMctsBatched(long long budget, const std::atomic<bool> &s
                 leaf.node->pending = false;
                 network.cache().store(leaf.key, leaf.request.legal, results[i]);
                 expand(leaf.node, leaf.request.legal, results[i]);
-                backup(leaf.node, results[i].value, true);
+                mctsTTValues += leaf.hasTTValue;
+                backup(leaf.node, leaf.hasTTValue ? leaf.ttValue : results[i].value, true);
                 ++mctsSims;
             }
             mctsUsedNetwork = true;
@@ -647,6 +772,10 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
     mctsMs = 0.0;
     mctsCollisions = 0;
     mctsBatches = 0;
+    mctsTTValues = 0;
+    mctsReusedVisits = 0;
+    mctsSmartStopped = false;
+    mctsDeadline = {};
     meta.configure(config.metaHost, config.metaPort);
     std::string fen = root.getFEN();
     float tactical = tacticalRatio(root);
@@ -669,7 +798,10 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
     cpuct = std::clamp(config.baseExploration + deltas.bandit_exploration_delta * 0.5f, 0.5f, 2.5f);
 
     // ---- MCTS arm: only with a live network (and not while pondering) -------
+    // With MctsReuse the subtree of the new root is taken from the last tree.
+    std::unique_ptr<MCTSNode> reused = config.mctsReuse ? reuseSubtree(root) : nullptr;
     mctsRoot.reset();
+    reuseRootFen.clear();
     mctsBoard = root;
     mctsBoard.refreshAccumulator(); // `root` may hold accumulators of an earlier network (EvalFile/UseNNUE changed)
     mctsSims = 0;
@@ -682,25 +814,63 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
     bool enoughTime = limits.softMs == 0 || limits.softMs >= config.minMctsMs;
     network.setRequestTimeout(limits.hardMs > 0 ? static_cast<int>(std::clamp<int64_t>(limits.hardMs / 10, 20, 3000)) : 3000);
     bool runMctsArm = false;
-    if (!legal.empty() && legal.size() > 1 && !pondering && config.useNN && enoughTime) {
+    bool rootOrdered = false;
+    const bool wantMcts = legal.size() > 1 && !pondering && config.useNN && enoughTime;
+    // NNRootOrder needs one evaluation, so it is worth it even when MCTS is not.
+    const bool wantOrder = legal.size() > 1 && !pondering && config.useNN && config.nnRootOrder &&
+                           (limits.hardMs <= 0 || limits.hardMs >= 50);
+    if (wantMcts || wantOrder) {
         EvalResult rootEval = network.evaluate(mctsBoard, legal);
         lastUncertainty = rootEval.uncertainty;
         if (network.lastUsedNetwork()) {
-            mctsRoot = std::make_unique<MCTSNode>();
-            expand(mctsRoot.get(), legal, rootEval);
-            mctsUsedNetwork = true;
-            runMctsArm = true;
+            if (wantOrder) {
+                std::vector<size_t> idx(legal.size());
+                for (size_t i = 0; i < idx.size(); ++i) idx[i] = i;
+                std::stable_sort(idx.begin(), idx.end(),
+                                 [&](size_t a, size_t b) { return rootEval.priors[a] > rootEval.priors[b]; });
+                std::vector<Move> order;
+                order.reserve(idx.size());
+                for (size_t i : idx) order.push_back(legal[i]);
+                searcher.setRootOrder(std::move(order));
+                rootOrdered = true;
+            }
+            if (wantMcts) {
+                bool sameChildren = reused && reused->children.size() == legal.size();
+                for (size_t i = 0; sameChildren && i < legal.size(); ++i)
+                    sameChildren = sameMove(reused->children[i].move, legal[i]);
+                if (sameChildren) {
+                    mctsRoot = std::move(reused);
+                    mctsReusedVisits = mctsRoot->visits;
+                    // Count the nodes the reused tree holds (the node cap).
+                    std::vector<const MCTSNode *> stack{mctsRoot.get()};
+                    mctsNodes = 0;
+                    while (!stack.empty()) {
+                        const MCTSNode *n = stack.back();
+                        stack.pop_back();
+                        ++mctsNodes;
+                        for (const MCTSNode &c : n->children) stack.push_back(&c);
+                    }
+                } else {
+                    mctsRoot = std::make_unique<MCTSNode>();
+                    expand(mctsRoot.get(), legal, rootEval);
+                }
+                mctsUsedNetwork = true;
+                runMctsArm = true;
+            }
         }
     }
+    reused.reset();
 
     // The time used so far (meta-learner, root evaluation) counts against
     // the move, and with MCTS part of it is kept for verifying a proposal.
     // (0 means "no limit", so a positive limit stays at least 1 ms.)
     const int64_t used = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-    const int share = runMctsArm ? 85 : 100;
+    const int share = runMctsArm ? config.abSharePct : 100;
     SearchLimits abLimits = limits;
     if (limits.softMs > 0) abLimits.softMs = std::max<int64_t>(1, (limits.softMs - used) * share / 100);
     if (limits.hardMs > 0) abLimits.hardMs = std::max<int64_t>(1, (limits.hardMs - used) * share / 100);
+    if (abLimits.hardMs > 0 && !limits.infinite)
+        mctsDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(abLimits.hardMs);
     std::atomic<bool> stopMcts{false};
     std::thread mctsThread;
     if (runMctsArm) mctsThread = std::thread([this, mctsBudget, &stopMcts] { runMcts(mctsBudget, stopMcts); });
@@ -774,6 +944,10 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
         s << " rpc_positions " << rpc.positions << " rpc_batch "
           << (rpc.requests ? static_cast<double>(rpc.positions) / rpc.requests : 0.0) << " cache_hits "
           << network.cache().hits - cacheHitsBefore << " mcts_collisions " << mctsCollisions;
+        // Hybrid search options: visits brought from the last tree, leaves
+        // valued by the TT, MCTS stopped early, root moves in prior order.
+        s << " mcts_reused " << mctsReusedVisits << " tt_values " << mctsTTValues << " smart_stop "
+          << (mctsSmartStopped ? 1 : 0) << " root_order " << (rootOrdered ? 1 : 0);
         onString(s.str());
 
         // Kept as the last info line so the training pipeline can pair the
@@ -784,6 +958,10 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
           << deltas.bandit_exploration_delta << " meta " << (metaUsed ? "on" : "off");
         onString(m.str());
     }
-    mctsRoot.reset();
+    if (config.mctsReuse && mctsRoot) {
+        reuseRootFen = root.getFEN(); // the next search may continue in this tree
+    } else {
+        mctsRoot.reset();
+    }
     return result;
 }

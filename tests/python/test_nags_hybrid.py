@@ -187,3 +187,99 @@ def test_evaluation_cache(fake_gnn):
     out, _ = _run_cmds(fake_gnn, "setoption name NNBatch value 8\nsetoption name NNCache value 0\n" + go + go)
     assert all("cache_hits 0 " in l for l in out.splitlines() if l.startswith("info string nags ")), out
     assert requests[0] > 0
+
+
+class _Session:
+    """An engine process driven command by command (to read one search's result before the next)."""
+
+    def __init__(self, port, options=""):
+        self.proc = subprocess.Popen([str(_engine())], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.send(f"setoption name UseNN value true\nsetoption name NNPort value {port}\n"
+                  f"setoption name UseMetaLearner value false\nsetoption name MctsMinTime value 0\n{options}")
+
+    def send(self, cmds):
+        self.proc.stdin.write(cmds)
+        self.proc.stdin.flush()
+
+    def go(self, position, go="go movetime 600"):
+        self.send(f"{position}\n{go}\n")
+        lines = []
+        while True:
+            line = self.proc.stdout.readline()
+            assert line, "engine exited"
+            lines.append(line.rstrip("\n"))
+            if line.startswith("bestmove"):
+                return line.split()[1], _summary("\n".join(lines))[1]
+
+    def close(self):
+        self.send("quit\n")
+        self.proc.wait(timeout=10)
+
+
+@pytest.mark.skipif(_engine() is None, reason="nags not built")
+def test_default_hybrid_options_report_off(fake_gnn):
+    out, _ = _run_cmds(fake_gnn, "setoption name MctsMinTime value 0\nposition startpos\ngo movetime 300\n")
+    _, f = _summary(out)
+    assert (f["mcts_reused"], f["tt_values"], f["smart_stop"], f["root_order"]) == ("0", "0", "0", "0")
+
+
+@pytest.mark.skipif(_engine() is None, reason="nags not built")
+@pytest.mark.parametrize("batch", ["1", "8"])
+def test_tree_reuse(fake_gnn, batch):
+    s = _Session(fake_gnn, f"setoption name MctsReuse value true\nsetoption name NNBatch value {batch}\n")
+    try:
+        best, f1 = s.go("position startpos")
+        assert f1["mcts_reused"] == "0" and int(f1["mcts_sims"]) > 0
+        # Our move and the reply the fake network prefers (a7a6): that grandchild has a subtree.
+        _, f2 = s.go(f"position startpos moves {best} a7a6")
+        assert int(f2["mcts_reused"]) > 0, f2
+        # The same position again (e.g. a second 'go'): the whole tree is kept.
+        _, f3 = s.go(f"position startpos moves {best} a7a6")
+        assert int(f3["mcts_reused"]) >= int(f2["mcts_reused"]) + int(f2["mcts_sims"]) - 1, (f2, f3)
+        # A new game starts from nothing.
+        s.send("ucinewgame\n")
+        _, f4 = s.go(f"position startpos moves {best} a7a6")
+        assert f4["mcts_reused"] == "0"
+        # A position not in the tree: nothing to reuse, and no error.
+        _, f5 = s.go("position fen 4k3/8/8/8/8/8/4P3/4K3 w - - 0 1")
+        assert f5["mcts_reused"] == "0"
+    finally:
+        s.close()
+
+
+@pytest.mark.skipif(_engine() is None, reason="nags not built")
+def test_smart_stop(fake_gnn):
+    # The fake network puts 0.9 of the prior on a2a3, so its lead soon exceeds the rest of the budget.
+    out, _ = _run_cmds(fake_gnn, "setoption name MctsMinTime value 0\nposition startpos\ngo movetime 1500\n")
+    _, plain = _summary(out)
+    out, _ = _run_cmds(fake_gnn, "setoption name MctsMinTime value 0\nsetoption name MctsSmartStop value true\n"
+                                 "position startpos\ngo movetime 1500\n")
+    line, smart = _summary(out)
+    assert plain["smart_stop"] == "0" and smart["smart_stop"] == "1", line
+    assert int(smart["mcts_sims"]) < int(plain["mcts_sims"]) and "mcts_top a2a3" in line
+
+
+@pytest.mark.skipif(_engine() is None, reason="nags not built")
+def test_root_order_and_tt_values(fake_gnn):
+    # NNRootOrder needs only the root evaluation, so it also works with MCTS off.
+    out, _ = _run_cmds(fake_gnn, "setoption name NNRootOrder value true\nsetoption name MctsMinTime value 600000\n"
+                                 "position startpos\ngo movetime 300\n")
+    line, f = _summary(out)
+    assert f["root_order"] == "1" and f["mcts_sims"] == "0" and "bestmove" in out, line
+    out, _ = _run_cmds(fake_gnn, "setoption name MctsMinTime value 0\nsetoption name MctsTTValue value 1\n"
+                                 "position startpos\ngo movetime 800\n")
+    line, f = _summary(out)
+    assert int(f["tt_values"]) > 0 and "bestmove" in out, line
+
+
+@pytest.mark.skipif(_engine() is None, reason="nags not built")
+def test_puct_and_share_options(fake_gnn):
+    opts = ("setoption name MctsMinTime value 0\nsetoption name MctsCpuctBase value 500\nsetoption name MctsFpu value 0\n"
+            "setoption name MctsPolicyTemp value 200\nsetoption name MctsAbShare value 100\n")
+    out, elapsed = _run_cmds(fake_gnn, opts + "position startpos\ngo movetime 600\n")
+    line, f = _summary(out)
+    assert int(f["mcts_sims"]) > 0 and "bestmove" in out and elapsed < 2.1, line
+    # A flatter prior (T = 2) spreads the visits: a2a3 keeps fewer of them than with T = 1.
+    base, _ = _run_cmds(fake_gnn, "setoption name MctsMinTime value 0\nposition startpos\ngo movetime 600\n")
+    _, fb = _summary(base)
+    assert int(f["visits"]) < int(fb["visits"]), (f, fb)
