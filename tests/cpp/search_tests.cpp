@@ -238,6 +238,27 @@ static void testThreadsAndStop() {
     SearchResult r = searchFen<FastBoard>("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 7, &tt, 4);
     CHECK(!r.bestMove.isNull() && r.depth == 7, "4-thread search did not complete depth 7");
 
+    // Time-limited searches with helpers (whose results can be chosen over
+    // the main thread's): a legal move whose line starts with it, and the
+    // mates are found.
+    for (const char *fen : {"1k6/8/2K5/8/8/8/8/7R w - - 0 1", "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                            "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 2 3"}) {
+        FastBoard p;
+        p.setFromFEN(fen);
+        Searcher<FastBoard> sm(&tt);
+        sm.setThreads(4);
+        SearchLimits timed;
+        timed.softMs = timed.hardMs = 300;
+        std::atomic<bool> noStop{false};
+        SearchResult t = sm.search(p, timed, noStop, nullptr);
+        bool ok = false;
+        for (const Move &m : p.generateLegalMoves()) ok |= sameMove(m, t.bestMove);
+        CHECK(ok && !t.pv.empty() && sameMove(t.pv[0], t.bestMove), "4-thread timed search: bad result %s at %s",
+              moveToUciString(t.bestMove).c_str(), fen);
+        if (fen[0] == '1') CHECK(t.score == MATE_SCORE - 3, "4-thread timed search missed mate in 2 (%d)", t.score);
+        if (fen[0] == 'r' && fen[2] == 'b') CHECK(moveToUciString(t.bestMove) == "f3f7", "4-thread timed search missed mate in 1");
+    }
+
     // An immediate stop still yields a legal move.
     FastBoard b;
     Searcher<FastBoard> s(&tt);
