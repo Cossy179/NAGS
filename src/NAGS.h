@@ -41,6 +41,39 @@ struct EvalResult {
     float uncertainty = 0.0f;
 };
 
+// Network answers by position, so a position the MCTS meets again (a
+// transposition, or the next move's search through the same lines) costs
+// no round trip. Keyed by the Zobrist hash and the half-move clock (a
+// network input); the legal-move list is checked too, since the priors
+// follow its order. Fixed size, always-replace.
+class EvalCache {
+public:
+    void resize(size_t megabytes);
+    void clear();
+    bool probe(uint64_t key, const std::vector<Move> &legal, EvalResult &out);
+    void store(uint64_t key, const std::vector<Move> &legal, const EvalResult &r);
+    bool enabled() const { return !table.empty(); }
+    static uint64_t keyOf(const FastBoard &board);
+    long long hits = 0, misses = 0;
+
+private:
+    struct Entry {
+        uint64_t key = 0, movesSig = 0;
+        float value = 0.0f, uncertainty = 0.0f;
+        std::vector<float> priors;
+    };
+    static uint64_t signature(const std::vector<Move> &legal);
+    std::vector<Entry> table;
+    size_t mask = 0;
+};
+
+// One position for the network: its FEN and legal moves (the priors come
+// back in this order).
+struct EvalRequest {
+    std::string fen;
+    std::vector<Move> legal;
+};
+
 class Evaluator {
 public:
     virtual ~Evaluator() = default;
@@ -63,16 +96,31 @@ public:
     EvalResult evaluate(FastBoard &board, const std::vector<Move> &legal) override;
     bool lastUsedNetwork() const { return usedNetwork; }
 
-    // Round trips to the service since the last reset: count, failures and
-    // the time spent waiting for answers.
+    // Batches: several positions in one request, and requests that are sent
+    // before the replies to earlier ones are read (the server answers in
+    // order). A failed send or receive closes the connection, drops what is
+    // outstanding and backs off like evaluate().
+    bool available();
+    bool sendBatch(const std::vector<const EvalRequest *> &batch);
+    bool receiveBatch(const std::vector<const EvalRequest *> &batch, std::vector<EvalResult> &out);
+    // Largest batch expected to come back well within the request timeout,
+    // from the measured time per position (at most `wanted`).
+    int batchLimit(int wanted) const;
+
+    EvalCache &cache() { return evalCache; }
+    void resetCache() { evalCache.clear(); }
+
+    // Round trips to the service since the last reset: count, failures, the
+    // positions sent and the time spent waiting for answers.
     struct Timing {
-        long long requests = 0, failures = 0;
+        long long requests = 0, failures = 0, positions = 0;
         double waitMs = 0.0, maxMs = 0.0;
     };
     const Timing &timing() const { return stats; }
     void resetTiming() { stats = Timing{}; }
 
 private:
+    void fail(std::chrono::steady_clock::time_point now);
     Evaluator &fallback;
     bool enabled = true;
     std::string host = "127.0.0.1";
@@ -82,6 +130,11 @@ private:
     std::chrono::steady_clock::time_point retryAfter{};
     bool usedNetwork = false;
     Timing stats;
+    EvalCache evalCache;
+    // Requests sent and not yet answered, with their send times.
+    std::vector<std::chrono::steady_clock::time_point> outstanding;
+    std::chrono::steady_clock::time_point lastReply{};
+    double msPerPosition = 0.0; // running estimate (0: unknown)
 };
 
 struct MCTSNode {
@@ -93,6 +146,7 @@ struct MCTSNode {
     float prior = 0.0f;
     bool expanded = false;
     bool terminal = false;
+    bool pending = false;       // queued for the network (batched MCTS)
     float terminalValue = 0.0f; // side to move's view, used when terminal
 
     double q() const { return visits > 0 ? valueSum / visits : 0.0; }
@@ -116,6 +170,14 @@ struct NagsSettings {
     bool useNN = false;
     std::string nnHost = "127.0.0.1";
     int nnPort = 5555;
+
+    // Neural inference. nnBatch leaves are selected with virtual loss and
+    // evaluated in one request (1: one request per simulation, the original
+    // MCTS); with nnPipeline the next batch is sent before the previous
+    // one's reply has arrived. nnCacheMb: evaluation cache (0 = off).
+    int nnBatch = 1;
+    bool nnPipeline = false;
+    int nnCacheMb = 32;
 };
 
 struct NagsResult {
@@ -130,7 +192,7 @@ public:
     // Uses (and shares the transposition table of) the engine's alpha-beta searcher.
     explicit NAGSController(Searcher<FastBoard> &searcher);
 
-    // Resets the RNG and the uncertainty carried between moves.
+    // Resets the RNG, the uncertainty carried between moves and the evaluation cache.
     void newGame();
     NagsSettings &settings() { return config; }
     const NagsSettings &settings() const { return config; }
@@ -151,6 +213,7 @@ private:
     static constexpr uint32_t kSeed = 0xC0FFEEu;
     std::mt19937 rng;
     float lastUncertainty = 0.1f;
+    int cacheMbApplied = -1; // size the evaluation cache was allocated with (-1: not yet)
 
     // MCTS state for the current move (used by the MCTS thread only).
     double mctsMs = 0.0; // time the MCTS thread ran
@@ -160,10 +223,27 @@ private:
     size_t mctsNodes = 0;
     float cpuct = 1.4f;
     bool mctsUsedNetwork = false;
+    long long mctsCollisions = 0; // batched MCTS: selections that ran into a leaf already queued
+    long long mctsBatches = 0;
     static constexpr size_t kMaxMctsNodes = 2000000; // ~150 MB
 
+    // A leaf waiting for the network, with the moves leading to it (to
+    // evaluate it with the fallback if the request fails).
+    struct PendingLeaf {
+        MCTSNode *node = nullptr;
+        uint64_t key = 0; // EvalCache key of its position
+        std::vector<Move> path;
+        EvalRequest request;
+    };
+    enum class Selected { Queued, Resolved, Collision };
+
     void runMcts(long long budget, const std::atomic<bool> &stopMcts);
+    void runMctsBatched(long long budget, const std::atomic<bool> &stopMcts);
     void simulate();
+    Selected selectLeaf(std::vector<PendingLeaf> &batch);
+    void backup(MCTSNode *leaf, float value, bool virtualLoss);
+    void revertVirtualLoss(MCTSNode *leaf);
+    void evaluateWithFallback(std::vector<PendingLeaf> &batch);
     MCTSNode *selectChild(MCTSNode *node) const;
     void expand(MCTSNode *node, const std::vector<Move> &legal, const EvalResult &eval);
     const MCTSNode *mostVisitedRootChild() const;

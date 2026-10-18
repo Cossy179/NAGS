@@ -30,6 +30,9 @@ public:
         lines.push_back("option name MetaPort type spin default " + std::to_string(s.metaPort) + " min 1 max 65535");
         lines.push_back("option name MetaExploration type spin default 0 min 0 max 100");
         lines.push_back("option name MctsMinTime type spin default " + std::to_string(s.minMctsMs) + " min 0 max 600000");
+        lines.push_back("option name NNBatch type spin default " + std::to_string(s.nnBatch) + " min 1 max 256");
+        lines.push_back(std::string("option name NNPipeline type check default ") + (s.nnPipeline ? "true" : "false"));
+        lines.push_back("option name NNCache type spin default " + std::to_string(s.nnCacheMb) + " min 0 max 4096");
         return lines;
     }
 
@@ -65,6 +68,15 @@ public:
         } else if (opt == "MctsMinTime") {
             if (!uci::parseInt(value, v)) return badValue();
             s.minMctsMs = static_cast<int>(std::clamp<long long>(v, 0, 600000));
+        } else if (opt == "NNBatch") {
+            if (!uci::parseInt(value, v)) return badValue();
+            s.nnBatch = static_cast<int>(std::clamp<long long>(v, 1, 256));
+        } else if (opt == "NNPipeline") {
+            if (!uci::parseBool(value, b)) return badValue();
+            s.nnPipeline = b;
+        } else if (opt == "NNCache") {
+            if (!uci::parseInt(value, v)) return badValue();
+            s.nnCacheMb = static_cast<int>(std::clamp<long long>(v, 0, 4096));
         } else {
             return ClassicEngine<FastBoard>::setOption(opt, value, message);
         }

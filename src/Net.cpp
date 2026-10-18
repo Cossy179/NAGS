@@ -181,6 +181,14 @@ bool LineSocket::recvLine(std::string &line, int timeoutMs) {
 #endif
         if (n <= 0) return false;
         buffer.append(chunk, static_cast<size_t>(n));
+#ifdef TCP_QUICKACK
+        // Acknowledge at once (Linux re-enables delayed ACKs after a while):
+        // a server with Nagle's algorithm on sends a reply that follows
+        // another only when the first is acknowledged, and a delayed ACK
+        // holds it up to 40 ms when we have nothing to send (pipelined requests).
+        int one = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one));
+#endif
     }
 }
 
