@@ -893,7 +893,10 @@ private:
                                  hit.bound != Bound::Upper && std::abs(ttScore) < TB_BOUND && ply < MAX_PLY / 2;
         // A capture as the best move found before: quiet moves are less
         // likely to matter here, so they are reduced a ply more.
-        const bool ttCapture = !ttMove.isNull() && eval::isNoisy(board, ttMove);
+        // (The TT keeps from/to/promotion only: toPseudoLegal restores the
+        // en-passant flag and checks the move fits this position.)
+        Move ttPseudo;
+        const bool ttCapture = !ttMove.isNull() && board.toPseudoLegal(ttMove, ttPseudo) && eval::isNoisy(board, ttPseudo);
 
         int i = 0; // number of legal moves tried so far
         int quietsTried = 0;
