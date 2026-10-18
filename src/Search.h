@@ -250,6 +250,7 @@ public:
         aborted = false;
         rootMoveNodes.clear(); // also filled by MultiPV iterations, which do not reset it
         iterationNodes = 0;
+        std::fill(std::begin(doubleExtensions), std::end(doubleExtensions), 0);
         tbHits.store(0, std::memory_order_relaxed);
     }
 
@@ -433,6 +434,7 @@ private:
     // whether the side to move stands better than two plies earlier.
     static constexpr int kNoEval = -1000000;
     int evalStack[MAX_PLY + 1];
+    int doubleExtensions[MAX_PLY + 1] = {}; // double singular extensions on the path to each ply
     Move pvTable[MAX_PLY][MAX_PLY];
     int pvLength[MAX_PLY] = {};
     uint64_t nodes = 0;
@@ -857,6 +859,7 @@ private:
             int reduction = 3 + depth / 6;
             NAGS_STAT(++stats.nmpTries);
             plyMoves[ply] = PlyMove{};
+            doubleExtensions[ply + 1] = doubleExtensions[ply]; // the null move's subtree continues this line
             board.makeNullMove();
             int score = -negamax(depth - 1 - reduction, -beta, -beta + 1, ply + 1, false);
             board.unmakeNullMove();
@@ -881,7 +884,7 @@ private:
         // Singular extension candidate: a deep enough TT entry whose move
         // failed high (or was exact).
         const int ttScore = ttHit ? scoreFromTT(hit.score, ply) : 0;
-        const bool trySingular = !excluding && depth >= 8 && ttHit && !ttMove.isNull() && hit.depth >= depth - 3 &&
+        const bool trySingular = !excluding && depth >= 6 && ttHit && !ttMove.isNull() && hit.depth >= depth - 3 &&
                                  hit.bound != Bound::Upper && std::abs(ttScore) < TB_BOUND && ply < MAX_PLY / 2;
 
         int i = 0; // number of legal moves tried so far
@@ -932,11 +935,19 @@ private:
                 int s = negamax((depth - 1) / 2, singularBeta - 1, singularBeta, ply, false, m);
                 if (aborted) return 0;
                 if (s < singularBeta) {
-                    extension = 1;
+                    // Far below the margin: the TT move is the only move by
+                    // far. Two plies, outside PV nodes and at most a few
+                    // times per line, so no line grows without bound.
+                    extension = !isPv && s < singularBeta - 20 && doubleExtensions[ply] < 6 ? 2 : 1;
                     NAGS_STAT(++stats.singularExtensions);
                 } else if (singularBeta >= beta) {
                     NAGS_STAT(++stats.multiCuts);
                     return singularBeta;
+                } else if (ttScore >= beta) {
+                    // Not singular, and the TT score already beats beta:
+                    // the other moves will probably cut too; search the TT
+                    // move a ply shallower.
+                    extension = -1;
                 }
             }
             if (!isLegalMove(board, m)) { // leaves our own king in check
@@ -944,6 +955,7 @@ private:
                 continue;
             }
             setPlyMove(ply, m);
+            doubleExtensions[ply + 1] = doubleExtensions[ply] + (extension == 2);
             board.makeMove(m);
             NAGS_STAT(++stats.movesSearched);
             bool givesCheck = board.inCheck();
