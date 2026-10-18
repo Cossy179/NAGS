@@ -948,6 +948,8 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
         // valued by the TT, MCTS stopped early, root moves in prior order.
         s << " mcts_reused " << mctsReusedVisits << " tt_values " << mctsTTValues << " smart_stop "
           << (mctsSmartStopped ? 1 : 0) << " root_order " << (rootOrdered ? 1 : 0);
+        // The alpha-beta arm's own move (what was played without MCTS), for tools/hybrid_eval.py.
+        s << " alpha_beta_move " << moveToUciString(ab.bestMove) << " alpha_beta_score " << ab.score;
         onString(s.str());
 
         // Kept as the last info line so the training pipeline can pair the
