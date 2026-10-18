@@ -56,6 +56,7 @@ struct SearchStats {
     uint64_t allNodes = 0, pvNodes = 0;      // nodes without a cutoff: no move beat alpha / one did
     uint64_t movesSearched = 0, illegal = 0;
     uint64_t rfp = 0, nmpTries = 0, nmpCutoffs = 0, lmp = 0, futility = 0, historyPrunes = 0, seePrunes = 0;
+    uint64_t probCutTries = 0, probCuts = 0;
     uint64_t lmrSearches = 0, lmrResearches = 0, pvsResearches = 0;
     uint64_t singularTries = 0, singularExtensions = 0, multiCuts = 0;
     uint64_t qStandPat = 0, qDelta = 0, qSee = 0, qCutoffs = 0;
@@ -89,7 +90,8 @@ struct SearchStats {
                 " illegal " + n(illegal),
             "stats cutoff on move 1..8+ " + at,
             "stats cutoff by stage " + byStage,
-            "stats pruning rfp " + n(rfp) + " nmp " + n(nmpCutoffs) + "/" + n(nmpTries) + " lmp " + n(lmp) + " futility " +
+            "stats pruning rfp " + n(rfp) + " nmp " + n(nmpCutoffs) + "/" + n(nmpTries) + " probcut " + n(probCuts) + "/" +
+                n(probCutTries) + " lmp " + n(lmp) + " futility " +
                 n(futility) + " history " + n(historyPrunes) + " see " + n(seePrunes),
             "stats reductions lmr " + n(lmrSearches) + " researched " + pct(lmrResearches, lmrSearches) + " pvs re-searches " +
                 n(pvsResearches) + " | singular " + n(singularExtensions) + "/" + n(singularTries) + " multicut " + n(multiCuts),
@@ -872,6 +874,35 @@ private:
             if (score >= beta) {
                 NAGS_STAT(++stats.nmpCutoffs);
                 return score >= TB_BOUND ? beta : score; // don't trust unproven mates or TB wins
+            }
+        }
+
+        // ProbCut: if a capture that wins enough material (SEE) still beats
+        // beta by a wide margin in a search four plies shallower, the full
+        // search would very likely fail high too: cut with that score. Not
+        // when the TT already says a search nearly as deep stayed below it.
+        const int probCutBeta = beta + 200;
+        if (!isPv && !inCheck && !excluding && depth >= 5 && std::abs(beta) < MATE_BOUND &&
+            !(ttHit && hit.depth >= depth - 3 && scoreFromTT(hit.score, ply) < probCutBeta)) {
+            MovePicker pc(*this, ttMove, MAX_PLY, Move{}, nullptr, nullptr, true); // TT move if noisy, winning captures
+            for (int idx; (idx = pc.next(true)) >= 0;) {
+                const Move m = pc.moveAt(idx);
+                if (pc.seeOfLast() < probCutBeta - staticEval || !isLegalMove(board, m)) continue;
+                NAGS_STAT(++stats.probCutTries);
+                setPlyMove(ply, m);
+                doubleExtensions[ply + 1] = doubleExtensions[ply];
+                board.makeMove(m);
+                // A quiescence search first: most captures fail already there.
+                int score = -quiescence(-probCutBeta, -probCutBeta + 1, ply + 1);
+                if (!aborted && score >= probCutBeta)
+                    score = -negamax(depth - 4, -probCutBeta, -probCutBeta + 1, ply + 1, false);
+                board.unmakeMove();
+                if (aborted) return 0;
+                if (score >= probCutBeta) {
+                    NAGS_STAT(++stats.probCuts);
+                    if (tt) tt->store(key, depth - 3, Bound::Lower, scoreToTT(score, ply), m);
+                    return score;
+                }
             }
         }
 
