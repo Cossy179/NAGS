@@ -222,6 +222,7 @@ struct IterationResult {
     int score = 0;
     std::vector<Move> pv;
     bool improved = false; // an aborted iteration still found a reliably better root move
+    bool firstFailedLow = false; // the first root move was fully searched and failed low
     // Of a completed iteration (all its aspiration attempts): nodes spent on
     // the best root move, and on all of them.
     uint64_t bestMoveNodes = 0, nodes = 0;
@@ -284,14 +285,26 @@ public:
         int window = (depth >= 5 && std::abs(prevScore) < MATE_BOUND) ? 25 : INF_SCORE;
         int alpha = window >= INF_SCORE ? -INF_SCORE : std::max(-INF_SCORE, prevScore - window);
         int beta = window >= INF_SCORE ? INF_SCORE : std::min(INF_SCORE, prevScore + window);
+        const Move previousBest = rootMoves.front(); // the last completed iteration's best move
         for (;;) {
             IterationResult attempt;
             int score = rootSearch(depth, alpha, beta, attempt);
             if (aborted) {
                 if (attempt.improved) out = attempt;
+                // The fail-high move kept from an earlier attempt was searched
+                // first again and failed low: not confirmed, so fall back to
+                // the last completed iteration.
+                else if (attempt.firstFailedLow && out.improved) out = IterationResult{};
                 return false;
             }
             if (score <= alpha && alpha > -INF_SCORE) {
+                // A fail-high earlier in this iteration was not confirmed:
+                // forget it and search the last completed iteration's best
+                // move first again, so an abort now falls back to it (the
+                // move searched first beats the lowered window and would
+                // count as an improvement).
+                out = IterationResult{};
+                preferRootMove(previousBest);
                 beta = (alpha + beta) / 2;
                 window *= 2;
                 alpha = window >= 1000 ? -INF_SCORE : std::max(-INF_SCORE, score - window);
@@ -742,6 +755,7 @@ private:
             board.unmakeMove();
             addRootMoveNodes(m, nodes - moveStart);
             if (aborted) break;
+            if (i == first && score <= originalAlpha) out.firstFailedLow = true;
             if (score > bestScore) {
                 bestScore = score;
                 if (score > alpha) {
@@ -800,7 +814,9 @@ private:
                 NAGS_STAT(++stats.ttHits);
                 ttHit = true;
                 ttMove = hit.move;
-                if (!isPv && hit.depth >= depth) {
+                // The key ignores the fifty-move counter: close to the draw a
+                // stored score may no longer hold.
+                if (!isPv && hit.depth >= depth && board.getHalfmoveClock() < 90) {
                     int s = scoreFromTT(hit.score, ply);
                     if (hit.bound == Bound::Exact || (hit.bound == Bound::Lower && s >= beta) ||
                         (hit.bound == Bound::Upper && s <= alpha)) {
@@ -1072,6 +1088,9 @@ private:
         NAGS_STAT(++stats.qnodes);
         selDepth = std::max(selDepth, ply);
         if (ply >= MAX_PLY - 1) return eval::evaluate(board);
+        // A capture into bare kings or a lone minor piece is a dead draw
+        // (the network has never seen such positions).
+        if (board.isInsufficientMaterial()) return 0;
 
         const bool isPv = beta - alpha > 1;
         const uint64_t key = board.zobrist();
@@ -1083,7 +1102,7 @@ private:
             NAGS_STAT(++stats.qttHits);
             ttHit = true;
             ttMove = hit.move;
-            if (!isPv) {
+            if (!isPv && board.getHalfmoveClock() < 90) {
                 int s = scoreFromTT(hit.score, ply);
                 if (hit.bound == Bound::Exact || (hit.bound == Bound::Lower && s >= beta) ||
                     (hit.bound == Bound::Upper && s <= alpha)) {
@@ -1103,8 +1122,9 @@ private:
                 stand = std::clamp(eval::evaluate(board) + correction(corr), -eval::kEvalLimit, eval::kEvalLimit);
             }
             NAGS_STAT(++stats.evals);
-            // A TT score whose bound points the right way is a better estimate.
-            if (ttHit && std::abs(hit.score) < TB_BOUND) {
+            // A TT score whose bound points the right way is a better estimate
+            // (not close to the fifty-move draw, as for the cutoffs above).
+            if (ttHit && std::abs(hit.score) < TB_BOUND && board.getHalfmoveClock() < 90) {
                 int s = hit.score;
                 if (hit.bound == Bound::Exact || (hit.bound == Bound::Lower && s > stand) ||
                     (hit.bound == Bound::Upper && s < stand))
@@ -1139,9 +1159,12 @@ private:
                 continue;
             }
             if (!isLegalMove(board, m)) continue;
+            // A quiet check evasion can complete a repetition or the
+            // fifty-move rule (captures and promotions cannot).
+            const bool quietEvasion = inCheck && !eval::isNoisy(board, m);
             board.makeMove(m);
             ++legal;
-            int score = -quiescence(-beta, -alpha, ply + 1);
+            int score = quietEvasion && board.isDraw() ? 0 : -quiescence(-beta, -alpha, ply + 1);
             board.unmakeMove();
             if (aborted) return 0;
             if (score > best) {
