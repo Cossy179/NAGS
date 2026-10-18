@@ -93,7 +93,8 @@ either.
   and a stored score bounded on the right side replaces the stand-pat.
 * Time management: no new iteration after a soft limit that grows when the
   best move just changed or the score dropped and shrinks when the best move
-  is stable; a hard limit aborts the search.
+  is stable or took most of the last iteration's nodes; a hard limit aborts
+  the search.
 * Syzygy tablebases (WDL in the search, DTZ at the root), MultiPV and
   pondering.
 * Transposition table entries record whether the score is exact or a bound,
@@ -119,9 +120,16 @@ written in the current search.
 
 For `wtime/btime` the target is `time / movestogo (default 30) + 3/4 inc`,
 after subtracting `Move Overhead`. No new iteration starts after 55% of the
-target. The hard limit (abort) is the smaller of 3x the target and half the
-remaining time (90% of the remaining time when `movestogo` is 1). `movetime`
-uses the given time minus the overhead. `go infinite` (or a bare `go`)
+target, scaled in the search (`Searcher::search`) by the best move's
+stability (×2.0 right after it changed, down to ×0.85 after four stable
+iterations), by score drops of more than 20 cp (up to ×1.5) and, from depth
+7, by its share of the last iteration's nodes over all aspiration attempts:
+×(1.5 − share)·1.35, from ×0.68 for a move that took all of them to ×2.0
+for one that took none. The hard limit (abort) is the smaller of 3x the
+target and half the remaining time (90% of the remaining time when
+`movestogo` is 1). `movetime`
+uses the given time minus the overhead (without the node-share factor).
+`go infinite` (or a bare `go`)
 searches until `stop`, and `bestmove` is never sent before that.
 
 ### Evaluation (`Eval.h`)
