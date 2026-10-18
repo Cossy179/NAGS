@@ -884,10 +884,13 @@ private:
         const int probCutBeta = beta + 200;
         if (!isPv && !inCheck && !excluding && depth >= 5 && std::abs(beta) < MATE_BOUND &&
             !(ttHit && hit.depth >= depth - 3 && scoreFromTT(hit.score, ply) < probCutBeta)) {
-            MovePicker pc(*this, ttMove, MAX_PLY, Move{}, nullptr, nullptr, true); // TT move if noisy, winning captures
-            for (int idx; (idx = pc.next(true)) >= 0;) {
+            // TT move if noisy, then captures; losing ones too when the
+            // threshold is negative (the static eval already beats probCutBeta).
+            const int seeThreshold = probCutBeta - staticEval;
+            MovePicker pc(*this, ttMove, MAX_PLY, Move{}, nullptr, nullptr, true);
+            for (int idx; (idx = pc.next(seeThreshold > 0)) >= 0;) {
                 const Move m = pc.moveAt(idx);
-                if (pc.seeOfLast() < probCutBeta - staticEval || !isLegalMove(board, m)) continue;
+                if (pc.seeOfLast() < seeThreshold || !isLegalMove(board, m)) continue;
                 NAGS_STAT(++stats.probCutTries);
                 setPlyMove(ply, m);
                 doubleExtensions[ply + 1] = doubleExtensions[ply];
