@@ -94,6 +94,28 @@ lookups never match), never over the v2
 `production_model.pth`; `supervised_legal_mask` (default off) is the only
 change to the legacy training steps, and it is opt-in.
 
+Serving speed-ups (`relational_fast.py`, `gnn_infer.py`, the new
+`rpc_server.py` options) change how fast a reply is computed, never what it
+says. `relational_fast.build_arrays` must give exactly
+`relational_graph.build_graph`'s features, edges and edge order (the
+reference stays and is what training uses), and `TorchBackendV3` exactly
+`RelationalGNNEvaluator.evaluate`'s outputs, MC-dropout draws included;
+`rpc_server.py` serves v3 through them by default (`--backend auto`), and
+v2 networks only through the legacy path. The ONNX backend (`--backend
+onnx`, optional dependency) agrees to float precision and is opt-in, as
+are `--batch-wait-ms` and `--cache-size`. The protocol is unchanged
+(several FENs per request were always allowed; the engine now sends them
+with `NNBatch` > 1). `--threads` defaults to 1, which changes the server's
+speed, not its replies beyond float rounding. A change to the v3 model's
+layers must be mirrored in `TorchBackendV3` and the ONNX export (the tests
+fail otherwise); a change to the graph needs a new `graph` version anyway.
+
+The engine's `NNBatch` (default 1), `NNPipeline` (default off) and
+`NNCache` (32 MB) only affect the hybrid's MCTS arm, which is off by
+default; with `NNBatch` 1 its search is the one-request-per-simulation MCTS
+as before, the cache only skipping repeated round trips. The training
+pipeline sets none of them, so self-play games are played as before.
+
 ### Engine options used by the tools
 
 `EvalFile` (prints `NNUE evaluation: <name>` or `EvalFile: <error>`),
@@ -108,6 +130,8 @@ whatever `Hash` is set to.
 | `tests/python/test_compat.py` | Networks of every format (v1, v2, v3 SCReLU / mirror / 4 and 16 king buckets) with evaluations recorded from the engine and trainer of `bb1e03c`, in both the trainer's reference and the engine, through incremental updates (castling, en passant, promotions, king-bucket changes); the trainer's defaults, constants and layouts; `run_round.py`'s designs; resuming a checkpoint written by the `bb1e03c` trainer; loading and serving a `nags-gnn-v2` checkpoint with the same priors and value. Fixtures in `tests/data/compat` (never regenerate them). |
 | `tests/python/test_nnue.py` | Engine = trainer reference on freshly trained networks of five designs; binary records round-trip; datagen binary = text; resume reproduces a full run and refuses changed settings. |
 | `tests/cpp/nnue_tests.cpp` | Incremental accumulators = refreshed ones through random games (also across null moves); colour and left-right symmetry; the embedded network loads in this build; evaluations stay below the TB/mate scores. |
+| `tests/python/test_relational_fast.py` | The fast graph builder equals `relational_graph.build_graph` exactly (features, edges, edge order, legal mask) on about 4,000 positions and special cases, and its batches equal `Batch.from_data_list`'s. |
+| `tests/python/test_gnn_infer.py`, `test_rpc_fast.py` | The torch backend equals `evaluate()` bit for bit (MC dropout included) and its replies the legacy server's byte for byte; ONNX within 1e-5; batching, pipelining and the cache keep replies and their order. |
 | `nags_datagen` identity | Not a permanent test (functional search changes legitimately change the games): for each non-functional commit, `nags_datagen --threads 1` with a fixed seed must write the same bytes as before. |
 
 ## Before merging to `main`

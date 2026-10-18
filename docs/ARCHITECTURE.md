@@ -182,9 +182,12 @@ Per move:
    at most a tenth of the hard limit, so a slow answer cannot overrun the
    move. Meanwhile an MCTS thread runs PUCT simulations until the
    alpha-beta search finishes or the simulation budget is used. Leaves are
-   evaluated by the GNN (one request per leaf: FEN plus legal moves in,
-   value plus priors for those moves out; the heuristic evaluator takes over
-   if the service fails mid-search). Each node stores its value from the
+   evaluated by the GNN (FEN plus legal moves in, value plus priors for
+   those moves out; the heuristic evaluator takes over if the service fails
+   mid-search): one request per leaf by default, or `NNBatch` leaves per
+   request, selected with virtual loss (see "Neural inference" below).
+   Network answers are kept in an evaluation cache (`NNCache`, 32 MB), so a
+   position met again costs no round trip. Each node stores its value from the
    point of view of the player who moved into it, so selection maximises for
    the side to move. Checkmate, stalemate and draws are terminal nodes. The
    tree is capped at about 2M nodes.
@@ -254,7 +257,9 @@ uses v3 unless a v3 checkpoint is passed to `rpc_server.py --model` (or to
 | `relational_graph.py` | `RelationalChessGraph`: typed, directed relations built with python-chess |
 | `gnn_v3.py` | `RelationalGNNEvaluator`, v3 checkpoints, `load_any_checkpoint` and the per-format adapters |
 | `distillation.py` | label rows, distillation targets and losses |
-| `tools/gnn_bench.py` | latency / throughput of v2 and v3, graph construction and model separately |
+| `relational_fast.py` | the same graphs as `relational_graph.py`, bit for bit, as numpy arrays, about 3x faster (serving) |
+| `gnn_infer.py` | inference backends for v3: torch (bit-identical to `evaluate()`) and ONNX Runtime |
+| `tools/gnn_bench.py` | latency / throughput of v2 and v3, graph construction and model separately, per serving backend |
 
 ### Move encoding
 
@@ -425,6 +430,153 @@ A single position (the engine's per-leaf request) takes 74 ms with v2 and
 none. Building the graphs costs about the same in both (2–5 ms a
 position in Python), so at small batches it is a large share of a v3
 request.
+
+## Neural inference (`relational_fast.py`, `gnn_infer.py`, `rpc_server.py`, `NAGS.cpp`)
+
+How the MCTS arm gets its network evaluations, and how fast. Nothing here
+changes a checkpoint, the graph or the meaning of a reply; the v3 paths are
+tested to give the reference's results bit for bit (or, for ONNX Runtime,
+to float precision).
+
+### Where the time went
+
+Measured on the 4-core VM with an untrained default-size v3 network
+(weights do not change the timing), `--mc-samples 3`, and `nags` searching
+`go movetime 3000` from a Ruy Lopez position. Before these changes the
+MCTS arm managed **41 simulations per second**, and each round trip to
+`rpc_server.py` took 24 ms:
+
+* **Threads.** The server ran torch with its default intra-op thread count
+  (4 here, 6 on the Windows PC). A request is one position, about 200 small
+  operations, and with 4 threads each one synchronises the pool: a request
+  took 22.7 ms with 4 threads and 7.1 ms with 1 or 2. On the PC the
+  alpha-beta threads compete for the same cores as well.
+* **The request path** (one position, one thread): network 4.2 ms, graph
+  construction 0.74 ms, collation into a torch_geometric batch 0.28 ms,
+  switching the module between train and eval mode for MC dropout 0.35 ms,
+  and the legal-move mask 0.07 ms (it parsed the FEN a second time).
+* **The network itself** is about 168 MFLOP a position (90 nodes and 393
+  edges on average; six R-GCN layers of width 128, mostly the 64 square
+  nodes), which one core computes at about 40 GFLOP/s. So on the CPU the
+  network is close to its floor: ONNX Runtime takes 3.5 ms at batch 1 where
+  torch (without the mode switching) takes 4.2, and is no faster at batch 8
+  or 64. On a GPU the same work is a small fraction
+  of a millisecond per position in a batch, but only if the positions come in
+  batches, and then graph construction in Python is what limits the rate.
+* **One request per simulation**, and no evaluation was ever reused.
+
+### The server
+
+* `--threads` (default 1) sets torch's (and ONNX Runtime's) thread count.
+* `relational_fast.build_arrays` builds the relational-v1 graph as numpy
+  arrays: flat edge lists instead of a call per edge, features filled column
+  by column, pins found from the sliders on the king's lines, and the legal
+  moves of the same board reused for the mask. The reference
+  (`relational_graph.build_graph`) is unchanged; the fast builder must equal
+  it exactly, features, edges and edge order included
+  (`test_relational_fast.py`, about 4,000 positions with promotions, en
+  passant legal and illegal, pins on every line, castling rights without
+  rooks, checkmate, stalemate and move histories with repetitions). Graph
+  preparation for one position: 1.62 → 0.50 ms.
+* `gnn_infer.TorchBackendV3` runs the model's own layers in the order
+  `evaluate()` does, on those arrays, without switching modes (MC dropout
+  with `F.dropout`, which draws the same random numbers as `nn.Dropout`).
+  Its results are bit-identical to `evaluate()`, the Monte-Carlo samples
+  included (`test_gnn_infer.py`), and its replies byte-identical
+  (`test_rpc_fast.py`), so it is the default for v3 networks (`--backend
+  auto`). v2 networks keep the legacy path.
+* `gnn_infer.OnnxBackendV3` (`--backend onnx`, `pip install -r
+  requirements-onnx.txt`) exports the network once per set of weights
+  (`--onnx-cache`) with dynamic node, edge and batch counts. The exported
+  graph takes the square and global nodes as gather indices, so it has no
+  boolean indexing or data-dependent shapes, which TensorRT needs. MC dropout
+  of the small WDL head is done in numpy (same distribution, different
+  draws). Agreement with torch: about 1e-7.
+* `--batch-wait-ms` evaluates the requests of all connections that arrive
+  within the window as one batch, and lets each connection send its next
+  request before the previous reply (the connection's graphs are built while
+  the previous batch is evaluated; replies stay in order). It stops waiting
+  once every open connection has a request in. It is for several clients
+  sharing one GPU (parallel self-play games): with one engine on the CPU the
+  hand-offs between threads cost about 3 ms a request.
+* `--cache-size` keeps replies to repeated requests.
+* The server sets `TCP_NODELAY`. With Nagle's algorithm a reply that follows
+  another (pipelined requests) waited for the client's acknowledgement of
+  the first, which Linux delays by up to 40 ms (Windows: 200 ms) when the
+  client has nothing to send: in testing, the last reply of every pipelined
+  search timed out. The engine also re-arms `TCP_QUICKACK` after each read
+  on Linux, so it does not depend on the server for this.
+
+One-position round trip, measured from a client: 24.8 ms before, 5.6 ms
+with the defaults now (bit-identical replies), 4.7 ms with `--backend onnx`.
+
+### The engine
+
+* `NNBatch` (default 1, the original one request per simulation): the MCTS
+  thread selects up to that many leaves before asking the network. Every
+  node on a selected path is charged a virtual loss (a visit that lost,
+  −1), so the following selections spread out; a selection that reaches a
+  leaf already queued is a collision, and after as many collisions as the
+  batch size the batch is sent as it is. Terminal positions and cached
+  positions are backed up at once. When the reply comes, each leaf is
+  expanded, its value backed up and the virtual loss taken back. The batch
+  is also capped so that its expected round trip (from the measured time per
+  position) stays under 40% of the request timeout, a tenth of the move's
+  hard limit, so a slow server shrinks the batches instead of timing out.
+* `NNPipeline` (default off): the next batch is sent before the previous
+  one's reply arrives (two requests in flight), so the engine's selection
+  and the server's work overlap; useful when the network is fast (GPU), not
+  when it is the bottleneck.
+* `NNCache` (MB, default 32; 0 = off): network answers by position, keyed by
+  the Zobrist hash and the half-move clock (a v3 input), with the legal-move
+  list checked as well. Within one search it catches transpositions (11% of
+  the evaluations in the measurement above); the next move's search starts
+  in the previous tree, which the cache mostly holds. It is cleared by
+  `ucinewgame` and when the server address changes. With `--mc-samples` > 1
+  a cached value is one draw of the MC dropout, as the network would give.
+* If the server fails mid-search the requests in flight are evaluated by the
+  heuristic and the rest of the move continues as with `NNBatch` 1 (the
+  service is retried after a minute), as before.
+
+The `info string nags` line gives `rpc_positions`, `rpc_batch` (positions
+per request), `cache_hits` and `mcts_collisions` after the existing fields.
+
+MCTS simulations per second, same measurement as above (CPU only):
+
+| Setting | Simulations/s | Round trip |
+|---|---:|---:|
+| before | 41 | 24 ms (1 position) |
+| `NNBatch 1` (server and cache defaults) | 196 | 5.7 ms |
+| `NNBatch 4` | 252 | 16 ms |
+| `NNBatch 8` | 250 | 32 ms |
+| `NNBatch 16` | 258 | 61 ms |
+
+On this CPU the network caps the rate at about 250 positions a second;
+batching only removes the per-request overhead. The GPU case has not been
+measured (no GPU here), and that is where batching pays: `python
+tools/gnn_bench.py --models v3 --backends legacy,torch,onnx --device cuda
+--providers tensorrt,cuda,cpu` times every path and checks each one
+against the legacy outputs (`max_dp`, `max_dv`); then `rpc_server.py
+--device cuda` (optionally `--backend onnx --providers tensorrt,cuda,cpu
+--fp16`) with `NNBatch` 32-64 and `NNPipeline` on. With a fast network
+the server's graph construction (about 0.4 ms a position in Python, one
+core) becomes the limit, near 2,500 positions a second; building the graph
+in the engine (C++) and sending it instead of the FEN would remove it, but
+needs an exact C++ copy of relational-v1, tested against the Python builder.
+
+**TensorRT.** Through ONNX Runtime's TensorRT execution provider
+(`--providers tensorrt,cuda,cpu`). The exported graph (opset 18) is Gemm,
+MatMul, Gather / GatherND, LayerNormalization, Softmax, elementwise
+operations and seven ScatterND nodes with `reduction="add"` (the
+`index_add` message aggregation of each layer and the mean pooling).
+Whether a given TensorRT version's ONNX parser takes ScatterND with a
+reduction has not been checked here; nodes it refuses are run by the CUDA
+provider, with the rest of the graph in TensorRT. Dynamic shapes come with
+an optimisation profile from 1 to 256 positions, engines are cached under
+`--onnx-cache`, and `--fp16` turns on half precision. Not run here: whether
+TensorRT beats the CUDA provider for this graph, and how far `--fp16` moves
+the outputs, are for `gnn_bench.py` on the GPU (the `max_dp` / `max_dv`
+columns).
 
 ### What the v3 network and distillation buy (move priors and values)
 
