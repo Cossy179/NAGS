@@ -61,6 +61,13 @@ either.
 * Extensions: check extension; singular extension of the TT move (depth ≥ 8,
   verified by a reduced search without it, with a multi-cut when even the
   alternatives beat beta).
+* Correction history: per worker, running averages of how far the static
+  evaluation was from the search result in positions with the same pawn
+  structure, the same non-pawn pieces of each side, and after the same
+  previous move (per side to move). Their weighted mean, at most ±256 cp,
+  corrects the static evaluation used for pruning, "improving" and the
+  quiescence stand-pat. Updated at nodes not in check whose result is not
+  decided by a capture and lies on the right side of the evaluation.
 * Pruning and reductions (outside PV nodes and check where it matters):
   reverse futility pruning (depth ≤ 6), null-move pruning (R = 3 + depth/6),
   late-move pruning and futility pruning of quiet moves (depth ≤ 3),
