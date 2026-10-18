@@ -84,7 +84,10 @@ def test_cache():
     mixed = {"fens": FENS[3:8], "moves": [legal_moves(f) for f in FENS[3:8]]}
     second = fast.handle(mixed)
     assert fast.cache_hits == 2
-    assert json.dumps(second) == json.dumps(legacy.handle(mixed))
+    # Two of these were computed in the first request's batch, three in a batch of their own; a
+    # network's float results can depend on the batch size (GEMM blocking), so only nearly equal.
+    for a, b in zip(second["results"], legacy.handle(mixed)["results"]):
+        assert np.allclose(a["move_priors"], b["move_priors"], atol=1e-6) and abs(a["value"] - b["value"]) < 1e-6
     assert json.dumps(fast.handle(payload)) == json.dumps(first) == json.dumps(legacy.handle(payload))
     assert len(fast.cache) == 8  # bounded, least recently used out
     # Different moves for the same FEN are a different request.
