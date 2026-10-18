@@ -222,6 +222,9 @@ struct IterationResult {
     int score = 0;
     std::vector<Move> pv;
     bool improved = false; // an aborted iteration still found a reliably better root move
+    // Of a completed iteration (all its aspiration attempts): nodes spent on
+    // the best root move, and on all of them.
+    uint64_t bestMoveNodes = 0, nodes = 0;
 };
 
 // One MultiPV line.
@@ -245,6 +248,8 @@ public:
         unflushed = 0;
         selDepth = 0;
         aborted = false;
+        rootMoveNodes.clear(); // also filled by MultiPV iterations, which do not reset it
+        iterationNodes = 0;
         tbHits.store(0, std::memory_order_relaxed);
     }
 
@@ -270,6 +275,8 @@ public:
     bool iterate(int depth, int prevScore, IterationResult &out) {
         out = IterationResult{};
         if (rootMoves.empty()) return true;
+        rootMoveNodes.clear(); // nodes per root move over all attempts of this iteration
+        iterationNodes = 0;
         int window = (depth >= 5 && std::abs(prevScore) < MATE_BOUND) ? 25 : INF_SCORE;
         int alpha = window >= INF_SCORE ? -INF_SCORE : std::max(-INF_SCORE, prevScore - window);
         int beta = window >= INF_SCORE ? INF_SCORE : std::min(INF_SCORE, prevScore + window);
@@ -296,6 +303,10 @@ public:
             }
             out = attempt;
             out.score = score;
+            out.nodes = iterationNodes;
+            out.bestMoveNodes = 0;
+            for (const auto &[m, n] : rootMoveNodes)
+                if (sameMove(m, out.bestMove)) out.bestMoveNodes = n;
             preferRootMove(out.bestMove);
             return true;
         }
@@ -352,6 +363,8 @@ private:
     TranspositionTable *tt;
     SearchControl *ctl;
     std::vector<Move> rootMoves;
+    std::vector<std::pair<Move, uint64_t>> rootMoveNodes; // per root move, this iteration
+    uint64_t iterationNodes = 0;
     Move killers[MAX_PLY][2];
     int history[2][64][64];
     Move counterMoves[12][64]; // [piece that moved][its target square]
@@ -382,6 +395,15 @@ private:
     void moveRootMove(const Move &m, size_t pos) {
         auto it = std::find_if(rootMoves.begin() + pos, rootMoves.end(), [&](const Move &x) { return sameMove(x, m); });
         if (it != rootMoves.end()) std::rotate(rootMoves.begin() + pos, it, it + 1);
+    }
+
+    void addRootMoveNodes(const Move &m, uint64_t n) {
+        for (auto &[move, count] : rootMoveNodes)
+            if (sameMove(move, m)) {
+                count += n;
+                return;
+            }
+        rootMoveNodes.emplace_back(m, n);
     }
 
     bool checkStop() {
@@ -641,8 +663,10 @@ private:
         evalStack[0] = board.inCheck() ? kNoEval : eval::evaluate(board);
         int bestScore = -INF_SCORE;
         int originalAlpha = alpha;
+        const uint64_t startNodes = nodes;
         for (size_t i = first; i < rootMoves.size(); ++i) {
             const Move m = rootMoves[i];
+            const uint64_t moveStart = nodes;
             setPlyMove(0, m);
             board.makeMove(m);
             int score;
@@ -653,6 +677,7 @@ private:
                 if (!aborted && score > alpha && score < beta) score = -negamax(depth - 1, -beta, -alpha, 1, true);
             }
             board.unmakeMove();
+            addRootMoveNodes(m, nodes - moveStart);
             if (aborted) break;
             if (score > bestScore) {
                 bestScore = score;
@@ -676,6 +701,7 @@ private:
             out.score = bestScore;
             out.improved = false;
         }
+        iterationNodes += nodes - startNodes;
         return bestScore;
     }
 
@@ -1190,6 +1216,14 @@ public:
                 static constexpr double kStability[5] = {2.0, 1.5, 1.2, 1.0, 0.85};
                 double scale = kStability[std::min(stableIterations, 4)];
                 if (scoreDrop > 20) scale *= 1.0 + std::min(scoreDrop, 120) / 240.0;
+                // Node share of the best move in the last iteration (all its
+                // aspiration attempts): a move that took nearly all of the
+                // search is clear, one that took little of it was contested,
+                // so search on.
+                if (!multi && depth >= 7 && r.nodes > 0 && limits.softMs < limits.hardMs) { // not with movetime
+                    const double share = static_cast<double>(r.bestMoveNodes) / static_cast<double>(r.nodes);
+                    scale *= (1.5 - share) * 1.35;
+                }
                 if (limits.softMs > 0 && !control.pondering() &&
                     control.elapsedMs() >= static_cast<int64_t>(limits.softMs * scale))
                     break; // next depth won't fit
