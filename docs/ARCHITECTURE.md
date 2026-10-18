@@ -58,9 +58,12 @@ either.
 
 * Iterative deepening with aspiration windows (from depth 5) and principal
   variation search.
-* Extensions: check extension; singular extension of the TT move (depth ≥ 8,
+* Extensions: check extension; singular extension of the TT move (depth ≥ 6,
   verified by a reduced search without it, with a multi-cut when even the
-  alternatives beat beta).
+  alternatives beat beta). Far below the singular margin (by more than 20)
+  the extension is two plies outside PV nodes, at most six times along a
+  line; when the move is not singular but its TT score already beats beta it
+  is searched a ply shallower.
 * Correction history: per worker, running averages of how far the static
   evaluation was from the search result in positions with the same pawn
   structure, the same non-pawn pieces of each side, and after the same
