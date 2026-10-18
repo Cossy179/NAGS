@@ -782,7 +782,9 @@ private:
         if (alpha >= beta) return alpha;
 
         bool inCheck = board.inCheck();
-        if (inCheck && ply < MAX_PLY / 2) ++depth;
+        // The singular verification search runs at its node's ply and has
+        // been extended for the check there already.
+        if (inCheck && ply < MAX_PLY / 2 && excluded.isNull()) ++depth;
         if (depth <= 0) return quiescence(alpha, beta, ply);
 
         ++nodes;
