@@ -340,6 +340,7 @@ public:
     // the result is only a bound). Used to verify a candidate from another
     // source. Returns false if aborted.
     bool scoreRootMove(const Move &m, int depth, int &score, int alpha = -INF_SCORE, int beta = INF_SCORE) {
+        setRootEval(); // "improving" at ply 2 compares with it
         setPlyMove(0, m);
         board.makeMove(m);
         int s = -negamax(std::max(0, depth - 1), -beta, -alpha, 1, beta - alpha > 1);
@@ -449,6 +450,14 @@ private:
     void moveRootMove(const Move &m, size_t pos) {
         auto it = std::find_if(rootMoves.begin() + pos, rootMoves.end(), [&](const Move &x) { return sameMove(x, m); });
         if (it != rootMoves.end()) std::rotate(rootMoves.begin() + pos, it, it + 1);
+    }
+
+    // The root's static evaluation, corrected like every other node's, so
+    // that "improving" at ply 2 compares like with like.
+    void setRootEval() {
+        evalStack[0] = board.inCheck() ? kNoEval
+                                       : std::clamp(eval::evaluate(board) + correction(corrSlots(0)), -eval::kEvalLimit,
+                                                    eval::kEvalLimit);
     }
 
     void addRootMoveNodes(const Move &m, uint64_t n) {
@@ -714,11 +723,7 @@ private:
     // Searches root moves [first, end) (MultiPV skips the lines already found).
     int rootSearch(int depth, int alpha, int beta, IterationResult &out, size_t first = 0) {
         pvLength[0] = 0;
-        // Corrected like every other node's, so that "improving" at ply 2
-        // compares like with like.
-        evalStack[0] = board.inCheck() ? kNoEval
-                                       : std::clamp(eval::evaluate(board) + correction(corrSlots(0)), -eval::kEvalLimit,
-                                                    eval::kEvalLimit);
+        setRootEval();
         int bestScore = -INF_SCORE;
         int originalAlpha = alpha;
         const uint64_t startNodes = nodes;
