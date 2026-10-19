@@ -625,6 +625,20 @@ private:
         }
 
         const Move &moveAt(int k) const { return moves[k]; }
+        // Drops the quiet moves not returned yet, once the picker has reached
+        // them (the last stage): late-move and futility pruning would skip
+        // every one of them, and no capture is left whose search could change
+        // that. Earlier stages are unaffected, so the search is the same.
+        // Returns the number of moves dropped other than `excluded` (for the
+        // pruning statistics; counted only in NAGS_STATS builds).
+        int skipQuietMoves(const Move &excluded) {
+            if (stage != Stage::Quiets) return 0;
+            int dropped = 0;
+            if constexpr (kSearchStats)
+                for (int k = 0; k < nQuiet; ++k) dropped += !sameMove(moves[quiet[k]], excluded);
+            nQuiet = 0;
+            return dropped;
+        }
         // Stage of the move last returned by next(): 0 TT move, 1 winning
         // capture, 2 killer/countermove, 3 losing capture, 4 quiet.
         int lastStage() const { return lastStageIdx; }
@@ -927,11 +941,13 @@ private:
             // searched, so checkmate / stalemate detection is unaffected.
             if (!isPv && !inCheck && quiet && i > 0 && depth <= 3 && std::abs(alpha) < MATE_BOUND) {
                 if (quietsTried >= (3 + depth * depth) / (improving ? 1 : 2)) { // late-move pruning
-                    NAGS_STAT(++stats.lmp);
+                    [[maybe_unused]] const int dropped = picker.skipQuietMoves(excluded);
+                    NAGS_STAT(stats.lmp += 1 + dropped);
                     continue;
                 }
                 if (staticEval + 120 * depth <= alpha) { // futility pruning
-                    NAGS_STAT(++stats.futility);
+                    [[maybe_unused]] const int dropped = picker.skipQuietMoves(excluded);
+                    NAGS_STAT(stats.futility += 1 + dropped);
                     continue;
                 }
                 if (histScore < -4096 * depth) { // history pruning
