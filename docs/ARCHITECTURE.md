@@ -85,13 +85,13 @@ either.
   quiet moves losing more than 60·depth and captures losing more than
   20·depth² in the static exchange.
 * Move ordering: transposition-table move, then winning/equal captures by
-  MVV/LVA (with promotions), killer moves, the countermove, losing captures
-  (negative static exchange evaluation), and quiet moves by a history table
-  with a malus for quiet moves that failed to cut off (bonus
+  MVV/LVA (with promotions), killer moves, the countermove, and quiet moves
+  by a history table with a malus for quiet moves that failed to cut off (bonus
   min(150·depth − 100, 1500), with values kept within ±16384), plus
   continuation history: the same for (piece, target) pairs following the
   move one and two plies earlier. Their sum orders quiet moves and drives
-  history pruning and reductions. A staged move picker gives the moves in
+  history pruning and reductions. Losing captures (negative static exchange
+  evaluation) come last, after the quiet moves. A staged move picker gives the moves in
   this order (ties in generation order) without scoring everything up
   front: captures get their static exchange evaluation only when the
   capture stage is reached, and each pick scans one stage. Killers,
