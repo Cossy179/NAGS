@@ -131,6 +131,8 @@ public:
 
 private:
     void fail(std::chrono::steady_clock::time_point now);
+    // Connecting to a host that does not answer must not cost more than a request may.
+    int connectTimeoutMs() const;
     Evaluator &fallback;
     bool enabled = true;
     std::string host = "127.0.0.1";
