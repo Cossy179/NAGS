@@ -584,6 +584,10 @@ void NAGSController::runMctsBatched(long long budget, const std::atomic<bool> &s
                 }
             }
             if (batch.empty()) break;
+            if (!running()) { // stopped while filling it: no reply worth waiting for
+                drop(batch);
+                break;
+            }
             if (!network.sendBatch(requests(batch))) {
                 drop(batch);
                 networkFailed = true;
