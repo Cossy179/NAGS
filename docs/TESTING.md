@@ -85,6 +85,23 @@ covers move generation order and the opening playouts).
   measure and then by SPRT, not by game results credited to every move of
   a game.
 
+### Decisions: where more search pays (`tools/decision_data.py`)
+
+The per-decision measurement behind time management. `collect` searches
+sample positions at node budgets N, 2N, 4N, ... and stores, for each
+budget, the move, the value it loses against a deep reference search, and
+what the search knew when it stopped (best-move changes and stability,
+score and its swings, depth, legal moves, check, material). `fit` learns
+P(twice the budget changes the move | those features) with a regularised
+logistic model and reports held-out log-loss and AUC against the base
+rate. `policy` evaluates allocations offline: since every budget was
+played in every position, the result of any rule that gives some positions
+4N and others N (the same nodes as 2N everywhere) is known exactly, next
+to random allocation and the best allocation in hindsight. A rule that
+does well there is a candidate for the engine's soft limit, and then for an
+SPRT; this replaces game results credited to every move as the signal for
+learning how to spend time.
+
 ## 3. Strength: SPRT matches with `tools/sprt.py`
 
 Build the baseline (for example the `main` branch) into a separate directory,
