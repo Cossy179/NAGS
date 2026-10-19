@@ -338,3 +338,47 @@ def test_rest_loss_is_finite_with_and_without_unscored_moves():
     out = distillation.distill_losses(logits, torch.zeros(2, 3), None, batch)
     out["policy_nll"].sum().backward()
     assert torch.isfinite(out["policy_nll"]).all() and torch.isfinite(logits.grad).all()
+
+
+def test_fast_graphs_give_identical_items():
+    """distill_params.fast_graphs changes how the graphs are built, not one value of what is trained on."""
+    import random
+
+    from torch_geometric.data import Batch
+    from torch_geometric.loader import DataLoader  # the pipeline's loader
+
+    rng = random.Random(3)
+    rows = []
+    for start in (chess.STARTING_FEN, "1n2k1n1/PPP3PP/8/8/8/8/ppp3pp/1N2K1N1 w - - 0 1",
+                  "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1"):
+        for _ in range(12):
+            board = chess.Board(start)
+            for _ in range(rng.randint(0, 40)):
+                moves = list(board.legal_moves)
+                if not moves:
+                    break
+                board.push(rng.choice(moves))
+            legal = [m.uci() for m in board.legal_moves]
+            if len(legal) < 2:
+                continue
+            rows.append({"fen": board.fen(), "legal": legal, "result": 0.0,
+                         "scored": [{"move": legal[0], "cp": 40}, {"move": legal[1], "mate": -3}]})
+    params = dict(training_pipeline.DISTILL_DEFAULTS)
+    assert params["fast_graphs"] is False and params["num_workers"] == 0  # today's behaviour by default
+    ref = distillation.DistillDataset(rows, params)
+    fast = distillation.DistillDataset(rows, {**params, "fast_graphs": True})
+    for i in range(len(rows)):
+        a, b = ref[i], fast[i]
+        assert sorted(a.keys()) == sorted(b.keys())
+        for k in a.keys():
+            va, vb = a[k], b[k]
+            if torch.is_tensor(va):
+                assert va.dtype == vb.dtype and torch.equal(va, vb), k
+            else:
+                assert va == vb, k
+    # And through a DataLoader with worker processes, batches as before.
+    loader = DataLoader(fast, batch_size=8, num_workers=2)
+    batches = list(loader)
+    assert sum(b.num_graphs for b in batches) == len(rows)
+    first = Batch.from_data_list([ref[i] for i in range(8)])
+    assert torch.equal(batches[0].x, first.x) and torch.equal(batches[0].edge_index, first.edge_index)

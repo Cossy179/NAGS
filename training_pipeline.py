@@ -134,6 +134,9 @@ DISTILL_DEFAULTS: Dict[str, Any] = {
     "aux_score_weight": 0.25,
     "model": {"hidden_dim": 128, "layers": 6, "num_bases": 4, "ffn_mult": 2, "dropout": 0.0,
               "value_dropout": 0.2, "aux_score": True},
+    # data loading (neither changes what is trained on)
+    "fast_graphs": False,         # build the graphs with relational_fast (identical; items 1.6x faster)
+    "num_workers": 0,             # DataLoader worker processes building the graphs (0: in the training loop)
 }
 
 
@@ -1025,8 +1028,9 @@ class TrainingPipeline:
         opt = torch.optim.AdamW(model.parameters(), lr=float(params["learning_rate"]),
                                 weight_decay=float(params["weight_decay"]))
         bs = int(params["batch_size"])
-        train_loader = DataLoader(DistillDataset(train, params), batch_size=bs, shuffle=True)
-        val_loader = DataLoader(DistillDataset(val, params), batch_size=bs) if val else None
+        workers = int(params.get("num_workers", 0))
+        train_loader = DataLoader(DistillDataset(train, params), batch_size=bs, shuffle=True, num_workers=workers)
+        val_loader = DataLoader(DistillDataset(val, params), batch_size=bs, num_workers=workers) if val else None
         value_w, aux_w = float(params["value_weight"]), float(params["aux_score_weight"])
 
         best_val = float("inf")
