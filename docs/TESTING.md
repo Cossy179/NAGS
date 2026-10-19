@@ -301,6 +301,36 @@ A more reliable absolute rating needs longer time controls, or engines with
 published CCRL ratings as opponents. Use the same ladder and time control
 when comparing future versions.
 
+### Ladder: unrestricted opponents at fixed strength (`tools/ladder.py`)
+
+The `UCI_Elo` scale above ends at 3190, where NAGS already scores 35%.
+`tools/ladder.py` rates against Stockfish at full strength instead, held
+fixed by a node limit per move (`tools/ladder/sf16_nodes.json`: 8k to 512k
+nodes, one thread): a node-limited engine plays the same moves on any
+machine, so the ladder's scale stays put across hardware and over time.
+`anchor` plays each rung against the next once and stores the rungs'
+ratings on the ladder's own scale (errors accumulate along the ladder and
+are stored with them); `rate` plays an engine against the rungs near its
+strength, combines the results by inverse variance (including the rungs'
+own uncertainty) and appends the rating, bench signature, machine and
+limits to a results file. Rating NAGS at a time control on two machines
+measures what the hardware is worth; rating it with `--nodes` takes the
+hardware out entirely. `tools/sprt.py` takes per-engine limits for this
+(`--tc1` / `--tc2`, `--nodes1` / `--nodes2`, `--depth1/2`, `--movetime1/2`),
+which also gives time-odds matches. Leela Chess Zero needs its GPU backend
+to play at strength, so it belongs in a ladder run on the GPU machine
+(any UCI engine can be a rung).
+
+### Suites (`tools/suite.py`)
+
+`make` picks positions whose best move, by a deep reference search
+(Stockfish 16 by default, MultiPV 2), beats every other by at least 150 cp,
+and files them as tactical (capture, promotion, check or mate), endgame (at
+most six pieces besides the kings) or positional; `run` reports how many
+an engine solves per category at fixed nodes, and with `--baseline` which
+positions a change lost or gained. A solve rate is a regression check, not
+a strength measurement: matches decide.
+
 ### Speed log
 
 Nodes/second from `bench` (single thread, same VM, idle). These changes do

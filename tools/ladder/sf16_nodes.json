@@ -1,0 +1,91 @@
+{
+  "name": "sf16-nodes",
+  "description": "Stockfish 16 at full strength, a fixed number of nodes per move (1 thread, 64 MB hash): the same play on any machine. Ratings are on the ladder's own scale, rung 0 = 0; 'ladder.py anchor' measures each rung against the next.",
+  "base_rating": 0.0,
+  "rungs": [
+    {
+      "name": "sf16-8k",
+      "engine": "/usr/games/stockfish",
+      "options": {
+        "Threads": 1,
+        "Hash": 64
+      },
+      "limits": {
+        "nodes": 8000
+      },
+      "rating": null
+    },
+    {
+      "name": "sf16-16k",
+      "engine": "/usr/games/stockfish",
+      "options": {
+        "Threads": 1,
+        "Hash": 64
+      },
+      "limits": {
+        "nodes": 16000
+      },
+      "rating": null
+    },
+    {
+      "name": "sf16-32k",
+      "engine": "/usr/games/stockfish",
+      "options": {
+        "Threads": 1,
+        "Hash": 64
+      },
+      "limits": {
+        "nodes": 32000
+      },
+      "rating": null
+    },
+    {
+      "name": "sf16-64k",
+      "engine": "/usr/games/stockfish",
+      "options": {
+        "Threads": 1,
+        "Hash": 64
+      },
+      "limits": {
+        "nodes": 64000
+      },
+      "rating": null
+    },
+    {
+      "name": "sf16-128k",
+      "engine": "/usr/games/stockfish",
+      "options": {
+        "Threads": 1,
+        "Hash": 64
+      },
+      "limits": {
+        "nodes": 128000
+      },
+      "rating": null
+    },
+    {
+      "name": "sf16-256k",
+      "engine": "/usr/games/stockfish",
+      "options": {
+        "Threads": 1,
+        "Hash": 64
+      },
+      "limits": {
+        "nodes": 256000
+      },
+      "rating": null
+    },
+    {
+      "name": "sf16-512k",
+      "engine": "/usr/games/stockfish",
+      "options": {
+        "Threads": 1,
+        "Hash": 64
+      },
+      "limits": {
+        "nodes": 512000
+      },
+      "rating": null
+    }
+  ]
+}
