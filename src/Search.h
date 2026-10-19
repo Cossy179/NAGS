@@ -494,7 +494,8 @@ private:
     }
 
     // Order: TT move, winning/equal captures and promotions (MVV/LVA), killers
-    // and the countermove, quiet moves by history, losing captures (negative SEE).
+    // and the countermove, quiet moves by history, losing captures and promotions
+    // (negative SEE).
     int moveScore(const Move &m, const Move &ttMove, int ply, const Move &counter = Move{},
                   const ContTable *cont1 = nullptr, const ContTable *cont2 = nullptr) const {
         if (!ttMove.isNull() && sameMove(m, ttMove)) return 1 << 30;
@@ -569,10 +570,11 @@ private:
 
     // Staged move ordering for one node: TT move, winning/equal captures
     // (MVV/LVA), killers and countermove, quiet moves by history (ties in
-    // generation order), losing captures. Moves are generated only when their
-    // stage is reached: a TT move cutoff needs no move generation at all, and
-    // quiet moves are generated and scored (with the history as it is then)
-    // only after the captures and killers.
+    // generation order), losing captures and promotions (negative SEE).
+    // Moves are generated only when their stage is reached: a TT move cutoff
+    // needs no move generation at all, and quiet moves are generated and
+    // scored (with the history as it is then) only after the captures and
+    // killers.
     class MovePicker {
     public:
         MovePicker(const SearchWorker &w, const Move &ttMove, int ply, const Move &counter, const ContTable *cont1,
