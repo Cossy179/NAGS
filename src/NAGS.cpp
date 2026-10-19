@@ -333,7 +333,11 @@ EvalResult RpcEvaluator::evaluate(FastBoard &board, const std::vector<Move> &leg
     auto now = std::chrono::steady_clock::now();
     if (!enabled || now < retryAfter) return fallback.evaluate(board, legal);
     const uint64_t key = EvalCache::keyOf(board);
-    {
+    // For a network that reads histories, a position that repeats an earlier one is another input
+    // than the same position met first (the cache key cannot tell them apart). Only the root can be
+    // one: in the tree a repetition is a draw, never sent.
+    const bool cacheable = !(serverHistory && board.isRepetition());
+    if (cacheable) {
         EvalResult cached;
         if (evalCache.probe(key, legal, cached)) {
             usedNetwork = true;
@@ -392,7 +396,7 @@ EvalResult RpcEvaluator::evaluate(FastBoard &board, const std::vector<Move> &leg
         r.priors.push_back(sum > 0 ? static_cast<float>(std::max(0.0, p) / sum) : 1.0f / legal.size());
     usedNetwork = true;
     msPerPosition = msPerPosition > 0.0 ? 0.7 * msPerPosition + 0.3 * waited : waited;
-    evalCache.store(key, legal, r);
+    if (cacheable) evalCache.store(key, legal, r);
     return r;
 }
 

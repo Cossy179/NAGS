@@ -45,7 +45,8 @@ struct EvalResult {
 // transposition, or the next move's search through the same lines) costs
 // no round trip. Keyed by the Zobrist hash and the half-move clock (a
 // network input); the legal-move list is checked too, since the priors
-// follow its order. Fixed size, always-replace.
+// follow its order. A repeated position is not cached for a network that
+// reads histories (RpcEvaluator::evaluate). Fixed size, always-replace.
 class EvalCache {
 public:
     void resize(size_t megabytes);
