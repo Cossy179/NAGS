@@ -891,6 +891,30 @@ private:
             }
         }
 
+        // ProbCut: a capture that beats beta by a margin in a much shallower
+        // search very probably beats beta at full depth too. Only captures
+        // whose static exchange could make up the margin are tried, each
+        // screened by a quiescence search first; not when the TT already
+        // says this node falls short of the raised bound.
+        const int probBeta = beta + 200 - 50 * improving;
+        if (!isPv && !inCheck && !excluding && depth >= 5 && std::abs(beta) < TB_BOUND &&
+            !(ttHit && hit.depth >= depth - 3 && scoreFromTT(hit.score, ply) < probBeta)) {
+            for (const Move &m : board.generateLegalMoves(true)) { // captures and promotions
+                if (eval::see(board, m) < probBeta - staticEval) continue;
+                setPlyMove(ply, m);
+                doubleExtensions[ply + 1] = doubleExtensions[ply];
+                board.makeMove(m);
+                int score = -quiescence(-probBeta, -probBeta + 1, ply + 1);
+                if (score >= probBeta) score = -negamax(depth - 4, -probBeta, -probBeta + 1, ply + 1, false);
+                board.unmakeMove();
+                if (aborted) return 0;
+                if (score >= probBeta) {
+                    if (tt) tt->store(key, depth - 3, Bound::Lower, scoreToTT(score, ply), m);
+                    return score;
+                }
+            }
+        }
+
         // Pseudo-legal moves; legality is checked only for moves actually
         // tried (most nodes cut off after a few moves).
         const Move prevMove = board.lastMove();
