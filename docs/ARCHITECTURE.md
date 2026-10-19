@@ -73,7 +73,7 @@ either.
   decided by a capture and lies on the right side of the evaluation.
 * Pruning and reductions (outside PV nodes and check where it matters):
   reverse futility pruning (depth ≤ 6), null-move pruning (R = 3 + depth/6),
-  late-move pruning and futility pruning of quiet moves (depth ≤ 3),
+  late-move pruning (depth ≤ 8) and futility pruning (depth ≤ 3) of quiet moves,
   logarithmic late-move reductions, mate distance pruning, and internal
   iterative reduction (one ply less at depth ≥ 4 without a TT move).
   "Improving" (the static evaluation is higher than two plies earlier)
