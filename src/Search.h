@@ -625,6 +625,13 @@ private:
         }
 
         const Move &moveAt(int k) const { return moves[k]; }
+        // Drops the quiet moves not returned yet, once the picker has reached
+        // them (the last stage): late-move and futility pruning would skip
+        // every one of them, and no capture is left whose search could change
+        // that. Earlier stages are unaffected, so the search is the same.
+        void skipQuietMoves() {
+            if (stage == Stage::Quiets) nQuiet = 0;
+        }
         // Stage of the move last returned by next(): 0 TT move, 1 winning
         // capture, 2 killer/countermove, 3 losing capture, 4 quiet.
         int lastStage() const { return lastStageIdx; }
@@ -928,10 +935,12 @@ private:
             if (!isPv && !inCheck && quiet && i > 0 && depth <= 3 && std::abs(alpha) < MATE_BOUND) {
                 if (quietsTried >= (3 + depth * depth) / (improving ? 1 : 2)) { // late-move pruning
                     NAGS_STAT(++stats.lmp);
+                    picker.skipQuietMoves();
                     continue;
                 }
                 if (staticEval + 120 * depth <= alpha) { // futility pruning
                     NAGS_STAT(++stats.futility);
+                    picker.skipQuietMoves();
                     continue;
                 }
                 if (histScore < -4096 * depth) { // history pruning
