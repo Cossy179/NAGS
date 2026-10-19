@@ -147,7 +147,7 @@ written in the current search.
 
 ### Time management (`Uci.cpp`)
 
-For `wtime/btime` the target is `time / movestogo (default 30) + 3/4 inc`,
+For `wtime/btime` the target is `time / movestogo (default 20) + 3/4 inc`,
 after subtracting `Move Overhead`. No new iteration starts after 55% of the
 target, scaled in the search (`Searcher::search`) by the best move's
 stability (×2.0 right after it changed, down to ×0.85 after four stable
