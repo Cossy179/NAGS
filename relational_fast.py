@@ -21,6 +21,9 @@ masks.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import struct
 from typing import List, NamedTuple, Sequence
 
 import chess
@@ -320,6 +323,55 @@ def build_arrays(position: Position) -> GraphArrays:
     legal_idx = np.array([move_to_index_v3(mv) for mv in legal], dtype=np.int64)
     return GraphArrays(x, np.ascontiguousarray(e[:, 0]), np.ascontiguousarray(e[:, 1]),
                        np.ascontiguousarray(e[:, 2]), kind, legal_idx)
+
+
+# The graph the engine builds (src/RelGraph.cpp): decode_graph's graphs are this version's.
+ENGINE_GRAPH_VERSION = "relational-v1"
+
+
+def decode_graph(encoded: str) -> GraphArrays:
+    """A graph the engine built (RelGraph.cpp's encodeGraph) as GraphArrays.
+
+    The layout, little endian, base64: uint8 nodes, uint16 edges, uint16
+    nonzero features, uint8 legal moves; the nonzero features' indices
+    (uint16, node * 32 + column), then their values (float32); the edges
+    sorted by destination (uint8 source, uint8 destination, uint8
+    relation); the legal moves' v3 policy indices (uint16, in the engine's
+    move order, which only the policy mask uses). ValueError for anything
+    malformed.
+    """
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError, TypeError) as exc:
+        raise ValueError(f"graph is not base64: {exc}") from None
+    if len(raw) < 6:
+        raise ValueError("graph too short")
+    nodes, edges, nonzero, num_legal = struct.unpack_from("<BHHB", raw, 0)
+    if not 66 <= nodes <= 64 + 32 + 1:
+        raise ValueError(f"graph has {nodes} nodes")
+    if len(raw) != 6 + 6 * nonzero + 3 * edges + 2 * num_legal:
+        raise ValueError("graph length does not match its header")
+    offset = 6
+    idx = np.frombuffer(raw, dtype="<u2", count=nonzero, offset=offset).astype(np.int64)
+    offset += 2 * nonzero
+    val = np.frombuffer(raw, dtype="<f4", count=nonzero, offset=offset)
+    offset += 4 * nonzero
+    e = np.frombuffer(raw, dtype=np.uint8, count=3 * edges, offset=offset).reshape(-1, 3).astype(np.int64)
+    offset += 3 * edges
+    legal = np.frombuffer(raw, dtype="<u2", count=num_legal, offset=offset).astype(np.int64)
+    if nonzero and int(idx.max()) >= nodes * FEATURE_DIM_V3:
+        raise ValueError("graph feature index out of range")
+    if edges and (int(e[:, :2].max()) >= nodes or int(e[:, 2].max()) >= NUM_RELATIONS):
+        raise ValueError("graph edge out of range")
+    if num_legal and int(legal.max()) >= POLICY_V3_DIM:
+        raise ValueError("graph policy index out of range")
+    x = np.zeros(nodes * FEATURE_DIM_V3, dtype=np.float32)
+    x[idx] = val
+    kind = np.full(nodes, KIND_PIECE, dtype=np.int64)
+    kind[:64] = KIND_SQUARE
+    kind[nodes - 1] = KIND_GLOBAL
+    return GraphArrays(x.reshape(nodes, FEATURE_DIM_V3), np.ascontiguousarray(e[:, 0]),
+                       np.ascontiguousarray(e[:, 1]), np.ascontiguousarray(e[:, 2]), kind, legal)
 
 
 def inv_relation_degree(dst: np.ndarray, edge_type: np.ndarray, num_nodes: int) -> np.ndarray:

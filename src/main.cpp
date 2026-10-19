@@ -34,6 +34,7 @@ public:
         lines.push_back("option name NNBatch type spin default " + std::to_string(s.nnBatch) + " min 1 max 256");
         lines.push_back(std::string("option name NNPipeline type check default ") + (s.nnPipeline ? "true" : "false"));
         lines.push_back("option name NNCache type spin default " + std::to_string(s.nnCacheMb) + " min 0 max 4096");
+        lines.push_back(std::string("option name NNGraphs type check default ") + (s.nnGraphs ? "true" : "false"));
         lines.push_back(std::string("option name MctsReuse type check default ") + (s.mctsReuse ? "true" : "false"));
         lines.push_back("option name MctsCpuctBase type spin default " + std::to_string(s.cpuctBase) + " min 0 max 1000000");
         lines.push_back("option name MctsFpu type spin default " + std::to_string(std::lround(s.fpuReduction * 100)) +
@@ -88,6 +89,9 @@ public:
         } else if (opt == "NNCache") {
             if (!uci::parseInt(value, v)) return badValue();
             s.nnCacheMb = static_cast<int>(std::clamp<long long>(v, 0, 4096));
+        } else if (opt == "NNGraphs") {
+            if (!uci::parseBool(value, b)) return badValue();
+            s.nnGraphs = b;
         } else if (opt == "MctsReuse") {
             if (!uci::parseBool(value, b)) return badValue();
             s.mctsReuse = b;

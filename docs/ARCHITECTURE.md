@@ -560,9 +560,35 @@ against the legacy outputs (`max_dp`, `max_dv`); then `rpc_server.py
 --device cuda` (optionally `--backend onnx --providers tensorrt,cuda,cpu
 --fp16`) with `NNBatch` 32-64 and `NNPipeline` on. With a fast network
 the server's graph construction (about 0.4 ms a position in Python, one
-core) becomes the limit, near 2,500 positions a second; building the graph
-in the engine (C++) and sending it instead of the FEN would remove it, but
-needs an exact C++ copy of relational-v1, tested against the Python builder.
+core) becomes the limit, near 2,500 positions a second, unless the engine
+sends the graphs (`NNGraphs`, below).
+
+### Graphs built by the engine (`NNGraphs`)
+
+`src/RelGraph.cpp` builds the relational-v1 graph in C++: the same float32
+features, the same edges in the same order (the reference's insertion
+order, then the same stable sort by destination) and the legal moves' v3
+policy indices. It is bit-identical to `relational_graph.build_graph` for
+the position's FEN (`test_relgraph.py`: about 3,000 random positions and
+the special positions of `test_relational_fast.py`, through
+`relgraph_dump`), and takes about 30 µs a position with the encoding.
+
+With `NNGraphs` on (default off), each request carries the positions'
+graphs (`"graphs"`, base64; layout in `RelGraph.h`), and the server decodes
+them (`relational_fast.decode_graph`, 0.06 ms) instead of building them
+(0.39 ms). The replies are byte-identical either way. Only a server that
+would build the same graph uses them (a v3 network on the gnn_infer
+backends, not trained with histories) and says so in that reply (`"graphs":
+true`). Any other server, older ones included, ignores the field, and the
+engine stops sending graphs on that connection after the first reply. A
+request grows from about 0.3 KB to 5.8 KB a position, which is fine on one
+machine, less so over a slow network.
+
+Per position at batch 64, one core (CPU, full-size v3 network): building
+0.39 ms vs decoding 0.06 ms plus 0.01 ms more JSON, against 4.2 ms for the
+network. So on the CPU it saves about 8%. On a GPU, where the network takes
+a fraction of that, graph building was the limit, and this removes most of
+it. That case has not been measured here.
 
 ### Hybrid search options
 

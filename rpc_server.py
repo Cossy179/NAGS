@@ -20,6 +20,12 @@ since an earlier position that lead to this one (the engine sends those since th
 pawn move). Only a v3 network trained with histories uses them (its replies then carry
 "history": true); every other network ignores the field, exactly as before.
 
+Optional "graphs": one entry per FEN, null or the position's relational-v1 graph as the engine
+built it (src/RelGraph.cpp; relational_fast.decode_graph), bit-identical to the one the server
+would build, so the server need not. A server that uses them says so in that request's reply
+("graphs": true): one serving a v3 network through gnn_infer's backends, unless the network is
+trained with histories (its graphs depend on them). Every other server ignores the field.
+
 --model takes either checkpoint format (gnn_v3.load_any_checkpoint); each is
 served with its own graph builder and move encoding.
 
@@ -179,8 +185,9 @@ class EvaluationService:
                              f"not {self.adapter.format}")
         self.backend = backend
         if backend is not None:
-            from relational_fast import build_arrays
+            from relational_fast import build_arrays, decode_graph
             self._build_arrays = build_arrays
+            self._decode_graph = decode_graph
         # MC dropout flips the value head between train/eval mode, so
         # concurrent requests must not interleave.
         self.lock = threading.Lock()
@@ -191,6 +198,11 @@ class EvaluationService:
             self.history_aware = self.adapter.format == "nags-gnn-v3" and is_history_aware(self.model)
         except Exception:  # gnn_v3 unavailable: only v2 networks are served
             self.history_aware = False
+        # The engine's graphs replace building them here only where the server would build the same graph.
+        self.takes_graphs = False
+        if backend is not None and not self.history_aware:
+            from relational_fast import ENGINE_GRAPH_VERSION
+            self.takes_graphs = getattr(self.model, "config", {}).get("graph") == ENGINE_GRAPH_VERSION
         self.cache_size = max(0, int(cache_size))
         self.cache: "collections.OrderedDict[Any, Dict[str, Any]]" = collections.OrderedDict()
         self.cache_lock = threading.Lock()
@@ -214,7 +226,11 @@ class EvaluationService:
         history = payload.get("history")
         if history is not None and (not isinstance(history, list) or len(history) != len(fens)):
             raise ValueError("'history' must be a list with one entry (or null) per FEN")
-        return fens, moves, history
+        graphs = payload.get("graphs")
+        if graphs is not None and (not isinstance(graphs, list) or len(graphs) != len(fens) or
+                                   not all(g is None or isinstance(g, str) for g in graphs)):
+            raise ValueError("'graphs' must be a list with one graph (or null) per FEN")
+        return fens, moves, history, graphs
 
     def handle(self, payload: Any) -> Dict[str, Any]:
         return self.handle_async(payload)()
@@ -224,9 +240,10 @@ class EvaluationService:
 
         Raises ValueError for a bad request (before anything is evaluated).
         """
-        fens, moves, history = self._parse(payload)
+        fens, moves, history, graphs = self._parse(payload)
+        use_graphs = graphs is not None and self.takes_graphs
         if not fens:
-            reply = self._reply([])
+            reply = self._reply([], graphs=use_graphs)
             return lambda: reply
         # A network trained with histories gets each position as a board with its moves.
         positions: List[Any] = list(fens)
@@ -257,13 +274,15 @@ class EvaluationService:
             with self.lock:
                 evaluated = self.adapter.evaluate(batch, mc_samples=self.mc_samples)
         else:
-            graphs = [self._build_arrays(f) for f in wanted]  # ValueError for malformed FENs, as above
+            # ValueError for malformed FENs or graphs, as above.
+            arrays = [self._decode_graph(graphs[i]) if use_graphs and graphs[i] is not None
+                      else self._build_arrays(positions[i]) for i in todo]
             if self.batcher is not None:
-                evaluated = self.batcher.submit(graphs)
+                evaluated = self.batcher.submit(arrays)
             else:
                 from relational_fast import collate
                 with self.lock:
-                    evaluated = self.backend.run(collate(graphs), mc_samples=self.mc_samples)
+                    evaluated = self.backend.run(collate(arrays), mc_samples=self.mc_samples)
 
         def finish() -> Dict[str, Any]:
             results = list(cached)
@@ -283,15 +302,17 @@ class EvaluationService:
                         self.cache.move_to_end(keys[i])
                     while len(self.cache) > self.cache_size:
                         self.cache.popitem(last=False)
-            return self._reply(results)
+            return self._reply(results, graphs=use_graphs)
 
         return finish
 
-    def _reply(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _reply(self, results: List[Dict[str, Any]], graphs: bool = False) -> Dict[str, Any]:
         # model_format is new (additive); the other fields are as they always were.
         reply = {"results": results, "policy_dim": self.adapter.policy_dim, "model_format": self.adapter.format}
         if self.history_aware:
             reply["history"] = True  # send histories (only such networks say so)
+        if graphs:
+            reply["graphs"] = True  # the request's graphs were used: keep sending them
         return reply
 
 

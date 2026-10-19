@@ -22,6 +22,7 @@
 #include "FastBoard.h"
 #include "MetaClient.h"
 #include "Net.h"
+#include "RelGraph.h"
 #include "Search.h"
 #include "TT.h"
 
@@ -76,6 +77,8 @@ struct EvalRequest {
     // `historyMoves` (empty: none sent).
     std::string historyFen;
     std::vector<Move> historyMoves;
+    // For a server that takes them: the position's relational-v1 graph (encodeGraph; empty: none sent).
+    std::string graph;
 };
 
 // Fills r's history from the board (the moves since the last capture or pawn
@@ -116,6 +119,10 @@ public:
     int batchLimit(int wanted) const;
     // The served network uses game histories (its replies say "history": true).
     bool wantsHistory() const { return serverHistory; }
+    // Send the positions' graphs (RelGraph.h) while the server uses them: requests on a new
+    // connection carry them until a reply says whether it does ("graphs": true).
+    void setSendGraphs(bool on) { sendGraphs = on; }
+    bool wantsGraphs() const { return sendGraphs && serverGraphs >= 0; }
 
     EvalCache &cache() { return evalCache; }
     void resetCache() { evalCache.clear(); }
@@ -141,11 +148,17 @@ private:
     bool usedNetwork = false;
     Timing stats;
     EvalCache evalCache;
-    // Requests sent and not yet answered, with their send times.
-    std::vector<std::chrono::steady_clock::time_point> outstanding;
+    // Requests sent and not yet answered: their send times and whether they carried graphs.
+    struct Outstanding {
+        std::chrono::steady_clock::time_point sent;
+        bool graphs = false;
+    };
+    std::vector<Outstanding> outstanding;
     std::chrono::steady_clock::time_point lastReply{};
     double msPerPosition = 0.0; // running estimate (0: unknown)
     bool serverHistory = false;
+    bool sendGraphs = false;
+    int serverGraphs = 0; // this connection's server: 1 uses graphs, -1 does not, 0 unknown
 };
 
 struct MCTSNode {
@@ -189,6 +202,9 @@ struct NagsSettings {
     int nnBatch = 1;
     bool nnPipeline = false;
     int nnCacheMb = 32;
+    // Send each position's relational-v1 graph (RelGraph.h), built here instead of by the
+    // server; the server's replies are the same either way (rpc_server.py "graphs").
+    bool nnGraphs = false;
 
     // Hybrid search (all off / at their old values by default; see
     // docs/ARCHITECTURE.md "Hybrid search options").
@@ -241,6 +257,7 @@ private:
     double mctsMs = 0.0; // time the MCTS thread ran
     std::unique_ptr<MCTSNode> mctsRoot;
     FastBoard mctsBoard;
+    RelGraph graphScratch; // a leaf's graph, for a server that takes them
     int mctsSims = 0;
     size_t mctsNodes = 0;
     float cpuct = 1.4f;

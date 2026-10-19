@@ -126,6 +126,7 @@ The NNUE network is embedded when available. The Python services are **not** req
 | `Move Overhead` | Reserve time for GUI/system latency |
 | `UseNN` / `NNHost` / `NNPort` | Optional neural MCTS service (hybrid `nags`; off by default) |
 | `NNBatch` / `NNPipeline` / `NNCache` | Leaves per network request (virtual loss), two requests in flight, evaluation cache in MB (hybrid `nags`) |
+| `NNGraphs` | Send each position's GNN graph, built by the engine, so the server need not build it (same replies; hybrid `nags`) |
 | `MctsReuse`, `MctsSmartStop`, `MctsTTValue`, `NNRootOrder`, … | Experimental hybrid search options, off by default ([list](docs/ARCHITECTURE.md#hybrid-search-options)) |
 | `UseMetaLearner` | Optional search-parameter adaptation (hybrid `nags`; off by default) |
 

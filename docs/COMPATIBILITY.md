@@ -121,6 +121,17 @@ serving it without them. `distill_params.use_history` (default false)
 trains such a network on rows with a `history`; `label` passes a row's
 history to the engine. With the flag off nothing of this is used.
 
+Engine-built graphs: a request may carry `graphs` (per position, null or
+the relational-v1 graph from `src/RelGraph.cpp`, bit-identical to
+`build_graph` for the FEN). A server uses them only where it would build
+the same graph itself (gnn_infer backend, model `graph` equal to
+`relational_fast.ENGINE_GRAPH_VERSION`, no `history`), and only replies to
+requests with graphs carry `"graphs": true`. Every other reply is as
+before, and older servers ignore the field. The engine sends them only with
+`NNGraphs` (default off), and only while the server says it uses them. A
+new graph version needs a new `ENGINE_GRAPH_VERSION` and a C++ builder for
+it. Until then, servers for such a network build their own graphs.
+
 The engine's `NNBatch` (default 1), `NNPipeline` (default off) and
 `NNCache` (32 MB) only affect the hybrid's MCTS arm, which is off by
 default; with `NNBatch` 1 its search is the one-request-per-simulation MCTS

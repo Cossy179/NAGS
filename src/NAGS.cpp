@@ -194,6 +194,25 @@ void appendHistory(std::string &request, const std::vector<const EvalRequest *> 
     request += ']';
 }
 
+// ,"graphs":["<base64>" or null, ...] for the positions of a request (nothing when none has one).
+bool appendGraphs(std::string &request, const std::vector<const EvalRequest *> &batch) {
+    if (std::none_of(batch.begin(), batch.end(), [](const EvalRequest *r) { return !r->graph.empty(); }))
+        return false;
+    request += ",\"graphs\":[";
+    for (size_t i = 0; i < batch.size(); ++i) {
+        if (i) request += ',';
+        request += batch[i]->graph.empty() ? "null" : '"' + batch[i]->graph + '"';
+    }
+    request += ']';
+    return true;
+}
+
+// A reply to a request with graphs says whether the server used them.
+bool repliesUseGraphs(const std::string &response) {
+    return response.find("\"graphs\": true") != std::string::npos ||
+           response.find("\"graphs\":true") != std::string::npos;
+}
+
 // A reply from a network that wants game histories says so.
 bool repliesWantHistory(const std::string &response) {
     return response.find("\"history\": true") != std::string::npos ||
@@ -229,6 +248,7 @@ void RpcEvaluator::configure(bool on, const std::string &h, int p) {
         evalCache.clear(); // another server may serve another network
         msPerPosition = 0.0;
         serverHistory = false;
+        serverGraphs = 0;
     }
     enabled = on;
     host = h;
@@ -247,6 +267,7 @@ bool RpcEvaluator::available() {
     if (!enabled || now < retryAfter) return false;
     if (!socket.isOpen()) {
         outstanding.clear();
+        serverGraphs = 0; // perhaps another server: ask again
         if (!socket.connect(host, port, kNnConnectTimeoutMs)) {
             retryAfter = now + std::chrono::seconds(kNnBackoffSeconds);
             return false;
@@ -282,13 +303,14 @@ bool RpcEvaluator::sendBatch(const std::vector<const EvalRequest *> &batch) {
     }
     request += ']';
     if (serverHistory) appendHistory(request, batch);
+    const bool graphs = appendGraphs(request, batch);
     request += '}';
     const auto now = std::chrono::steady_clock::now();
     if (!socket.sendLine(request, requestTimeoutMs)) {
         fail(now);
         return false;
     }
-    outstanding.push_back(now);
+    outstanding.push_back({now, graphs});
     ++stats.requests;
     stats.positions += static_cast<long long>(batch.size());
     return true;
@@ -300,7 +322,8 @@ bool RpcEvaluator::receiveBatch(const std::vector<const EvalRequest *> &batch, s
     std::string response;
     const bool answered = socket.recvLine(response, requestTimeoutMs);
     const auto now = std::chrono::steady_clock::now();
-    const auto sent = outstanding.front();
+    const auto sent = outstanding.front().sent;
+    const bool sentGraphs = outstanding.front().graphs;
     outstanding.erase(outstanding.begin());
     const double roundTrip = std::chrono::duration<double, std::milli>(now - sent).count();
     stats.waitMs += roundTrip;
@@ -314,6 +337,7 @@ bool RpcEvaluator::receiveBatch(const std::vector<const EvalRequest *> &batch, s
         return false;
     }
     serverHistory = repliesWantHistory(response);
+    if (sentGraphs) serverGraphs = repliesUseGraphs(response) ? 1 : -1;
     // The server starts on a pipelined request once it has answered the one before,
     // so the time it took is counted from the later of its sending and that answer.
     const double service = std::chrono::duration<double, std::milli>(now - std::max(sent, lastReply)).count();
@@ -338,9 +362,12 @@ EvalResult RpcEvaluator::evaluate(FastBoard &board, const std::vector<Move> &leg
     }
     if (!outstanding.empty()) socket.close(); // unread batch replies would be taken for this one's
     outstanding.clear();
-    if (!socket.isOpen() && !socket.connect(host, port, kNnConnectTimeoutMs)) {
-        retryAfter = now + std::chrono::seconds(kNnBackoffSeconds);
-        return fallback.evaluate(board, legal);
+    if (!socket.isOpen()) {
+        serverGraphs = 0;
+        if (!socket.connect(host, port, kNnConnectTimeoutMs)) {
+            retryAfter = now + std::chrono::seconds(kNnBackoffSeconds);
+            return fallback.evaluate(board, legal);
+        }
     }
 
     std::string request = "{\"fens\":[\"" + jsonlite::escape(board.getFEN()) + "\"],\"moves\":[[";
@@ -349,11 +376,17 @@ EvalResult RpcEvaluator::evaluate(FastBoard &board, const std::vector<Move> &leg
         request += '"' + moveToUciString(legal[i]) + '"';
     }
     request += "]]";
+    EvalRequest req;
     if (serverHistory) {
-        EvalRequest r;
-        fillHistory(board, r);
-        appendHistory(request, {&r});
+        fillHistory(board, req);
+        appendHistory(request, {&req});
     }
+    if (wantsGraphs()) {
+        RelGraph graph;
+        buildRelationalGraph(board, graph);
+        req.graph = encodeGraph(graph);
+    }
+    const bool sentGraphs = appendGraphs(request, {&req});
     request += '}';
 
     std::string response;
@@ -377,6 +410,7 @@ EvalResult RpcEvaluator::evaluate(FastBoard &board, const std::vector<Move> &leg
     }
     jsonlite::findNumber(response, "uncertainty", uncertainty);
     serverHistory = repliesWantHistory(response);
+    if (sentGraphs) serverGraphs = repliesUseGraphs(response) ? 1 : -1;
 
     EvalResult r;
     r.value = static_cast<float>(std::clamp(value, -1.0, 1.0));
@@ -686,6 +720,10 @@ NAGSController::Selected NAGSController::selectLeaf(std::vector<PendingLeaf> &ba
             leaf.request.fen = mctsBoard.getFEN();
             leaf.request.legal = std::move(legal);
             if (network.wantsHistory()) fillHistory(mctsBoard, leaf.request);
+            if (network.wantsGraphs()) {
+                buildRelationalGraph(mctsBoard, graphScratch);
+                leaf.request.graph = encodeGraph(graphScratch);
+            }
             batch.push_back(std::move(leaf));
             result = Selected::Queued;
         }
@@ -811,6 +849,7 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
 
     // ---- Meta-learner: per-move deltas ----------------------------------------
     network.configure(config.useNN, config.nnHost, config.nnPort);
+    network.setSendGraphs(config.nnGraphs);
     network.resetTiming();
     if (config.useNN && config.nnCacheMb != cacheMbApplied) { // allocated once the network is in use
         network.cache().resize(static_cast<size_t>(config.nnCacheMb));
