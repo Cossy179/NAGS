@@ -396,6 +396,15 @@ head first and tested against the head binary (`exp/<name>-head` branches):
 correction history, +21.1 against `10d3d5a`, added only +4.9 ± 6.9 on the
 head, so results against an older base overstate what a change adds now.
 
+From 2026-10-19 05:20 UTC every SPRT has a game cap, set before the
+outcome is known: 8000 games for [0, 10] tests (undecided at the cap = not
+adopted) and 6000 for [−5, 0] port checks of a merged head (undecided at
+the cap: the hypothesis the LLR favours decides, as in a truncated SPRT).
+A change whose true effect lies between the bounds otherwise takes more
+than 15,000 games, about a day on the 4-core VM. The en-passant port check
+was capped while running, at −4.9 ± 7.6 after 3176 games (LLR −0.80, that
+is, leaning towards reverting).
+
 | Experiment (branch) | Hypothesis | Bench / speed | Test | Decision | Training impact |
 |---|---|---|---|---|---|
 | Lazy move generation (`exp/lazy-picker`) | Fresher history for quiet moves orders them better; no generation at TT cutoffs saves time | 1947402 → 1595609 at depth 10, 1.044× nodes/s | SPRT [0, 10]: H1, +19.5 ± 13.8 (1246 games) | accepted (`10d3d5a`) | changes future datagen games (better search), not their format |
