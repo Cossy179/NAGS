@@ -6,7 +6,8 @@ calibrate.py rates against Stockfish's strength-limited levels, whose scale ends
 limit per move: Stockfish at N nodes plays the same moves on any machine, so the ladder's scale
 does not move when the hardware or the time control changes. A ladder file (JSON) lists the
 rungs; `anchor` measures each rung against the next once and stores their ratings on the
-ladder's own scale (rung 0 = its given rating, by default 0); `rate` plays an engine against
+ladder's own scale (rung 0 = its given rating, by default 0; a match already in the file with
+at least --games games is not played again, so an interrupted anchor continues); `rate` plays an engine against
 the rungs near its strength and combines the results into a rating on that scale.
 
   python tools/ladder.py anchor --ladder tools/ladder/sf16_nodes.json --games 200 --concurrency 3
@@ -71,13 +72,23 @@ def play(specs, games: int, concurrency: int, openings, seed: int, pgnout: Optio
 
 
 def anchor(args: argparse.Namespace) -> int:
-    ladder = json.loads(Path(args.ladder).read_text())
+    path = Path(args.ladder)
+    ladder = json.loads(path.read_text())
     rungs = ladder["rungs"]
     openings = sprt.load_openings(args.openings)
-    rungs[0].setdefault("rating", ladder.get("base_rating", 0.0))
+    if rungs[0].get("rating") is None:  # the ladder files list every rung with "rating": null
+        rungs[0]["rating"] = ladder.get("base_rating", 0.0)
     rungs[0]["rating_error"] = 0.0
     for i in range(len(rungs) - 1):
         a, b = rungs[i], rungs[i + 1]
+        done = b.get("anchored_against") or {}
+        if done.get("rung") == a["name"] and done.get("games", 0) >= args.games:
+            # Measured by an earlier run (the file is saved after every match): its result
+            # stands, on top of the rung below as it is now.
+            b["rating"] = round(a["rating"] + done["elo"], 1)
+            b["rating_error"] = round(math.hypot(a["rating_error"], done["error"]), 1)
+            print(f"== {a['name']} vs {b['name']}: anchored already ({done['games']} games)", flush=True)
+            continue
         print(f"== {a['name']} vs {b['name']}: {args.games} games", flush=True)
         m = play((rung_spec(a), rung_spec(b)), args.games, args.concurrency, openings, seed=i,
                  pgnout=f"{args.pgnout}_{a['name']}_{b['name']}.pgn" if args.pgnout else None)
@@ -88,8 +99,9 @@ def anchor(args: argparse.Namespace) -> int:
                                  "elo": round(-diff, 1), "error": round(err, 1)}
         print(f"   {b['name']}: {b['rating']:+.0f} ± {b['rating_error']:.0f} ({-diff:+.0f} ± {err:.0f} over "
               f"{a['name']})", flush=True)
+        path.write_text(json.dumps(ladder, indent=2) + "\n")  # an interrupted run keeps what it measured
     ladder["anchored"] = dt.date.today().isoformat()
-    Path(args.ladder).write_text(json.dumps(ladder, indent=2) + "\n")
+    path.write_text(json.dumps(ladder, indent=2) + "\n")
     return 0
 
 

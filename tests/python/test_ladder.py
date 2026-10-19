@@ -45,6 +45,23 @@ def test_anchor_and_rate(tmp_path, capsys):
     assert ladder.main(["rate", "--ladder", str(path), "--engine", _engine("nags_fast"), "--nodes", "200"]) == 3
 
 
+@pytest.mark.skipif(_engine("nags_basic") is None, reason="engines not built")
+def test_anchor_from_a_shipped_file_and_resume(tmp_path, capsys):
+    # As in tools/ladder/*.json: every rung starts with "rating": null.
+    path = tmp_path / "ladder.json"
+    rungs = [{"name": f"basic-{n}", "engine": _engine("nags_basic"), "options": {}, "limits": {"nodes": n},
+              "rating": None} for n in (100, 200, 400)]
+    path.write_text(json.dumps({"name": "test", "base_rating": 0.0, "rungs": rungs}))
+    assert ladder.main(["anchor", "--ladder", str(path), "--games", "2"]) == 0
+    first = json.loads(path.read_text())["rungs"]
+    assert first[0]["rating"] == 0.0 and all(r["rating"] is not None for r in first)
+    # A second run plays nothing that is already measured, and gives the same ratings.
+    capsys.readouterr()
+    assert ladder.main(["anchor", "--ladder", str(path), "--games", "2"]) == 0
+    assert capsys.readouterr().out.count("anchored already") == 2
+    assert [r["rating"] for r in json.loads(path.read_text())["rungs"]] == [r["rating"] for r in first]
+
+
 def test_combine():
     rating, err = ladder.combine([(100.0, 20.0), (130.0, 20.0)])
     assert abs(rating - 115.0) < 1e-9 and abs(err - 20.0 / 2 ** 0.5) < 1e-9
