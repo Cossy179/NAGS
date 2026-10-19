@@ -315,10 +315,13 @@ not alter the search, so the bench node counts stay identical:
 | `c82b96e` (4-core VM) | `makeMove` no longer zeroes a 1 KB accumulator entry (value-initialisation) | – | – | 1.057× | – |
 | `6200d9f` (4-core VM) | staged move picker, same order: SEE only once captures are reached, per-stage selection | – | – | 1.05–1.07× | – |
 | `80f8bd0` (4-core VM) | captures generated directly in quiescence search | – | – | 1.033× | – |
+| `fe8f77e` (4-core VM) | late-move and futility pruning drop the picker's remaining quiet moves instead of taking and skipping each (`nags_datagen --threads 1` output and the `NAGS_STATS` bench output also identical) | – | – | 1.20× | – |
 
 At `a8e5c0c`, `nags_enhanced` benches at about 4.8M nodes/second. The
 `06da148` figures are medians of six alternating runs taken while an SPRT
-occupied the other cores, so they are less precise than the rows above.
+occupied the other cores, so they are less precise than the rows above; the
+`fe8f77e` figure is the median ratio of eight such paired runs (1.10× to
+1.46×).
 
 **From 2026-10-07 development moved from the cloud VM to a local Windows
 PC** (AMD Ryzen 5 3500X, 6 cores / 6 threads, NVIDIA RTX 3060 12 GB, MSVC
