@@ -94,8 +94,9 @@ either.
   history pruning and reductions. A staged move picker gives the moves in
   this order (ties in generation order) without scoring everything up
   front: captures get their static exchange evaluation only when the
-  capture stage is reached, and each pick scans one stage. Killers,
-  countermove and quiet scores are taken when the node starts.
+  capture stage is reached, and each pick scans one stage. Killers and
+  the countermove are taken when the node starts; quiet moves are scored
+  when their stage is reached.
 * Quiescence search over captures and promotions with delta pruning and
   without losing captures (SEE < 0). When in check, all evasions are
   searched and there is no stand-pat. Results go to the transposition table
