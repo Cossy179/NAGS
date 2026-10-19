@@ -465,11 +465,21 @@ private:
         if (it != rootMoves.end()) std::rotate(rootMoves.begin() + pos, it, it + 1);
     }
 
+    // The evaluation the search works with: drawn towards a draw as the
+    // fifty-move counter grows (half of it 50 moves without a capture or
+    // pawn move), so that shuffling in a won position looks less attractive
+    // than making progress, and a position about to be drawn is not scored
+    // as a win.
+    int staticEvaluation() {
+        const int e = eval::evaluate(board);
+        return e - e * board.getHalfmoveClock() / 200;
+    }
+
     // The root's static evaluation, corrected like every other node's, so
     // that "improving" at ply 2 compares like with like.
     void setRootEval() {
         evalStack[0] = board.inCheck() ? kNoEval
-                                       : std::clamp(eval::evaluate(board) + correction(corrSlots(0)), -eval::kEvalLimit,
+                                       : std::clamp(staticEvaluation() + correction(corrSlots(0)), -eval::kEvalLimit,
                                                     eval::kEvalLimit);
     }
 
@@ -856,7 +866,7 @@ private:
         // Static evaluation for the pruning decisions below (a singular
         // extension search reuses its node's).
         const CorrSlots corr = corrSlots(ply);
-        const int rawEval = inCheck || excluding ? kNoEval : eval::evaluate(board);
+        const int rawEval = inCheck || excluding ? kNoEval : staticEvaluation();
         const int staticEval = inCheck ? kNoEval : excluding ? evalStack[ply]
                                                  : std::clamp(rawEval + correction(corr), -eval::kEvalLimit, eval::kEvalLimit);
         NAGS_STAT(if (!inCheck && !excluding) ++stats.evals);
@@ -1119,7 +1129,7 @@ private:
         if (!inCheck) {
             {
                 const CorrSlots corr = corrSlots(0); // without the previous-move slot (not tracked in quiescence)
-                stand = std::clamp(eval::evaluate(board) + correction(corr), -eval::kEvalLimit, eval::kEvalLimit);
+                stand = std::clamp(staticEvaluation() + correction(corr), -eval::kEvalLimit, eval::kEvalLimit);
             }
             NAGS_STAT(++stats.evals);
             // A TT score whose bound points the right way is a better estimate
