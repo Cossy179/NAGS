@@ -905,6 +905,8 @@ private:
         // Singular extension candidate: a deep enough TT entry whose move
         // failed high (or was exact).
         const int ttScore = ttHit ? scoreFromTT(hit.score, ply) : 0;
+        // A capture as the TT move: the quiet moves after it are reduced one ply more.
+        const bool ttCapture = !ttMove.isNull() && board.pieceAt(ttMove.to) != Piece::None;
         const bool trySingular = !excluding && depth >= 6 && ttHit && !ttMove.isNull() && hit.depth >= depth - 3 &&
                                  hit.bound != Bound::Upper && std::abs(ttScore) < TB_BOUND && ply < MAX_PLY / 2;
 
@@ -987,7 +989,8 @@ private:
                 int reduction = 0;
                 if (depth >= 3 && i >= 2 && quiet && !inCheck && !givesCheck &&
                     !sameMove(m, killers[ply][0]) && !sameMove(m, killers[ply][1])) {
-                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1) - histScore / 8192;
+                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1) + ttCapture -
+                                histScore / 8192;
                     reduction = std::clamp(reduction, 0, depth - 2);
                 }
                 NAGS_STAT(if (reduction) ++stats.lmrSearches);
