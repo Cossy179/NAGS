@@ -939,20 +939,24 @@ private:
             }
             // Shallow quiet-move pruning. Only once a legal move has been
             // searched, so checkmate / stalemate detection is unaffected.
-            if (!isPv && !inCheck && quiet && i > 0 && depth <= 3 && std::abs(alpha) < MATE_BOUND) {
+            // Late-move pruning up to depth 8, futility and history pruning
+            // up to depth 3.
+            if (!isPv && !inCheck && quiet && i > 0 && depth <= 8 && std::abs(alpha) < MATE_BOUND) {
                 if (quietsTried >= (3 + depth * depth) / (improving ? 1 : 2)) { // late-move pruning
                     [[maybe_unused]] const int dropped = picker.skipQuietMoves(excluded);
                     NAGS_STAT(stats.lmp += 1 + dropped);
                     continue;
                 }
-                if (staticEval + 120 * depth <= alpha) { // futility pruning
-                    [[maybe_unused]] const int dropped = picker.skipQuietMoves(excluded);
-                    NAGS_STAT(stats.futility += 1 + dropped);
-                    continue;
-                }
-                if (histScore < -4096 * depth) { // history pruning
-                    NAGS_STAT(++stats.historyPrunes);
-                    continue;
+                if (depth <= 3) {
+                    if (staticEval + 120 * depth <= alpha) { // futility pruning
+                        [[maybe_unused]] const int dropped = picker.skipQuietMoves(excluded);
+                        NAGS_STAT(stats.futility += 1 + dropped);
+                        continue;
+                    }
+                    if (histScore < -4096 * depth) { // history pruning
+                        NAGS_STAT(++stats.historyPrunes);
+                        continue;
+                    }
                 }
             }
             // SEE pruning: at low depth, skip moves that lose material by
