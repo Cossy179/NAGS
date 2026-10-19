@@ -798,9 +798,10 @@ private:
 
     // `excluded`: a move to leave out (singular extension verification). Such
     // a search neither uses nor stores TT and tablebase results for the node.
-    // cutNode: a null-window node expected to fail high (the child of an
-    // expected all-node, or a reduced or zero-window search below a PV node).
-    // A PV node is never a cut node.
+    // cutNode: a null-window node expected to fail high: every reduced child,
+    // every zero-window child of a PV node, and the unreduced children and
+    // LMR re-searches of an expected all-node. The null move's child and PV
+    // nodes are never cut nodes.
     int negamax(int depth, int alpha, int beta, int ply, bool isPv, bool cutNode, const Move &excluded = Move{}) {
         pvLength[ply] = ply;
         if (checkStop()) return 0;
@@ -1006,8 +1007,9 @@ private:
                 int reduction = 0;
                 if (depth >= 3 && i >= 2 && quiet && !inCheck && !givesCheck &&
                     !sameMove(m, killers[ply][0]) && !sameMove(m, killers[ply][1])) {
-                    // Two plies more at an expected cut node that has not cut
-                    // off with its first moves: it is usually an all-node.
+                    // Two plies more (within the depth - 2 cap) at an expected
+                    // cut node that has not cut off with its first moves: it
+                    // is usually an all-node.
                     reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1) - histScore / 8192 +
                                 (cutNode ? 2 : 0);
                     reduction = std::clamp(reduction, 0, depth - 2);
