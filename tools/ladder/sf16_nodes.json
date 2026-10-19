@@ -13,7 +13,8 @@
       "limits": {
         "nodes": 8000
       },
-      "rating": null
+      "rating": 0.0,
+      "rating_error": 0.0
     },
     {
       "name": "sf16-16k",
@@ -25,7 +26,19 @@
       "limits": {
         "nodes": 16000
       },
-      "rating": null
+      "rating": 175.0,
+      "rating_error": 36.2,
+      "anchored_against": {
+        "rung": "sf16-8k",
+        "games": 200,
+        "wdl": [
+          11,
+          85,
+          104
+        ],
+        "elo": 175.0,
+        "error": 36.2
+      }
     },
     {
       "name": "sf16-32k",
@@ -37,7 +50,19 @@
       "limits": {
         "nodes": 32000
       },
-      "rating": null
+      "rating": 324.3,
+      "rating_error": 49.0,
+      "anchored_against": {
+        "rung": "sf16-16k",
+        "games": 200,
+        "wdl": [
+          16,
+          87,
+          97
+        ],
+        "elo": 149.3,
+        "error": 33.1
+      }
     },
     {
       "name": "sf16-64k",
@@ -87,5 +112,6 @@
       },
       "rating": null
     }
-  ]
+  ],
+  "anchored": "2026-10-19"
 }

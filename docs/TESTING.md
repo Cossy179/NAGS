@@ -321,6 +321,25 @@ which also gives time-odds matches. Leela Chess Zero needs its GPU backend
 to play at strength, so it belongs in a ladder run on the GPU machine
 (any UCI engine can be a rung).
 
+First measurements (2026-10-19, 4-core Xeon VM; the three lowest rungs
+anchored, 200 games a match; deterministic at fixed nodes, so a repeated
+match gives the same games):
+
+| Rung | Rating | Measured against |
+|---|---:|---|
+| sf16-8k | 0 (base) | – |
+| sf16-16k | +175 ± 36 | +175 ± 36 over sf16-8k (8k scored +11 =85 −104) |
+| sf16-32k | +324 ± 49 | +149 ± 33 over sf16-16k |
+
+| Engine (bench) | Limits | Games per rung | Result per rung (W D L for the engine) | Rating |
+|---|---|---:|---|---:|
+| `nags_enhanced` on the head (1399785), Hash 64 | 256,000 nodes a move | 100 | 8k: 29 34 37 (−28 ± 62); 16k: 10 35 55 (+7 ± 67); 32k: 6 21 73 (+43 ± 92) | −1 ± 41 |
+
+So NAGS needs about 32 times Stockfish 16's nodes for the same strength
+(256k nodes is about 0.14 s of NAGS search on this machine, roughly a move
+at 10+0.1). The higher rungs (64k-512k) are not anchored yet; `anchor`
+skips the three above, so they only cost the matches still missing.
+
 ### Suites (`tools/suite.py`)
 
 `make` picks positions whose best move, by a deep reference search
