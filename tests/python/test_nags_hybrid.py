@@ -174,6 +174,33 @@ def test_network_lost_mid_search(batch):
     assert int(f["mcts_sims"]) > 0
 
 
+class _NanGnn(_FakeGnn):
+    """A diverged network: values are NaN (Python's json writes them as such)."""
+
+    def handle(self):
+        for line in self.rfile:
+            req = json.loads(line)
+            results = [{"value": float("nan"), "uncertainty": 0.05, "move_priors": [1.0 / len(m)] * len(m)}
+                       for m in req["moves"]]
+            self.wfile.write((json.dumps({"results": results}) + "\n").encode())
+            self.wfile.flush()
+
+
+@pytest.mark.skipif(_engine() is None, reason="nags not built")
+@pytest.mark.parametrize("batch", ["1", "8"])
+def test_nan_values_are_a_failed_reply(batch):
+    server = _serve(_NanGnn)
+    try:
+        out, _ = _run_cmds(server.server_address[1], f"setoption name NNBatch value {batch}\nposition startpos\n"
+                                                    "go movetime 1200\n")
+    finally:
+        server.shutdown()
+        server.server_close()
+    line, f = _summary(out)
+    assert "bestmove" in out and "bestmove (none)" not in out
+    assert int(f["rpc_failures"]) == 1, line  # then the heuristic, as when the server is lost
+
+
 @pytest.mark.skipif(_engine() is None, reason="nags not built")
 def test_evaluation_cache(fake_gnn):
     go = "position startpos moves e2e4\ngo movetime 1200\n"

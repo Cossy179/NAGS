@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -247,7 +248,9 @@ bool parseNumberAt(const std::string &json, size_t &p, double &out) {
     const char *begin = json.c_str() + p;
     char *end = nullptr;
     double v = std::strtod(begin, &end);
-    if (end == begin) return false;
+    // JSON has no NaN or infinities, but Python's json writes them (a diverged
+    // network's value): taken as a malformed reply, not as a number.
+    if (end == begin || !std::isfinite(v)) return false;
     out = v;
     p += static_cast<size_t>(end - begin);
     return true;
