@@ -877,12 +877,23 @@ private:
         evalStack[ply] = staticEval;
         const bool improving = !inCheck && (ply < 2 || evalStack[ply - 2] == kNoEval || staticEval > evalStack[ply - 2]);
 
+        // Reverse futility and null-move pruning use the TT score instead when
+        // it bounds the position beyond the static evaluation in its own
+        // direction: a searched bound is the better estimate.
+        int pruneEval = staticEval;
+        if (ttHit && !inCheck && board.getHalfmoveClock() < 90) {
+            const int s = scoreFromTT(hit.score, ply);
+            if (std::abs(s) < TB_BOUND && (hit.bound == Bound::Exact || (hit.bound == Bound::Lower && s > staticEval) ||
+                                           (hit.bound == Bound::Upper && s < staticEval)))
+                pruneEval = s;
+        }
+
         // Reverse futility pruning: at shallow depth, a static evaluation that
         // beats beta by a depth-scaled margin is assumed to hold.
         if (!isPv && !inCheck && !excluding && depth <= 6 && std::abs(beta) < MATE_BOUND &&
-            staticEval - 80 * (depth - improving) >= beta) {
+            pruneEval - 80 * (depth - improving) >= beta) {
             NAGS_STAT(++stats.rfp);
-            return staticEval;
+            return pruneEval;
         }
 
         // Null-move pruning: if the side to move could pass and a reduced
@@ -890,7 +901,7 @@ private:
         // check, at PV nodes, right after another null move, near mate scores,
         // or with only king and pawns (zugzwang is common there).
         if (!isPv && !inCheck && !excluding && depth >= 3 && !board.lastMoveWasNull() && std::abs(beta) < MATE_BOUND &&
-            hasNonPawnMaterial(board.sideToMove()) && staticEval >= beta) {
+            hasNonPawnMaterial(board.sideToMove()) && pruneEval >= beta) {
             int reduction = 3 + depth / 6;
             NAGS_STAT(++stats.nmpTries);
             plyMoves[ply] = PlyMove{};
