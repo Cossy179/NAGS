@@ -30,6 +30,7 @@ DESIGNS = [  # (output buckets, king buckets, activation, l1, l2)
     (1, "none", "crelu", 16, 32),
     (8, "4", "screlu", 8, 16),
     (4, "mirror", "pairwise", 16, 8),
+    (2, "none", "crelu", 32, 16),  # a first layer of 32 (the engine's 4-register kernel)
 ]
 
 
@@ -173,3 +174,33 @@ def test_train_py_cannot_read_version_4(tmp_path):
     out = _train(tmp_path, 16, 1, "none", "crelu", 4, 4)
     with pytest.raises(AssertionError):
         train.read_net(str(out))
+
+
+def _random_fens(n, seed):
+    rng = np.random.default_rng(seed)
+    out = []
+    while len(out) < n:
+        board = chess.Board()
+        for _ in range(int(rng.integers(0, 90))):
+            moves = list(board.legal_moves)
+            if not moves:
+                break
+            board.push(moves[int(rng.integers(len(moves)))])
+        if not board.is_game_over():
+            out.append(board.fen())
+    return out
+
+
+@pytest.mark.skipif(_engine() is None, reason="nags_enhanced not built")
+@pytest.mark.parametrize("buckets,king,activation,l1,l2", DESIGNS)
+def test_engine_matches_reference_on_many_positions(tmp_path, buckets, king, activation, l1, l2):
+    """The engine's integer kernels (sparse first layer, activations) give the reference's evaluation exactly."""
+    out = _train(tmp_path, 256, buckets, king, activation, l1, l2, lr="0.01")
+    net = train_v4.read_net(str(out))
+    fens = _random_fens(200, seed=l1 * 100 + l2 + buckets)
+    cmds = f"setoption name EvalFile value {out}\n" + "".join(f"position fen {f}\neval\n" for f in fens)
+    text, evals = _engine_evals(cmds)
+    if "expects hidden size" in text:
+        pytest.skip("engine built with another NAGS_NNUE_HIDDEN")
+    assert evals == [train_v4.quantized_eval(net, f) for f in fens]
+    assert len(set(evals)) > 8  # tiny networks trained on five positions: a narrow range, but not a constant
