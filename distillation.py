@@ -198,7 +198,11 @@ class DistillDataset(Dataset):
 
     def __getitem__(self, idx: int):
         row = self.rows[idx]
-        board = chess.Board(row["fen"])
+        if self.params.get("use_history") and row.get("history"):
+            from gnn_v3 import history_board
+            board = history_board(row["fen"], row["history"])  # repetitions counted from the game
+        else:
+            board = chess.Board(row["fen"])
         t = row_targets(row, self.params)
         if self.params.get("fast_graphs"):
             data = fast_graph(board)  # the same graph and mask, built faster

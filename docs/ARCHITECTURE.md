@@ -583,6 +583,25 @@ reports each one (`mcts_reused`, `tt_values`, `smart_stop`, `root_order`).
 | `MctsTTValue` | 0 (off) | A leaf whose position has an exact score in the shared transposition table from a search at least this deep takes that score as its value instead of the network's: P(win) − P(loss) under the logistic WDL model of the distillation targets (a = 400, b = 250), mates ±1. The alpha-beta arm has already searched most positions near the root, so MCTS stops re-guessing them. |
 | `NNRootOrder` | off | The alpha-beta search tries the root moves in the order of the network's prior (one evaluation per move, usually from the cache; also when MCTS does not run). Root moves late in the order are reduced (LMR), so this is neural guidance of the alpha-beta search itself. |
 
+### Game histories
+
+The engine sends FENs, so relational-v1's `repetitions` feature has always
+been 0 for the network, in training (label rows are FENs) and in play. The
+protocol can now carry each position's history (the moves since the last
+capture or pawn move and the position before them; `rpc_server.py` turns
+them into a board with its move stack), but only for a network trained
+with them (checkpoint flag `history`, `distill_params.use_history`), and the
+engine sends them only when the server's replies ask for them.
+
+This alone gives the MCTS arm little: a position that repeats an earlier one
+is a terminal draw in the tree and is never sent to the network, so at the
+leaves the feature is still 0; only a root that repeats the game differs.
+What the policy would gain from is knowing which legal moves repeat a
+position (draw now, or avoid it), a relation per legal move, which is a
+new graph version (`relational-v2`) with training rows that carry their
+histories (`nags_datagen` writes FENs without moves). The plumbing above
+is what such a network needs to be served and trained; none is trained.
+
 **TensorRT.** Through ONNX Runtime's TensorRT execution provider
 (`--providers tensorrt,cuda,cpu`). The exported graph (opset 18) is Gemm,
 MatMul, Gather / GatherND, LayerNormalization, Softmax, elementwise

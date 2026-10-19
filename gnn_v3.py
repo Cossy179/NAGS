@@ -93,7 +93,8 @@ class RelationalGNNEvaluator(nn.Module):
     def __init__(self, in_dim: int = FEATURE_DIM_V3, hidden_dim: int = 128, layers: int = 6, num_bases: int = 4,
                  ffn_mult: int = 2, dropout: float = 0.0, value_dropout: float = 0.2, aux_score: bool = True,
                  num_relations: int = NUM_RELATIONS, policy_encoding: str = POLICY_ENCODING_V3,
-                 graph: str = GRAPH_VERSION, policy_dim: int = POLICY_V3_DIM, device: torch.device | None = None):
+                 graph: str = GRAPH_VERSION, policy_dim: int = POLICY_V3_DIM, history: bool = False,
+                 device: torch.device | None = None):
         super().__init__()
         if policy_encoding != POLICY_ENCODING_V3 or policy_dim != POLICY_V3_DIM:
             raise ValueError(f"unsupported policy encoding {policy_encoding!r} ({policy_dim} entries); "
@@ -105,6 +106,12 @@ class RelationalGNNEvaluator(nn.Module):
                            ffn_mult=ffn_mult, dropout=dropout, value_dropout=value_dropout, aux_score=aux_score,
                            num_relations=num_relations, policy_encoding=policy_encoding, graph=graph,
                            policy_dim=policy_dim)
+        # Trained on positions with their game history (the 'repetitions' feature is then
+        # meaningful, see history_board). Stored only when set, so checkpoints of networks
+        # trained without it are exactly as before and older code still loads them, while it
+        # refuses (unknown config key) a network that needs the history it would not give.
+        if history:
+            self.config["history"] = True
         self.device = device if device is not None else (
             torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
         H = hidden_dim
@@ -217,6 +224,33 @@ class RelationalGNNEvaluator(nn.Module):
             return F.softmax(self.wdl_head(pooled), dim=-1).cpu()
         finally:
             self.train(was_training)
+
+
+def history_board(fen: str, history: Dict[str, Any]) -> chess.Board:
+    """The position `fen` with its game history: the board after playing history['moves'] (UCI)
+    from history['fen'], so that relational graphs count its repetitions.
+
+    ValueError if a move is illegal or the moves do not lead to `fen` (placement, side to move,
+    castling rights, en passant and half-move clock must agree).
+    """
+    if not isinstance(history, dict) or not isinstance(history.get("fen"), str) or \
+            not isinstance(history.get("moves", []), list):
+        raise ValueError("history must be {'fen': <fen>, 'moves': [<uci>, ...]}")
+    board = chess.Board(history["fen"])
+    for uci in history.get("moves", []):
+        move = chess.Move.from_uci(str(uci))
+        if move not in board.legal_moves:
+            raise ValueError(f"history move {uci} is illegal in {board.fen()}")
+        board.push(move)
+    target = chess.Board(fen)
+    if board.fen().split()[:5] != target.fen().split()[:5]:
+        raise ValueError(f"history leads to {board.fen()}, not to {fen}")
+    return board
+
+
+def is_history_aware(model: Any) -> bool:
+    """True for a v3 network trained on positions with their history."""
+    return bool(getattr(model, "config", {}).get("history"))
 
 
 def legal_move_priors_v3(policy_row: torch.Tensor, moves: Sequence[str]) -> List[float]:

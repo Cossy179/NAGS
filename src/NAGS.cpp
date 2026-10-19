@@ -66,6 +66,16 @@ EvalResult HeuristicEvaluator::evaluate(FastBoard &board, const std::vector<Move
     return r;
 }
 
+void fillHistory(FastBoard &board, EvalRequest &r) {
+    // Back over the moves to the position before them, then forward again.
+    r.historyMoves = board.recentMoves();
+    r.historyFen.clear();
+    if (r.historyMoves.empty()) return;
+    for (size_t i = 0; i < r.historyMoves.size(); ++i) board.unmakeMove();
+    r.historyFen = board.getFEN();
+    for (const Move &m : r.historyMoves) board.makeMove(m);
+}
+
 // --------------------------------------------------------------------------
 // Evaluation cache
 
@@ -164,6 +174,32 @@ bool splitObjects(const std::string &json, const std::string &key, std::vector<s
     return false;
 }
 
+// ,"history":[{"fen":..., "moves":[...]} or null, ...] for the positions of a request.
+void appendHistory(std::string &request, const std::vector<const EvalRequest *> &batch) {
+    request += ",\"history\":[";
+    for (size_t i = 0; i < batch.size(); ++i) {
+        if (i) request += ',';
+        const EvalRequest &r = *batch[i];
+        if (r.historyFen.empty()) {
+            request += "null";
+            continue;
+        }
+        request += "{\"fen\":\"" + jsonlite::escape(r.historyFen) + "\",\"moves\":[";
+        for (size_t j = 0; j < r.historyMoves.size(); ++j) {
+            if (j) request += ',';
+            request += '"' + moveToUciString(r.historyMoves[j]) + '"';
+        }
+        request += "]}";
+    }
+    request += ']';
+}
+
+// A reply from a network that wants game histories says so.
+bool repliesWantHistory(const std::string &response) {
+    return response.find("\"history\": true") != std::string::npos ||
+           response.find("\"history\":true") != std::string::npos;
+}
+
 // One result object of a reply as an EvalResult (priors normalised, value clamped).
 bool parseResult(const std::string &obj, size_t moves, EvalResult &r) {
     std::vector<double> priors;
@@ -192,6 +228,7 @@ void RpcEvaluator::configure(bool on, const std::string &h, int p) {
         retryAfter = {};
         evalCache.clear(); // another server may serve another network
         msPerPosition = 0.0;
+        serverHistory = false;
     }
     enabled = on;
     host = h;
@@ -243,7 +280,9 @@ bool RpcEvaluator::sendBatch(const std::vector<const EvalRequest *> &batch) {
         }
         request += ']';
     }
-    request += "]}";
+    request += ']';
+    if (serverHistory) appendHistory(request, batch);
+    request += '}';
     const auto now = std::chrono::steady_clock::now();
     if (!socket.sendLine(request, requestTimeoutMs)) {
         fail(now);
@@ -274,6 +313,7 @@ bool RpcEvaluator::receiveBatch(const std::vector<const EvalRequest *> &batch, s
         fail(now);
         return false;
     }
+    serverHistory = repliesWantHistory(response);
     // The server starts on a pipelined request once it has answered the one before,
     // so the time it took is counted from the later of its sending and that answer.
     const double service = std::chrono::duration<double, std::milli>(now - std::max(sent, lastReply)).count();
@@ -308,7 +348,13 @@ EvalResult RpcEvaluator::evaluate(FastBoard &board, const std::vector<Move> &leg
         if (i) request += ',';
         request += '"' + moveToUciString(legal[i]) + '"';
     }
-    request += "]]}";
+    request += "]]";
+    if (serverHistory) {
+        EvalRequest r;
+        fillHistory(board, r);
+        appendHistory(request, {&r});
+    }
+    request += '}';
 
     std::string response;
     std::vector<double> priors;
@@ -330,6 +376,7 @@ EvalResult RpcEvaluator::evaluate(FastBoard &board, const std::vector<Move> &leg
         return fallback.evaluate(board, legal);
     }
     jsonlite::findNumber(response, "uncertainty", uncertainty);
+    serverHistory = repliesWantHistory(response);
 
     EvalResult r;
     r.value = static_cast<float>(std::clamp(value, -1.0, 1.0));
@@ -638,6 +685,7 @@ NAGSController::Selected NAGSController::selectLeaf(std::vector<PendingLeaf> &ba
             leaf.path = std::move(path);
             leaf.request.fen = mctsBoard.getFEN();
             leaf.request.legal = std::move(legal);
+            if (network.wantsHistory()) fillHistory(mctsBoard, leaf.request);
             batch.push_back(std::move(leaf));
             result = Selected::Queued;
         }

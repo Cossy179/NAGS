@@ -72,7 +72,15 @@ private:
 struct EvalRequest {
     std::string fen;
     std::vector<Move> legal;
+    // For a server whose network uses game histories: the position before
+    // `historyMoves` (empty: none sent).
+    std::string historyFen;
+    std::vector<Move> historyMoves;
 };
+
+// Fills r's history from the board (the moves since the last capture or pawn
+// move, and the position before them); the board is unchanged afterwards.
+void fillHistory(FastBoard &board, EvalRequest &r);
 
 class Evaluator {
 public:
@@ -106,6 +114,8 @@ public:
     // Largest batch expected to come back well within the request timeout,
     // from the measured time per position (at most `wanted`).
     int batchLimit(int wanted) const;
+    // The served network uses game histories (its replies say "history": true).
+    bool wantsHistory() const { return serverHistory; }
 
     EvalCache &cache() { return evalCache; }
     void resetCache() { evalCache.clear(); }
@@ -135,6 +145,7 @@ private:
     std::vector<std::chrono::steady_clock::time_point> outstanding;
     std::chrono::steady_clock::time_point lastReply{};
     double msPerPosition = 0.0; // running estimate (0: unknown)
+    bool serverHistory = false;
 };
 
 struct MCTSNode {

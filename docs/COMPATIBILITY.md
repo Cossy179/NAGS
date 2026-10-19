@@ -110,6 +110,17 @@ speed, not its replies beyond float rounding. A change to the v3 model's
 layers must be mirrored in `TorchBackendV3` and the ONNX export (the tests
 fail otherwise); a change to the graph needs a new `graph` version anyway.
 
+Game histories: a request may carry `history` (per position, null or the
+moves since an earlier position). Only a v3 network whose config has
+`history: true` uses it, and only such a network's replies carry
+`"history": true` (the engine sends histories only to a server that says
+so). The key is written only when true, so a checkpoint trained without
+histories is exactly as before and loads in older code, while older code
+refuses one that needs histories (an unknown config key) instead of
+serving it without them. `distill_params.use_history` (default false)
+trains such a network on rows with a `history`; `label` passes a row's
+history to the engine. With the flag off nothing of this is used.
+
 The engine's `NNBatch` (default 1), `NNPipeline` (default off) and
 `NNCache` (32 MB) only affect the hybrid's MCTS arm, which is off by
 default; with `NNBatch` 1 its search is the one-request-per-simulation MCTS

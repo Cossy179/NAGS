@@ -136,6 +136,7 @@ DISTILL_DEFAULTS: Dict[str, Any] = {
               "value_dropout": 0.2, "aux_score": True},
     # data loading (neither changes what is trained on)
     "fast_graphs": False,         # build the graphs with relational_fast (identical; items 1.6x faster)
+    "use_history": False,         # rows with a 'history' give boards with their game history (network flag 'history')
     "num_workers": 0,             # DataLoader worker processes building the graphs (0: in the training loop)
 }
 
@@ -942,7 +943,11 @@ class TrainingPipeline:
             with open(out_path, "w") as out:
                 for path, row in candidates:
                     try:
-                        board = chess.Board(row["fen"])
+                        if row.get("history"):  # the engine then searches with the game's moves
+                            from gnn_v3 import history_board
+                            board = history_board(row["fen"], row["history"])
+                        else:
+                            board = chess.Board(row["fen"])
                     except ValueError:
                         skipped += 1
                         continue
@@ -954,7 +959,7 @@ class TrainingPipeline:
                         continue
                     rec["result"] = source_result(row, board)
                     rec["source"] = path.name
-                    for key in ("game_id", "ply"):
+                    for key in ("game_id", "ply", "history"):
                         if key in row:
                             rec[key] = row[key]
                     out.write(json.dumps(rec) + "\n")
@@ -978,7 +983,9 @@ class TrainingPipeline:
     # -- v3 step 'distill': search-policy distillation ----------------------------
     def new_v3_model(self) -> "RelationalGNNEvaluator":
         from gnn_v3 import RelationalGNNEvaluator
-        return RelationalGNNEvaluator(**self.config["distill_params"]["model"], device=self.device)
+        params = self.config["distill_params"]
+        extra = {"history": True} if params.get("use_history") else {}
+        return RelationalGNNEvaluator(**params["model"], **extra, device=self.device)
 
     def distill_training(self, dataset_path: Optional[Path] = None, model_path: Optional[Path] = None) -> Path:
         """Trains a 'nags-gnn-v3' network on 'label' rows; returns the best checkpoint.
@@ -1023,6 +1030,9 @@ class TrainingPipeline:
                 model = load_checkpoint_v3(str(model_path), device=self.device)
             except ValueError as e:
                 raise RuntimeError(f"'distill' continues only from a nags-gnn-v3 checkpoint: {e}") from e
+            if bool(model.config.get("history")) != bool(params.get("use_history")):
+                raise RuntimeError(f"{model_path} was trained {'with' if model.config.get('history') else 'without'} "
+                                   f"game histories; set distill_params.use_history to match")
         else:
             model = self.new_v3_model()
         opt = torch.optim.AdamW(model.parameters(), lr=float(params["learning_rate"]),

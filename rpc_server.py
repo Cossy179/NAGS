@@ -15,6 +15,11 @@ Response: {"results": [{"value": v, "uncertainty": u, "move_priors": [p, ...]}, 
   * model_format names the served checkpoint format.
 On a bad request the response is {"error": "..."} and the connection stays open.
 
+Optional "history": one entry per FEN, null or {"fen": <fen>, "moves": [<uci>, ...]}: the moves
+since an earlier position that lead to this one (the engine sends those since the last capture or
+pawn move). Only a v3 network trained with histories uses them (its replies then carry
+"history": true); every other network ignores the field, exactly as before.
+
 --model takes either checkpoint format (gnn_v3.load_any_checkpoint); each is
 served with its own graph builder and move encoding.
 
@@ -181,6 +186,11 @@ class EvaluationService:
         self.lock = threading.Lock()
         self.batcher = _Batcher(backend, mc_samples, batch_wait_ms, max_batch, self.lock) \
             if backend is not None and batch_wait_ms > 0 else None
+        try:
+            from gnn_v3 import is_history_aware
+            self.history_aware = self.adapter.format == "nags-gnn-v3" and is_history_aware(self.model)
+        except Exception:  # gnn_v3 unavailable: only v2 networks are served
+            self.history_aware = False
         self.cache_size = max(0, int(cache_size))
         self.cache: "collections.OrderedDict[Any, Dict[str, Any]]" = collections.OrderedDict()
         self.cache_lock = threading.Lock()
@@ -201,7 +211,10 @@ class EvaluationService:
         if moves is not None:
             if not isinstance(moves, list) or len(moves) != len(fens) or not all(isinstance(m, list) for m in moves):
                 raise ValueError("'moves' must be a list with one move list per FEN")
-        return fens, moves
+        history = payload.get("history")
+        if history is not None and (not isinstance(history, list) or len(history) != len(fens)):
+            raise ValueError("'history' must be a list with one entry (or null) per FEN")
+        return fens, moves, history
 
     def handle(self, payload: Any) -> Dict[str, Any]:
         return self.handle_async(payload)()
@@ -211,15 +224,22 @@ class EvaluationService:
 
         Raises ValueError for a bad request (before anything is evaluated).
         """
-        fens, moves = self._parse(payload)
+        fens, moves, history = self._parse(payload)
         if not fens:
             reply = self._reply([])
             return lambda: reply
+        # A network trained with histories gets each position as a board with its moves.
+        positions: List[Any] = list(fens)
+        use_history = history is not None and self.history_aware
+        if use_history:
+            from gnn_v3 import history_board
+            positions = [history_board(f, h) if h is not None else f for f, h in zip(fens, history)]
 
         keys = None
         cached: List[Optional[Dict[str, Any]]] = [None] * len(fens)
         if self.cache_size:
-            keys = [(f, tuple(str(m) for m in moves[i]) if moves is not None else None) for i, f in enumerate(fens)]
+            keys = [(f, tuple(str(m) for m in moves[i]) if moves is not None else None,
+                     json.dumps(history[i], sort_keys=True) if use_history else None) for i, f in enumerate(fens)]
             with self.cache_lock:
                 for i, k in enumerate(keys):
                     item = self.cache.get(k)
@@ -228,7 +248,7 @@ class EvaluationService:
                         cached[i] = item
                         self.cache_hits += 1
         todo = [i for i in range(len(fens)) if cached[i] is None]
-        wanted = [fens[i] for i in todo]
+        wanted = [positions[i] for i in todo]
 
         if not wanted:
             evaluated = None
@@ -269,7 +289,10 @@ class EvaluationService:
 
     def _reply(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         # model_format is new (additive); the other fields are as they always were.
-        return {"results": results, "policy_dim": self.adapter.policy_dim, "model_format": self.adapter.format}
+        reply = {"results": results, "policy_dim": self.adapter.policy_dim, "model_format": self.adapter.format}
+        if self.history_aware:
+            reply["history"] = True  # send histories (only such networks say so)
+        return reply
 
 
 def load_model(path: Optional[str], device: torch.device, hidden_dim: int = 128) -> GNNEvaluator:
