@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Test suites: positions with one clearly best move, by category (docs/TESTING.md, "Suites").
 
-  make  analyses positions with a strong reference engine (by default Stockfish 16, MultiPV 2)
+  make  analyses positions (an EPD file after random plies, a PGN file's games or a jsonl file's
+        'fen' fields) with a strong reference engine (by default Stockfish 16, MultiPV 2)
         and keeps those whose best move beats every other by at least --min-gap centipawns:
         'tactical' (the best move captures, promotes or checks, or mates), 'endgame' (at most
         --endgame-pieces pieces besides the kings) or 'positional' (the rest). Writes EPD lines
@@ -24,25 +25,37 @@ import random
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Sequence
 
 import chess
 import chess.engine
+import chess.pgn
 
 CATEGORIES = ("tactical", "positional", "endgame")
 
 
-def source_positions(path: str, count: int, plies: int, seed: int) -> List[str]:
-    """FENs: an EPD/FEN file's positions after 0..plies random moves, or the 'fen' fields of a jsonl file."""
+def source_positions(path: str, limit: int, plies: int, seed: int) -> Iterator[str]:
+    """Up to `limit` FENs, lazily: the 'fen' fields of a jsonl file, or the positions of a PGN file's
+    games, in random order; or an EPD/FEN file's positions after 0..plies random moves."""
     rng = random.Random(seed)
-    text = Path(path).read_text().splitlines()
-    if path.endswith(".jsonl"):
-        fens = [json.loads(l)["fen"] for l in text if l.strip()]
+    if path.endswith(".jsonl") or path.endswith(".pgn"):
+        if path.endswith(".pgn"):
+            fens = []
+            with open(path) as f:
+                while (game := chess.pgn.read_game(f)) is not None:
+                    board = game.board()
+                    for move in game.mainline_moves():
+                        board.push(move)
+                        if not board.is_game_over() and board.legal_moves.count() > 1:
+                            fens.append(board.fen())
+        else:
+            fens = [json.loads(l)["fen"] for l in Path(path).read_text().splitlines() if l.strip()]
         rng.shuffle(fens)
-        return fens[:count * 4]
-    starts = [" ".join(l.split(";")[0].split()[:4]) + " 0 1" for l in text if l.strip()]
-    out = []
-    while len(out) < count * 4 and starts:
+        yield from fens[:limit]
+        return
+    starts = [" ".join(l.split(";")[0].split()[:4]) + " 0 1" for l in Path(path).read_text().splitlines() if l.strip()]
+    made = 0
+    while made < limit and starts:
         board = chess.Board(rng.choice(starts))
         for _ in range(rng.randint(0, plies)):
             moves = list(board.legal_moves)
@@ -50,8 +63,8 @@ def source_positions(path: str, count: int, plies: int, seed: int) -> List[str]:
                 break
             board.push(rng.choice(moves))
         if not board.is_game_over() and board.legal_moves.count() > 1:
-            out.append(board.fen())
-    return out
+            made += 1
+            yield board.fen()
 
 
 def category(board: chess.Board, move: chess.Move, score: chess.engine.PovScore, endgame_pieces: int) -> str:
@@ -70,8 +83,14 @@ def make(args: argparse.Namespace) -> int:
     kept: Dict[str, List[str]] = {c: [] for c in CATEGORIES}
     per_cat = {c: args.count // len(CATEGORIES) for c in CATEGORIES} if args.balanced else None
     seen = set()
+    # Kept positions are appended as they are found (an interrupted run keeps them) and the file is
+    # rewritten, by category, at the end.
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    partial = out.with_name(out.name + ".partial")
+    partial.write_text("")
     try:
-        for fen in source_positions(args.source, args.count, args.plies, args.seed):
+        for fen in source_positions(args.source, args.max_candidates, args.plies, args.seed):
             if sum(map(len, kept.values())) >= args.count:
                 break
             board = chess.Board(fen)
@@ -93,14 +112,19 @@ def make(args: argparse.Namespace) -> int:
             if per_cat and len(kept[cat]) >= per_cat[cat]:
                 continue
             ce = best.score(mate_score=100000)
-            kept[cat].append(f'{key} bm {board.san(move)}; c0 "{cat}"; ce {ce}; id "{args.prefix}.{len(seen)}";')
-            print(f"{sum(map(len, kept.values()))}/{args.count} {cat}", file=sys.stderr, end="\r", flush=True)
+            line = f'{key} bm {board.san(move)}; c0 "{cat}"; ce {ce}; id "{args.prefix}.{len(seen)}";'
+            kept[cat].append(line)
+            with partial.open("a") as f:
+                f.write(line + "\n")
+            print(f"{sum(map(len, kept.values()))}/{args.count} {cat} ({len(seen)} analysed)", file=sys.stderr,
+                  flush=True)
     finally:
         engine.quit()
     lines = [l for c in CATEGORIES for l in kept[c]]
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.out).write_text("\n".join(lines) + "\n")
-    print(f"\n{len(lines)} positions ({', '.join(f'{c} {len(kept[c])}' for c in CATEGORIES)}) -> {args.out}")
+    out.write_text("\n".join(lines) + "\n")
+    partial.unlink(missing_ok=True)
+    print(f"\n{len(lines)} positions ({', '.join(f'{c} {len(kept[c])}' for c in CATEGORIES)}) from {len(seen)} "
+          f"analysed -> {args.out}")
     return 0
 
 
@@ -163,6 +187,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     m.add_argument("--source", required=True, help="EPD/FEN file (positions after random plies) or jsonl with 'fen'")
     m.add_argument("--plies", type=int, default=30, help="random plies after an EPD position (0..this)")
     m.add_argument("--count", type=int, default=300)
+    m.add_argument("--max-candidates", type=int, default=20000,
+                   help="positions to analyse at most (with a 150 cp gap, a few percent of game positions qualify)")
     m.add_argument("--balanced", action="store_true", help="the same number of positions per category")
     m.add_argument("--reference", default=shutil.which("stockfish") or "/usr/games/stockfish")
     m.add_argument("--nodes", type=int, default=2000000)

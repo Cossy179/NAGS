@@ -54,3 +54,27 @@ def test_make_and_run(tmp_path):
                        "--json", str(new), "--baseline", str(base)]) == 0
     summary = json.loads(new.read_text())
     assert set(summary["regressions"]) == {i for i, r in summary["positions"].items() if not r["solved"]}
+
+
+def test_pgn_source(tmp_path):
+    pgn = tmp_path / "games.pgn"
+    pgn.write_text('[Event "t"]\n[Result "1-0"]\n\n1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6 4. Qxf7# 1-0\n\n'
+                   '[Event "t"]\n[Result "*"]\n\n1. d4 d5 *\n')
+    fens = list(suite.source_positions(str(pgn), 100, 0, seed=1))
+    # Every position after a move, except the final mate (game over).
+    assert len(fens) == 6 + 2 and len(set(fens)) == 8
+    assert all(not chess.Board(f).is_game_over() for f in fens)
+    assert len(list(suite.source_positions(str(pgn), 3, 0, seed=1))) == 3
+
+
+@pytest.mark.skipif(_engine("nags_enhanced") is None, reason="engines not built")
+def test_make_with_too_few_qualifying_positions(tmp_path):
+    src = tmp_path / "src.epd"
+    src.write_text("4k3/8/8/3q4/8/8/8/3QK3 w - -\n" + chess.STARTING_FEN.rsplit(" ", 2)[0] + "\n")
+    out = tmp_path / "suite.epd"
+    # Only Qxd5 qualifies; the run stops after --max-candidates and writes what it found.
+    assert suite.main(["make", "--source", str(src), "--plies", "0", "--count", "5", "--max-candidates", "50",
+                       "--reference", _engine("nags_enhanced"), "--nodes", "20000", "--min-gap", "100",
+                       "--out", str(out)]) == 0
+    assert [r["bm"] for r in suite.read_suite(str(out))] == [["d1d5"]]
+    assert not (tmp_path / "suite.epd.partial").exists()
