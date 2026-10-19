@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <random>
@@ -123,6 +124,10 @@ int FastBoard::phaseValue[12];
 uint64_t FastBoard::zSide;
 uint64_t FastBoard::zCastle[16];
 uint64_t FastBoard::zEnpassant[8];
+uint64_t FastBoard::cuckooKey[FastBoard::kCuckooSize];
+int8_t FastBoard::cuckooFrom[FastBoard::kCuckooSize];
+int8_t FastBoard::cuckooTo[FastBoard::kCuckooSize];
+Bitboard FastBoard::betweenBB[64][64];
 
 // Finds a magic multiplier for every square (the stored one, or by trial and
 // error with a fixed seed if a stored one does not work) and fills the shared
@@ -206,6 +211,45 @@ void FastBoard::initTables() {
     zSide = rng();
     for (auto &z : zCastle) z = rng();
     for (auto &z : zEnpassant) z = rng();
+
+    // Squares strictly between two squares on a rank, file or diagonal.
+    for (int a = 0; a < 64; ++a)
+        for (int b = 0; b < 64; ++b) {
+            betweenBB[a][b] = 0;
+            const int df = (b & 7) - (a & 7), dr = (b >> 3) - (a >> 3);
+            if (a == b || (df != 0 && dr != 0 && std::abs(df) != std::abs(dr))) continue;
+            const int step = (dr > 0 ? 8 : dr < 0 ? -8 : 0) + (df > 0 ? 1 : df < 0 ? -1 : 0);
+            for (int sq = a + step; sq != b; sq += step) betweenBB[a][b] |= 1ULL << sq;
+        }
+    // Cuckoo table of reversible piece moves (3668 of them).
+    for (int i = 0; i < kCuckooSize; ++i) {
+        cuckooKey[i] = 0;
+        cuckooFrom[i] = cuckooTo[i] = -1;
+    }
+    auto h1 = [](uint64_t k) { return static_cast<int>(k & (kCuckooSize - 1)); };
+    auto h2 = [](uint64_t k) { return static_cast<int>((k >> 16) & (kCuckooSize - 1)); };
+    for (int p = 0; p < 12; ++p) {
+        const int t = pieceTypeOf(static_cast<Piece>(p + 1));
+        if (t == PAWN) continue;
+        for (int a = 0; a < 64; ++a)
+            for (int b = a + 1; b < 64; ++b) {
+                const Bitboard reach = t == KNIGHT ? knightAttacks[a]
+                                       : t == KING ? kingAttacks[a]
+                                       : t == BISHOP ? getBishopAttacks(a, 0)
+                                       : t == ROOK ? getRookAttacks(a, 0)
+                                                   : getRookAttacks(a, 0) | getBishopAttacks(a, 0);
+                if (!(reach >> b & 1)) continue;
+                uint64_t key = zPiece[p][a] ^ zPiece[p][b] ^ zSide;
+                int8_t from = static_cast<int8_t>(a), to = static_cast<int8_t>(b);
+                for (int i = h1(key);;) { // cuckoo insertion: displace until a slot is free
+                    std::swap(cuckooKey[i], key);
+                    std::swap(cuckooFrom[i], from);
+                    std::swap(cuckooTo[i], to);
+                    if (from < 0) break;
+                    i = i == h1(key) ? h2(key) : h1(key);
+                }
+            }
+    }
 
     for (int p = 0; p < 12; ++p) {
         Piece piece = static_cast<Piece>(p + 1);
@@ -850,6 +894,29 @@ bool FastBoard::isRepetition() const {
     // history[i].hash is the position i plies into the game; the current one is ply n.
     for (int i = n - 2; i >= stop; i -= 2)
         if (history[i].hash == hash) return true;
+    return false;
+}
+
+bool FastBoard::upcomingRepetition() const {
+    // Positions with the other side to move, i = 3, 5, ... plies back within
+    // the repetition window. `other` collects the opponent's moves since then
+    // (each a Zobrist difference); only if they cancel out can one move of
+    // ours restore that position, and then hash ^ key(i back) is that move.
+    const int n = static_cast<int>(history.size());
+    const int end = std::min({halfmoveClock, pliesFromNull, n});
+    if (end < 3) return false;
+    uint64_t other = hash ^ history[n - 1].hash ^ zSide;
+    for (int i = 3; i <= end; i += 2) {
+        other ^= history[n - i + 1].hash ^ history[n - i].hash ^ zSide;
+        if (other != 0) continue;
+        const uint64_t moveKey = hash ^ history[n - i].hash;
+        int j = static_cast<int>(moveKey & (kCuckooSize - 1));
+        if (cuckooKey[j] != moveKey) j = static_cast<int>((moveKey >> 16) & (kCuckooSize - 1));
+        if (cuckooKey[j] != moveKey) continue;
+        // The way between the two squares must be clear (the move's own
+        // squares hold the piece and, after it, nothing else: the hashes match).
+        if (!(betweenBB[cuckooFrom[j]][cuckooTo[j]] & all_occupied)) return true;
+    }
     return false;
 }
 

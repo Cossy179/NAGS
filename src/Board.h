@@ -68,6 +68,7 @@ public:
     // as is usual inside a search) or insufficient material.
     bool isDraw() const;
     bool isRepetition() const;
+    bool upcomingRepetition() const { return false; } // FastBoard only (nags_basic searches as before)
     bool isInsufficientMaterial() const;
 
     uint64_t perft(int depth);

@@ -285,8 +285,65 @@ static void testGenerationModes() {
     CHECK(checked > 1000, "generation modes checked on only %d positions", checked);
 }
 
+#ifdef TEST_FAST_BOARD
+// upcomingRepetition() must say exactly whether some legal move leads to a
+// position isRepetition() reports (what the search then scores as a draw).
+static bool someMoveRepeats(TestBoard &b) {
+    for (const Move &m : b.generateLegalMoves()) {
+        b.makeMove(m);
+        const bool rep = b.isRepetition();
+        b.unmakeMove();
+        if (rep) return true;
+    }
+    return false;
+}
+
+static void testUpcomingRepetition() {
+    TestBoard b;
+    b.setStartPos();
+    CHECK(b.applyMovesUCI({"g1f3", "g8f6", "f3g1"}), "moves rejected");
+    CHECK(b.upcomingRepetition(), "f6g8 repeats the start position");
+    b.setStartPos();
+    CHECK(b.applyMovesUCI({"g1f3", "g8f6"}) && !b.upcomingRepetition(), "nothing to repeat after two plies");
+    b.setStartPos();
+    CHECK(b.applyMovesUCI({"g1f3", "g8f6", "e2e4"}) && !b.upcomingRepetition(), "a pawn move ends the window");
+    // Random games, mostly reversible piece moves so that repetitions come up.
+    std::mt19937 rng(12345);
+    const char *starts[] = {"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                            "4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1", "r3k3/8/2n5/8/8/5B2/8/4K2R w Kq - 0 1",
+                            "1q2k3/8/8/8/8/8/8/1Q2K3 w - - 0 1", "4k3/3n4/8/2b5/8/4N3/8/2R1K3 b - - 0 1"};
+    int positives = 0, positions = 0;
+    for (int game = 0; game < 400; ++game) {
+        b.setFromFEN(starts[game % 5]);
+        for (int ply = 0; ply < 80; ++ply) {
+            const bool expected = someMoveRepeats(b);
+            CHECK(b.upcomingRepetition() == expected, "game %d ply %d: upcomingRepetition %d, a repeating move %d (%s)",
+                  game, ply, b.upcomingRepetition(), expected, b.getFEN().c_str());
+            positives += expected;
+            ++positions;
+            auto moves = b.generateLegalMoves();
+            if (moves.empty() || b.isDraw()) break;
+            std::vector<Move> quiet;
+            for (const Move &m : moves)
+                if (b.pieceAt(m.to) == Piece::None && pieceTypeOf(b.pieceAt(m.from)) != PAWN && !m.isCastling)
+                    quiet.push_back(m);
+            if (!b.inCheck() && rng() % 23 == 0) {
+                b.makeNullMove(); // repetitions are not looked for across a null move
+                continue;
+            }
+            const auto &pool = !quiet.empty() && rng() % 10 ? quiet : moves;
+            b.makeMove(pool[rng() % pool.size()]);
+        }
+    }
+    CHECK(positives > 300, "only %d of %d positions had a repeating move", positives, positions);
+}
+#endif
+
 int main() {
     testPerft();
+#ifdef TEST_FAST_BOARD
+    testUpcomingRepetition();
+#endif
     testNullMove();
     testHashConsistency();
     testFenValidation();
