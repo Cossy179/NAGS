@@ -578,10 +578,10 @@ reports each one (`mcts_reused`, `tt_values`, `smart_stop`, `root_order`).
 | `MctsCpuctBase` | 0 (constant) | With b > 0 the PUCT constant grows with the parent's visits N as c + ln((1 + N + b) / b) (AlphaZero), so a long search explores more. |
 | `MctsFpu` | 20 | First-play urgency: an unvisited child starts this many hundredths below its parent's value. |
 | `MctsPolicyTemp` | 100 | Priors become p^(1/T), renormalised, when a node is expanded (T = value/100): above 100 flatter, below sharper. |
-| `MctsSmartStop` | off | MCTS stops once the most visited root move leads the second by more than the simulations still possible (the rest of the budget, and the current rate until the alpha-beta arm's hard limit), so its final choice cannot change; the core is freed for the rest of the move. |
+| `MctsSmartStop` | off | MCTS stops once the most visited root move leads the second by more than the simulations still possible (the rest of the budget, and the current rate until the alpha-beta arm's hard limit), so its final choice cannot change, and whether that move is proposed to alpha-beta (64 visits and half the root's) is settled as well; the core is freed for the rest of the move. |
 | `MctsAbShare` | 85 | The alpha-beta arm's share of the move's time when MCTS runs (the rest is kept for verifying a proposal). |
 | `MctsTTValue` | 0 (off) | A leaf whose position has an exact score in the shared transposition table from a search at least this deep takes that score as its value instead of the network's: P(win) − P(loss) under the logistic WDL model of the distillation targets (a = 400, b = 250), mates ±1. The alpha-beta arm has already searched most positions near the root, so MCTS stops re-guessing them. |
-| `NNRootOrder` | off | The alpha-beta search tries the root moves in the order of the network's prior (one evaluation per move, usually from the cache; also when MCTS does not run). Root moves late in the order are reduced (LMR), so this is neural guidance of the alpha-beta search itself. |
+| `NNRootOrder` | off | The alpha-beta search tries the root moves in the order of the network's prior (one evaluation per move, usually from the cache; also when MCTS does not run, from a hard limit of 50 ms; connecting, like a request, may take at most a tenth of the hard limit). Root moves late in the order are reduced (LMR), so this is neural guidance of the alpha-beta search itself. |
 
 **TensorRT.** Through ONNX Runtime's TensorRT execution provider
 (`--providers tensorrt,cuda,cpu`). The exported graph (opset 18) is Gemm,

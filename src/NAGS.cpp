@@ -14,6 +14,8 @@ namespace {
 
 constexpr int kNnConnectTimeoutMs = 150;
 constexpr int kNnBackoffSeconds = 60;
+// Root visits the most visited MCTS move needs before it is proposed to alpha-beta.
+constexpr int kProposalVisits = 64;
 // Batched MCTS: a selected path counts as a loss (in [-1, 1]) until its leaf is evaluated.
 constexpr double kVirtualLoss = 1.0;
 
@@ -198,6 +200,8 @@ void RpcEvaluator::configure(bool on, const std::string &h, int p) {
     port = p;
 }
 
+int RpcEvaluator::connectTimeoutMs() const { return std::min(kNnConnectTimeoutMs, requestTimeoutMs); }
+
 void RpcEvaluator::fail(std::chrono::steady_clock::time_point now) {
     socket.close();
     outstanding.clear();
@@ -210,7 +214,7 @@ bool RpcEvaluator::available() {
     if (!enabled || now < retryAfter) return false;
     if (!socket.isOpen()) {
         outstanding.clear();
-        if (!socket.connect(host, port, kNnConnectTimeoutMs)) {
+        if (!socket.connect(host, port, connectTimeoutMs())) {
             retryAfter = now + std::chrono::seconds(kNnBackoffSeconds);
             return false;
         }
@@ -298,7 +302,7 @@ EvalResult RpcEvaluator::evaluate(FastBoard &board, const std::vector<Move> &leg
     }
     if (!outstanding.empty()) socket.close(); // unread batch replies would be taken for this one's
     outstanding.clear();
-    if (!socket.isOpen() && !socket.connect(host, port, kNnConnectTimeoutMs)) {
+    if (!socket.isOpen() && !socket.connect(host, port, connectTimeoutMs())) {
         retryAfter = now + std::chrono::seconds(kNnBackoffSeconds);
         return fallback.evaluate(board, legal);
     }
@@ -518,7 +522,14 @@ bool NAGSController::shouldSmartStop(long long budget) const {
         if (ran <= 0.0 || mctsSims == 0) return false;
         remaining = std::min(remaining, mctsSims / ran * std::max(0.0, left));
     }
-    return first - second > remaining;
+    if (first - second <= remaining) return false;
+    // search() also takes the move as a proposal only with enough visits
+    // (kProposalVisits, and half the root's): that must be settled too,
+    // whether the remaining simulations all go to it or none do.
+    const double n = mctsRoot->visits;
+    const bool proposes = first >= kProposalVisits && 2.0 * first >= n + remaining;
+    const bool cannot = first + remaining < kProposalVisits || 2.0 * (first + remaining) < n + remaining;
+    return proposes || cannot;
 }
 
 std::unique_ptr<MCTSNode> NAGSController::reuseSubtree(const FastBoard &root) {
@@ -895,7 +906,7 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
                                                        : " (no network: MCTS off)";
     const MCTSNode *top = mostVisitedRootChild();
     if (runMctsArm && mctsUsedNetwork && top && !sameMove(top->move, ab.bestMove) && ab.depth >= 2 &&
-        mctsRoot->visits > 0 && top->visits >= 64 && top->visits * 2 >= mctsRoot->visits &&
+        mctsRoot->visits > 0 && top->visits >= kProposalVisits && top->visits * 2 >= mctsRoot->visits &&
         !stop.load(std::memory_order_relaxed)) {
         int depth = std::clamp(ab.depth + static_cast<int>(std::lround(deltas.dfs_depth_delta)), 1, MAX_PLY - 8);
         SearchLimits vLimits;
