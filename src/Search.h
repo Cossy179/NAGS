@@ -578,8 +578,8 @@ private:
     class MovePicker {
     public:
         MovePicker(const SearchWorker &w, const Move &ttMove, int ply, const Move &counter, const ContTable *cont1,
-                   const ContTable *cont2, bool noisyOnly)
-            : w(w), cont1(cont1), cont2(cont2), noisyOnly(noisyOnly) {
+                   const ContTable *cont2, bool noisyOnly, const ContTable *cont4 = nullptr)
+            : w(w), cont1(cont1), cont2(cont2), cont4(cont4), noisyOnly(noisyOnly) {
             if (!ttMove.isNull() && w.board.toPseudoLegal(ttMove, tt) && (!noisyOnly || eval::isNoisy(w.board, tt)))
                 hasTt = true;
             if (ply < MAX_PLY) {
@@ -696,10 +696,11 @@ private:
                 for (int j = 0; j < 3; ++j) dup |= emitted[j] && sameMove(m, special[j]);
                 if (dup) continue;
                 int s = w.history[stm][m.from][m.to];
-                if (cont1 || cont2) {
+                if (cont1 || cont2 || cont4) {
                     const int piece = static_cast<int>(b.pieceAt(m.from)) - 1;
                     if (cont1) s += (*cont1)[piece][m.to];
                     if (cont2) s += (*cont2)[piece][m.to];
+                    if (cont4) s += (*cont4)[piece][m.to];
                 }
                 score[k] = s;
                 quiet[nQuiet++] = static_cast<uint8_t>(k);
@@ -723,7 +724,7 @@ private:
         }
 
         const SearchWorker &w;
-        const ContTable *cont1, *cont2;
+        const ContTable *cont1, *cont2, *cont4;
         const bool noisyOnly;
         MoveList moves;
         int score[MoveList::kCapacity];
@@ -911,8 +912,11 @@ private:
         // tried (most nodes cut off after a few moves).
         const Move prevMove = board.lastMove();
         const Move counter = counterMoveFor(prevMove);
-        ContTable *cont1 = contFor(ply, 1), *cont2 = contFor(ply, 2);
-        MovePicker picker(*this, ttMove, ply, counter, cont1, cont2, false);
+        // Continuation history after the moves one, two and four plies back
+        // (the last orders quiet moves only; pruning and reductions use the
+        // first two).
+        ContTable *cont1 = contFor(ply, 1), *cont2 = contFor(ply, 2), *cont4 = contFor(ply, 4);
+        MovePicker picker(*this, ttMove, ply, counter, cont1, cont2, false, cont4);
 
         const Color us = board.sideToMove();
         int originalAlpha = alpha;
@@ -1048,7 +1052,7 @@ private:
                                 const Move &qm = picker.moveAt(quietsSearched[q]);
                                 updateHistory(table[qm.from][qm.to], -bonus);
                             }
-                            for (ContTable *cont : {cont1, cont2}) {
+                            for (ContTable *cont : {cont1, cont2, inCheck ? nullptr : cont4}) {
                                 if (!cont) continue;
                                 updateContHistory((*cont)[static_cast<int>(board.pieceAt(m.from)) - 1][m.to], bonus);
                                 for (int q = 0; q < nQuietsSearched; ++q) {
