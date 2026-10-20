@@ -527,6 +527,21 @@ Experiments in this batch are each tested against `10d3d5a` and merged in
 turn; the combination is checked by a final match of the new head against
 `10d3d5a`.
 
+Roadmap batch, 2026-10-19: on the head `105f7c3`, each against the head
+binary; SPRTs at 3+0.03, 2 at a time (GNN distillation shared the 4-core VM
+for part of the time).
+
+| Experiment (branch) | Hypothesis | Bench / speed | Test | Decision | Training impact |
+|---|---|---|---|---|---|
+| Upcoming-repetition detection (`exp/upcoming-repetition`) | A move that can repeat an earlier position (Stockfish's cuckoo tables) lets the side to move claim at least a draw, so alpha can be raised to 0 before searching | 1399785 → 1391069 | SPRT [−5, 0]: H1, +4.4 ± 6.7 (4548 games; resumed after two machine restarts); the regression suite at 10k nodes: 258 against the head's 259 | accepted (no regression, probably a small gain) | changes future datagen games, not their format |
+| ProbCut (`exp/probcut`) | A capture whose shallow search beats beta by a margin (200, less 50 when improving) makes the node a cut node; cut it after a depth − 4 search | 1399785 → 1325024 | SPRT [0, 10]: queued | pending | as above |
+| TT capture in LMR (`exp/ttcapture-lmr`) | When the TT move is a capture, quiet moves are less likely to matter: one more ply of reduction | 1399785 → 1337361 | SPRT [0, 10]: queued | pending | as above |
+| Fifty-move evaluation scaling (`exp/rule50-scaling`) | eval · (1 − halfmove/200) prefers progress over shuffling and sees a stale advantage for what it is | 1399785 → 1397756; `search_tests`' KR-K mate in 2 is found a ply later (depth 7), so CI is red on the branch | SPRT [0, 10]: queued | pending | as above |
+| Capture history on the head (`exp/capture-history-head`) | As `exp/capture-history` (inconclusive against `10d3d5a`), measured on the head | 1399785 → 1346220; first-move cutoffs 84.6% → 85.4% | SPRT [0, 10]: queued last | pending | as above |
+| GNN serving (`exp/phase1-inference`, `exp/cpp-graph`) | Same replies, less time: fast graph builder, gnn_infer backends (torch bit-identical, ONNX Runtime), threads, batching, reply cache, batched MCTS with virtual loss, engine-built graphs | no bench change; one-position round trip 24.8 → 5.6 ms (bit-identical), MCTS 41 → about 250 simulations/s on one core | tests: bit-identical replies and graphs (thousands of positions), CI | non-functional; options off by default | none: checkpoints, configs and the protocol unchanged (new fields optional) |
+| Hybrid search options (`exp/phase2-hybrid`) | Tree reuse, PUCT growth, FPU, policy temperature, smart stop, time share, TT-valued leaves, root order by prior | no bench change (off by default) | per-move decisions above | kept off: no network good enough to test them in play | none |
+| Game histories for v3 (`exp/gnn-history`) | A network that sees repetitions can avoid or claim them | no bench change | tests only; no network trained with histories | opt-in (checkpoint flag) | none unless the flag is set |
+
 `nags` benches like `nags_enhanced` (without the Python services the MCTS
 arm does not run); before `nags` was rebuilt on FastBoard (see below) its
 bench used the ray-based board and the hand-written evaluation.
@@ -545,9 +560,25 @@ embedded, `nags_fast`, `nags_enhanced` and `nags` bench with NNUE;
 | Rebuilt controller with an untrained GNN and the meta-learner running, first version | 200 games, 3+0.03, 2 at a time | +2 =16 -182, 172 losses on time: the end of each move waited for the MCTS thread's in-flight network request (up to 3 s), and a 1 ms limit scaled to 85% became 0 ("no limit") |
 | The same after the fix (MCTS only from `MctsMinTime`, pre-search time counted, network waits capped at a tenth of the hard limit) | 100 games, 3+0.03, 2 at a time | +32 =38 -30, +6.9 ± 53.1 (MCTS off at this speed; no time losses) |
 | The same with `MctsMinTime` 0 (MCTS always on, untrained GNN) | 60 games, 10+0.1, 2 at a time | +12 =25 -23, −64 ± 62: the cost of the arm (15% less alpha-beta time, the GNN server competing for CPU, verified proposals up to 25 cp worse) when the network knows nothing |
+| Hybrid with a stand-in v3 network distilled on the CPU (below), default settings (`exp/phase2-hybrid` and later) | `tools/hybrid_eval.py decisions`: 150 positions, 2 s a move, both moves scored by a 2M-node reference search | agree 47%; MCTS differs but not proposed 41% (its move −135 cp, worse in 51 of 54 scored); proposal rejected 11% (−208 cp, worse 14 of 16); verified override 1 (−19 cp). Alpha-beta move = reference 85.3%, MCTS top move 50.0%. 297 simulations a move (186/s) |
+| The same with `NNBatch` 8, `MctsSmartStop`, `MctsTTValue` 6, `MctsCpuctBase` 19652 | as above, same positions | agree 49%; not proposed 43% (−91 cp); rejected 7% (−195 cp); verified override 1 (+13 cp). Alpha-beta = reference 89.3% (timing noise on a loaded machine), MCTS top move 52.0%. 351 simulations a move (253/s, +36%) |
 
-Whether the hybrid can gain strength depends on a trained GNN, which has not
-been trained yet.
+The stand-in network (2026-10-19): `nags-gnn-v3` defaults (hidden 128, 6
+layers, relational-v1), distilled for 5 epochs on 134k positions from
+`nags_datagen` self-play, labelled with 4 MultiPV scores by `nags_enhanced`
+(about 12,000-30,000 nodes, depth 7). On 8,977 positions of whole games kept
+out of training: prior top-1 21.2% (uniform 5.2%), top-3 46.9%, NLL 2.481
+(uniform 3.182), value correlation with the search 0.964; 3.5 ms a
+position on one CPU core.
+
+So the hybrid cannot gain with such a network: its MCTS move agrees with a
+deeper search about half as often as the alpha-beta move does, verification
+(correctly) rejects almost every proposal, and the arm changes about 1% of
+the moves while costing 15% of the alpha-beta time and a core. No match was
+played: it would measure that time cost, not the network. The hybrid stays
+off by default. The decisions measurement is the one to repeat first with a
+network trained at scale (GPU); a match is worth playing once the MCTS top
+move agrees with the reference about as often as the alpha-beta move does.
 
 The reduction table alone was tested first, at 5+0.05, and stopped
 undecided at +21.2 ± 21.9 after 674 games (LLR 1.29); it was then tested
