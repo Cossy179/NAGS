@@ -1,0 +1,6 @@
+# Optional: the ONNX Runtime backend of rpc_server.py (--backend onnx) and its tests.
+# For NVIDIA GPUs (CUDA / TensorRT execution providers) install onnxruntime-gpu
+# instead of onnxruntime, matching your CUDA version.
+onnx>=1.15
+onnxscript>=0.1     # torch.onnx.export's exporter
+onnxruntime>=1.17

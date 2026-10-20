@@ -9,6 +9,7 @@
 #include "NAGS.h"
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <string>
 #include <vector>
@@ -30,6 +31,20 @@ public:
         lines.push_back("option name MetaPort type spin default " + std::to_string(s.metaPort) + " min 1 max 65535");
         lines.push_back("option name MetaExploration type spin default 0 min 0 max 100");
         lines.push_back("option name MctsMinTime type spin default " + std::to_string(s.minMctsMs) + " min 0 max 600000");
+        lines.push_back("option name NNBatch type spin default " + std::to_string(s.nnBatch) + " min 1 max 256");
+        lines.push_back(std::string("option name NNPipeline type check default ") + (s.nnPipeline ? "true" : "false"));
+        lines.push_back("option name NNCache type spin default " + std::to_string(s.nnCacheMb) + " min 0 max 4096");
+        lines.push_back(std::string("option name NNGraphs type check default ") + (s.nnGraphs ? "true" : "false"));
+        lines.push_back(std::string("option name MctsReuse type check default ") + (s.mctsReuse ? "true" : "false"));
+        lines.push_back("option name MctsCpuctBase type spin default " + std::to_string(s.cpuctBase) + " min 0 max 1000000");
+        lines.push_back("option name MctsFpu type spin default " + std::to_string(std::lround(s.fpuReduction * 100)) +
+                        " min 0 max 200");
+        lines.push_back("option name MctsPolicyTemp type spin default " + std::to_string(std::lround(s.policyTemp * 100)) +
+                        " min 10 max 1000");
+        lines.push_back(std::string("option name MctsSmartStop type check default ") + (s.smartStop ? "true" : "false"));
+        lines.push_back("option name MctsAbShare type spin default " + std::to_string(s.abSharePct) + " min 50 max 100");
+        lines.push_back("option name MctsTTValue type spin default " + std::to_string(s.ttValueDepth) + " min 0 max 64");
+        lines.push_back(std::string("option name NNRootOrder type check default ") + (s.nnRootOrder ? "true" : "false"));
         return lines;
     }
 
@@ -65,6 +80,42 @@ public:
         } else if (opt == "MctsMinTime") {
             if (!uci::parseInt(value, v)) return badValue();
             s.minMctsMs = static_cast<int>(std::clamp<long long>(v, 0, 600000));
+        } else if (opt == "NNBatch") {
+            if (!uci::parseInt(value, v)) return badValue();
+            s.nnBatch = static_cast<int>(std::clamp<long long>(v, 1, 256));
+        } else if (opt == "NNPipeline") {
+            if (!uci::parseBool(value, b)) return badValue();
+            s.nnPipeline = b;
+        } else if (opt == "NNCache") {
+            if (!uci::parseInt(value, v)) return badValue();
+            s.nnCacheMb = static_cast<int>(std::clamp<long long>(v, 0, 4096));
+        } else if (opt == "NNGraphs") {
+            if (!uci::parseBool(value, b)) return badValue();
+            s.nnGraphs = b;
+        } else if (opt == "MctsReuse") {
+            if (!uci::parseBool(value, b)) return badValue();
+            s.mctsReuse = b;
+        } else if (opt == "MctsCpuctBase") {
+            if (!uci::parseInt(value, v)) return badValue();
+            s.cpuctBase = static_cast<int>(std::clamp<long long>(v, 0, 1000000));
+        } else if (opt == "MctsFpu") { // hundredths of the [-1, 1] value scale
+            if (!uci::parseInt(value, v)) return badValue();
+            s.fpuReduction = static_cast<double>(std::clamp<long long>(v, 0, 200)) / 100.0;
+        } else if (opt == "MctsPolicyTemp") { // percent: 100 = the network's priors as they are
+            if (!uci::parseInt(value, v)) return badValue();
+            s.policyTemp = static_cast<float>(std::clamp<long long>(v, 10, 1000)) / 100.0f;
+        } else if (opt == "MctsSmartStop") {
+            if (!uci::parseBool(value, b)) return badValue();
+            s.smartStop = b;
+        } else if (opt == "MctsAbShare") {
+            if (!uci::parseInt(value, v)) return badValue();
+            s.abSharePct = static_cast<int>(std::clamp<long long>(v, 50, 100));
+        } else if (opt == "MctsTTValue") {
+            if (!uci::parseInt(value, v)) return badValue();
+            s.ttValueDepth = static_cast<int>(std::clamp<long long>(v, 0, 64));
+        } else if (opt == "NNRootOrder") {
+            if (!uci::parseBool(value, b)) return badValue();
+            s.nnRootOrder = b;
         } else {
             return ClassicEngine<FastBoard>::setOption(opt, value, message);
         }

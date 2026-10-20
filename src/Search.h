@@ -240,11 +240,22 @@ class SearchWorker {
 public:
     SearchWorker(TranspositionTable *tt, SearchControl *control) : tt(tt), ctl(control) { clearHistory(); }
 
-    void setRoot(const BoardT &root) {
+    // order: root moves to search first, in this order (the others follow in
+    // the usual order); null for the usual ordering.
+    void setRoot(const BoardT &root, const std::vector<Move> *order = nullptr) {
         board = root;
         board.refreshAccumulator(); // the network may have changed since `root` was set up
         rootMoves = board.generateLegalMoves();
         orderMoves(rootMoves, Move{}, 0);
+        if (order && !order->empty()) {
+            auto rank = [order](const Move &m) {
+                for (size_t i = 0; i < order->size(); ++i)
+                    if (sameMove((*order)[i], m)) return i;
+                return order->size();
+            };
+            std::stable_sort(rootMoves.begin(), rootMoves.end(),
+                             [&](const Move &a, const Move &b) { return rank(a) < rank(b); });
+        }
         nodes = 0;
         unflushed = 0;
         selDepth = 0;
@@ -1240,7 +1251,8 @@ public:
                         const std::atomic<bool> *ponderFlag = nullptr) {
         control.begin(limits, &externalStop, ponderFlag);
         if (tt) tt->newSearch();
-        for (auto &w : workers) w->setRoot(root);
+        for (auto &w : workers) w->setRoot(root, &rootOrder);
+        rootOrder.clear(); // for this search only
 
         SearchWorker<BoardT> &main = *workers[0];
         SearchResult result;
@@ -1390,6 +1402,12 @@ public:
     // Nodes of the last search or scoreRootMove call.
     uint64_t nodesSearched() const { return control.nodes.load(std::memory_order_relaxed); }
 
+    // Root moves the next search() tries first, in this order (e.g. by a
+    // network's prior); applies to that search only.
+    void setRootOrder(std::vector<Move> order) { rootOrder = std::move(order); }
+    // The shared transposition table (null without one).
+    TranspositionTable *table() const { return tt; }
+
     // Search statistics summed over all threads since the last reset (only
     // counted in NAGS_STATS builds).
     SearchStats statistics() const {
@@ -1406,4 +1424,5 @@ private:
     SearchControl control;
     std::vector<std::unique_ptr<SearchWorker<BoardT>>> workers;
     int multiPv = 1;
+    std::vector<Move> rootOrder;
 };

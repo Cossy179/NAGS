@@ -74,8 +74,14 @@ covers move generation order and the opening playouts).
   each pruning and reduction rule) and `bench` prints it. The counters are
   compiled out otherwise.
 * `nags` reports MCTS simulations per second and the round trips to
-  `rpc_server.py` (count, failures, total/mean/maximum wait) in its
-  `info string nags` line.
+  `rpc_server.py` (count, failures, total/mean/maximum wait, positions and
+  positions per request, evaluation-cache hits, virtual-loss collisions)
+  in its `info string nags` line.
+* `tools/gnn_bench.py --backends legacy,torch,onnx`: the GNN serving paths
+  (graph construction and network separately), each checked against the
+  legacy outputs (`max_dp`, `max_dv`); `--device cuda --providers
+  tensorrt,cuda,cpu` for the GPU. Speed and results of the inference path
+  are in docs/ARCHITECTURE.md ("Neural inference").
 * `tools/search_benefit.py`: what more search buys, per decision. Each
   sample position is searched with node budgets N, 2N, 4N, ... and each
   chosen move is scored by a deep reference search; it reports how often

@@ -125,6 +125,9 @@ The NNUE network is embedded when available. The Python services are **not** req
 | `SyzygyPath` / `SyzygyProbeLimit` | Endgame tablebase probing |
 | `Move Overhead` | Reserve time for GUI/system latency |
 | `UseNN` / `NNHost` / `NNPort` | Optional neural MCTS service (hybrid `nags`; off by default) |
+| `NNBatch` / `NNPipeline` / `NNCache` | Leaves per network request (virtual loss), two requests in flight, evaluation cache in MB (hybrid `nags`) |
+| `NNGraphs` | Send each position's GNN graph, built by the engine, so the server need not build it (same replies; hybrid `nags`) |
+| `MctsReuse`, `MctsSmartStop`, `MctsTTValue`, `NNRootOrder`, … | Experimental hybrid search options, off by default ([list](docs/ARCHITECTURE.md#hybrid-search-options)) |
 | `UseMetaLearner` | Optional search-parameter adaptation (hybrid `nags`; off by default) |
 
 Run `uci` for the full live option list.
@@ -172,7 +175,7 @@ python -m pip install -r requirements.txt
 python rpc_server.py --model models/production_model.pth
 ```
 
-The server warns if it is launched without a trained checkpoint. Its use is optional.
+The server warns if it is launched without a trained checkpoint. Its use is optional. On a GPU, batch the engine's requests (`setoption name NNBatch value 32`, `NNPipeline true`); `--backend onnx` (with `requirements-onnx.txt`) runs a v3 network through ONNX Runtime, including its CUDA and TensorRT providers. See [neural inference](docs/ARCHITECTURE.md#neural-inference-relational_fastpy-gnn_inferpy-rpc_serverpy-nagscpp).
 
 </td>
 <td valign="middle" align="center" width="32%">
@@ -189,7 +192,7 @@ The server warns if it is launched without a trained checkpoint. Its use is opti
 
 - Faster move picking and more selective search without tactical regressions
 - Better policy learning targets and legal-action representations
-- GPU batching and cheaper neural inference for the experimental MCTS path
+- GPU measurements of the new batched inference path (implemented and tested on the CPU: MCTS 41 → 250 simulations/s), and graph construction in C++
 - NNUE designs compared **at equal thinking time**, not only by validation loss
 - Transparent, statistically sound matches against stronger unrestricted opponents
 

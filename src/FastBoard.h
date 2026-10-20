@@ -84,6 +84,9 @@ public:
     // Fifty-move rule, repetition (one earlier occurrence) or insufficient material.
     bool isDraw() const;
     bool isRepetition() const;
+    // The moves since the last capture, pawn move or null move (those the
+    // repetition rules look back over), oldest first.
+    std::vector<Move> recentMoves() const;
     bool isInsufficientMaterial() const;
 
     static bool isValidSquare(int sq) { return sq >= 0 && sq < 64; }

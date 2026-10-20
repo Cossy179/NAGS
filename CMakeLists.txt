@@ -73,6 +73,7 @@ add_library(nags_core STATIC
   ${NAGS_EMBEDDED_NET}
   src/Net.cpp
   src/MetaClient.cpp
+  src/RelGraph.cpp
 )
 target_include_directories(nags_core PUBLIC src)
 target_compile_definitions(nags_core PUBLIC NAGS_NNUE_HIDDEN=${NAGS_NNUE_HIDDEN})
@@ -95,8 +96,10 @@ add_executable(nags src/main.cpp src/NAGS.cpp)
 add_executable(rpc_client src/rpc_client.cpp)
 # Self-play training data for the NNUE evaluation.
 add_executable(nags_datagen src/datagen_main.cpp)
+# The engine's relational-v1 GNN graphs of FENs (checked against relational_graph.py).
+add_executable(relgraph_dump src/relgraph_main.cpp)
 
-foreach(target nags_basic nags_fast nags_enhanced nags rpc_client nags_datagen)
+foreach(target nags_basic nags_fast nags_enhanced nags rpc_client nags_datagen relgraph_dump)
   target_link_libraries(${target} PRIVATE nags_core)
   nags_warnings(${target})
 endforeach()

@@ -164,6 +164,24 @@ def row_targets(row: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
             "value": wdl[0] - wdl[2], "search_value": search_wdl[0] - search_wdl[2]}
 
 
+def fast_graph(board: chess.Board):
+    """build_graph(board) with its legal mask (data.legal [1, 4228]), from relational_fast: identical
+    tensors (tests/python/test_distill.py); an item takes 0.6 ms instead of 1.0 here."""
+    import numpy as np
+    from torch_geometric.data import Data
+
+    from relational_fast import build_arrays
+
+    g = build_arrays(board)
+    data = Data(x=torch.from_numpy(g.x), edge_index=torch.from_numpy(np.stack([g.src, g.dst])),
+                edge_type=torch.from_numpy(g.edge_type), node_kind=torch.from_numpy(g.node_kind),
+                num_nodes=int(g.x.shape[0]))
+    legal = torch.zeros(1, POLICY_V3_DIM, dtype=torch.bool)
+    legal[0, torch.from_numpy(g.legal)] = True
+    data.legal = legal
+    return data
+
+
 class DistillDataset(Dataset):
     """Label rows -> relational graphs with distillation targets.
 
@@ -180,10 +198,17 @@ class DistillDataset(Dataset):
 
     def __getitem__(self, idx: int):
         row = self.rows[idx]
-        board = chess.Board(row["fen"])
+        if self.params.get("use_history") and row.get("history"):
+            from gnn_v3 import history_board
+            board = history_board(row["fen"], row["history"])  # repetitions counted from the game
+        else:
+            board = chess.Board(row["fen"])
         t = row_targets(row, self.params)
-        data = build_graph(board)
-        data.legal = legal_mask_v3(board).unsqueeze(0)
+        if self.params.get("fast_graphs"):
+            data = fast_graph(board)  # the same graph and mask, built faster
+        else:
+            data = build_graph(board)
+            data.legal = legal_mask_v3(board).unsqueeze(0)
         target = torch.zeros(1, POLICY_V3_DIM)
         rest = data.legal.clone()  # the legal moves that were not scored
         for uci, p in t["policy"]:

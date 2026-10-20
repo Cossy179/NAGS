@@ -857,6 +857,15 @@ bool FastBoard::isRepetition() const {
     return false;
 }
 
+std::vector<Move> FastBoard::recentMoves() const {
+    const int n = static_cast<int>(history.size());
+    const int k = std::min({halfmoveClock, pliesFromNull, n});
+    std::vector<Move> out;
+    out.reserve(static_cast<size_t>(k));
+    for (int i = n - k; i < n; ++i) out.push_back(history[i].move);
+    return out;
+}
+
 bool FastBoard::isInsufficientMaterial() const {
     for (int c = 0; c < 2; ++c)
         if (pieces[c][PAWN] | pieces[c][ROOK] | pieces[c][QUEEN]) return false;

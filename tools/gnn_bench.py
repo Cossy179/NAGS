@@ -11,12 +11,20 @@ positions per second. Weights do not change the timing, so without --v2 / --v3
 checkpoints it uses untrained models of the default sizes (v2: the pipeline's
 model_params; v3: distill_params.model).
 
+--backends adds the serving paths of rpc_server.py for v3 (gnn_infer.py):
+'torch' (relational_fast graphs, bit-identical to legacy) and 'onnx' (ONNX
+Runtime with --providers, e.g. tensorrt,cuda,cpu). Their rows also give the
+largest difference from the legacy outputs on the same positions (max_dp
+for the policy, max_dv for the value, MC dropout off), so a GPU provider
+or --fp16 can be checked as well as timed.
+
 The CPU may be shared (e.g. with an engine match): the default is one torch
 thread, and the load average is printed with the results.
 
   python tools/gnn_bench.py
   python tools/gnn_bench.py --batch-sizes 1,8 --repeats 5 --json bench.json
   python tools/gnn_bench.py --v2 models/production_model.pth --v3 models/gnn_v3_distill_X.pth
+  python tools/gnn_bench.py --models v3 --backends legacy,torch,onnx --device cuda --providers tensorrt,cuda,cpu
 """
 
 from __future__ import annotations
@@ -86,6 +94,45 @@ def make_model(kind: str, device: torch.device, path: Optional[str], tiny: bool)
     return GNNAdapterV3(model.eval(), RelationalChessGraph(device=torch.device("cpu")))
 
 
+def _deviation(adapter: GNNAdapter, backend: Any, chunk: Sequence[str]) -> Dict[str, float]:
+    """Largest |difference| of a fast backend's outputs from the legacy path's (dropout off)."""
+    from relational_fast import build_batch
+
+    builder = adapter.builder
+    builder.device = torch.device("cpu")
+    ref_p, ref_v, _ = adapter.evaluate(adapter.build_batch(list(chunk)), mc_samples=1)
+    p, v, _ = backend.run(build_batch(list(chunk)), mc_samples=1)
+    return {"max_dp": float((p - ref_p).abs().max()), "max_dv": float((v - ref_v).abs().max())}
+
+
+def bench_backend(adapter: GNNAdapter, backend: Any, fens: Sequence[str], batch: int, repeats: int, warmup: int,
+                  mc_samples: int, device: torch.device) -> Dict[str, Any]:
+    """bench_one for a gnn_infer backend: relational_fast graphs, then backend.run."""
+    from relational_fast import build_batch
+
+    chunk = list(fens[:batch])
+    build, model = [], []
+    for i in range(warmup + repeats):
+        t0 = time.perf_counter()
+        arrays = build_batch(chunk)
+        t1 = time.perf_counter()
+        backend.run(arrays, mc_samples=mc_samples)
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        t2 = time.perf_counter()
+        if i >= warmup:
+            build.append(t1 - t0)
+            model.append(t2 - t1)
+    b, m = statistics.median(build), statistics.median(model)
+    row = {"model": adapter.format, "backend": backend.name, "device": str(device), "batch": batch,
+           "build_ms": 1000 * b, "model_ms": 1000 * m, "total_ms": 1000 * (b + m),
+           "build_pos_s": batch / b, "model_pos_s": batch / m, "total_pos_s": batch / (b + m)}
+    if getattr(backend, "providers", None):
+        row["providers"] = list(backend.providers)
+    row.update(_deviation(adapter, backend, chunk))
+    return row
+
+
 def bench_one(adapter: GNNAdapter, fens: Sequence[str], batch: int, repeats: int, warmup: int,
               mc_samples: int, device: torch.device) -> Dict[str, Any]:
     builder = adapter.builder
@@ -104,7 +151,7 @@ def bench_one(adapter: GNNAdapter, fens: Sequence[str], batch: int, repeats: int
             build.append(t1 - t0)
             model.append(t2 - t1)
     b, m = statistics.median(build), statistics.median(model)
-    return {"model": adapter.format, "device": str(device), "batch": batch,
+    return {"model": adapter.format, "backend": "legacy", "device": str(device), "batch": batch,
             "build_ms": 1000 * b, "model_ms": 1000 * m, "total_ms": 1000 * (b + m),
             "build_pos_s": batch / b, "model_pos_s": batch / m, "total_pos_s": batch / (b + m)}
 
@@ -121,6 +168,12 @@ def run(argv: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
     p.add_argument("--models", default="v2,v3")
     p.add_argument("--v2", help="a nags-gnn-v2 checkpoint (default: untrained, default size)")
     p.add_argument("--v3", help="a nags-gnn-v3 checkpoint (default: untrained, default size)")
+    p.add_argument("--backends", default="legacy",
+                   help="v3 serving paths to time: legacy, torch, onnx (v2 networks: legacy only)")
+    p.add_argument("--providers", default=None,
+                   help="ONNX Runtime providers for the onnx backend (default: cuda,cpu on CUDA, else cpu)")
+    p.add_argument("--fp16", action="store_true", help="half precision for the torch (CUDA) and onnx (TensorRT) backends")
+    p.add_argument("--onnx-cache", default=None, help="directory for exported .onnx files")
     p.add_argument("--tiny", action="store_true", help="tiny models (smoke test)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--json", help="also write the rows to this file")
@@ -138,20 +191,36 @@ def run(argv: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
           f"load average {load[0]:.2f}, " if load else f"torch {torch.__version__}, ", end="")
     print(f"mc_samples {args.mc_samples}, median of {args.repeats} run(s)", flush=True)
     rows: List[Dict[str, Any]] = []
-    header = (f"{'model':<12} {'device':<6} {'batch':>5} {'build ms':>9} {'model ms':>9} {'total ms':>9} "
-              f"{'build pos/s':>11} {'model pos/s':>11} {'total pos/s':>11}")
+    header = (f"{'model':<12} {'backend':<7} {'device':<6} {'batch':>5} {'build ms':>9} {'model ms':>9} "
+              f"{'total ms':>9} {'build pos/s':>11} {'model pos/s':>11} {'total pos/s':>11} {'max_dp':>8} {'max_dv':>8}")
     print(header)
+    backends = [b.strip() for b in args.backends.split(",") if b.strip()]
     for device in devices:
         for kind in [k.strip() for k in args.models.split(",") if k.strip()]:
             adapter = make_model(kind, device, getattr(args, kind), args.tiny)
             params = sum(t.numel() for t in adapter.model.parameters())
-            for bs in sizes:
-                row = bench_one(adapter, fens, bs, args.repeats, args.warmup, args.mc_samples, device)
-                row["params"] = params
-                rows.append(row)
-                print(f"{row['model']:<12} {device.type:<6} {bs:>5} {row['build_ms']:>9.1f} {row['model_ms']:>9.1f} "
-                      f"{row['total_ms']:>9.1f} {row['build_pos_s']:>11.1f} {row['model_pos_s']:>11.1f} "
-                      f"{row['total_pos_s']:>11.1f}", flush=True)
+            for name in backends:
+                if name != "legacy" and adapter.format != "nags-gnn-v3":
+                    continue
+                backend = None
+                if name != "legacy":
+                    from gnn_infer import make_backend
+
+                    providers = (args.providers or ("cuda,cpu" if device.type == "cuda" else "cpu")).split(",")
+                    backend = make_backend(adapter.model, name, providers=providers, threads=max(args.threads, 0),
+                                           fp16=args.fp16, cache_dir=args.onnx_cache)
+                for bs in sizes:
+                    if backend is None:
+                        row = bench_one(adapter, fens, bs, args.repeats, args.warmup, args.mc_samples, device)
+                    else:
+                        row = bench_backend(adapter, backend, fens, bs, args.repeats, args.warmup, args.mc_samples,
+                                            device)
+                    row["params"] = params
+                    rows.append(row)
+                    dev = (f"{row['max_dp']:>8.1e} {row['max_dv']:>8.1e}" if "max_dp" in row else f"{'-':>8} {'-':>8}")
+                    print(f"{row['model']:<12} {row['backend']:<7} {device.type:<6} {bs:>5} {row['build_ms']:>9.1f} "
+                          f"{row['model_ms']:>9.1f} {row['total_ms']:>9.1f} {row['build_pos_s']:>11.1f} "
+                          f"{row['model_pos_s']:>11.1f} {row['total_pos_s']:>11.1f} {dev}", flush=True)
     if args.json:
         Path(args.json).write_text(json.dumps({"load_average": load, "threads": torch.get_num_threads(),
                                                "mc_samples": args.mc_samples, "rows": rows}, indent=2))
