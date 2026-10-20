@@ -494,7 +494,8 @@ private:
     }
 
     // Order: TT move, winning/equal captures and promotions (MVV/LVA), killers
-    // and the countermove, losing captures (negative SEE), quiet moves by history.
+    // and the countermove, quiet moves by history, losing captures and promotions
+    // (negative SEE).
     int moveScore(const Move &m, const Move &ttMove, int ply, const Move &counter = Move{},
                   const ContTable *cont1 = nullptr, const ContTable *cont2 = nullptr) const {
         if (!ttMove.isNull() && sameMove(m, ttMove)) return 1 << 30;
@@ -503,7 +504,7 @@ private:
             int attacker = eval::pieceValue(board.pieceAt(m.from));
             int score = victim * 16 - attacker / 16;
             if (m.promotion != Piece::None) score += eval::pieceValue(m.promotion) * 16;
-            return (eval::see(board, m) >= 0 ? (1 << 24) : (1 << 22)) + score;
+            return (eval::see(board, m) >= 0 ? (1 << 24) : -(1 << 24)) + score; // losing ones below every quiet move
         }
         if (ply < MAX_PLY) {
             if (sameMove(m, killers[ply][0])) return (1 << 23) + 2;
@@ -568,11 +569,12 @@ private:
     }
 
     // Staged move ordering for one node: TT move, winning/equal captures
-    // (MVV/LVA), killers and countermove, losing captures, quiet moves by
-    // history (ties in generation order). Moves are generated only when their
-    // stage is reached: a TT move cutoff needs no move generation at all, and
-    // quiet moves are generated and scored (with the history as it is then)
-    // only after the captures and killers.
+    // (MVV/LVA), killers and countermove, quiet moves by history (ties in
+    // generation order), losing captures and promotions (negative SEE).
+    // Moves are generated only when their stage is reached: a TT move cutoff
+    // needs no move generation at all, and quiet moves are generated and
+    // scored (with the history as it is then) only after the captures and
+    // killers.
     class MovePicker {
     public:
         MovePicker(const SearchWorker &w, const Move &ttMove, int ply, const Move &counter, const ContTable *cont1,
@@ -613,22 +615,22 @@ private:
                     moves.push_back(m);
                     return found(moves.size() - 1, false);
                 }
-                stage = Stage::LosingCaptures;
-            }
-            if (stage == Stage::LosingCaptures) {
-                if (nBad && !skipLosingCaptures) return found(take(bad, nBad), true);
                 stage = Stage::Quiets;
             }
-            if (!quietsGenerated) generateQuiets();
-            if (nQuiet) return found(take(quiet, nQuiet), false);
+            if (stage == Stage::Quiets) {
+                if (!quietsGenerated) generateQuiets();
+                if (nQuiet) return found(take(quiet, nQuiet), false);
+                stage = Stage::LosingCaptures;
+            }
+            if (nBad && !skipLosingCaptures) return found(take(bad, nBad), true);
             return -1;
         }
 
         const Move &moveAt(int k) const { return moves[k]; }
         // Drops the quiet moves not returned yet, once the picker has reached
-        // them (the last stage): late-move and futility pruning would skip
-        // every one of them, and no capture is left whose search could change
-        // that. Earlier stages are unaffected, so the search is the same.
+        // their stage: late-move and futility pruning would skip every one of
+        // them (nothing is searched between them that could change that).
+        // Other stages are unaffected, so the search is the same.
         // Returns the number of moves dropped other than `excluded` (for the
         // pruning statistics; counted only in NAGS_STATS builds).
         int skipQuietMoves(const Move &excluded) {
@@ -647,7 +649,7 @@ private:
         int seeOfLast() const { return lastSeeKnown ? see[last] : eval::see(w.board, moves[last]); }
 
     private:
-        enum class Stage { Tt, GoodCaptures, Special, LosingCaptures, Quiets };
+        enum class Stage { Tt, GoodCaptures, Special, Quiets, LosingCaptures };
 
         int found(int k, bool seeKnown) {
             last = k;
