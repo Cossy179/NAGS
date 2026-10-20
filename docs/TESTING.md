@@ -109,9 +109,9 @@ the move in 10.3% of the decisions. Held-out (a quarter of the positions):
 log-loss 0.263 against 0.351 for the base rate, AUC 0.859. The weights per
 standard deviation say where more search pays: not after many stable
 iterations (−1.50, by far the strongest), after a score drop (+0.34), not
-in check (−0.41, few choices), fewer legal moves (+0.23 the other way),
-more depth (+0.23); the score itself, its swing and the material matter
-little. Mean loss against the reference at the same nodes as 2N
+in check (−0.41, few choices), more depth (+0.23) and, less expected, fewer
+legal moves (−0.23 per standard deviation of the count); the score itself,
+its swing and the material matter little. Mean loss against the reference at the same nodes as 2N
 everywhere:
 
 | Allocation | Mean loss (cp) |
