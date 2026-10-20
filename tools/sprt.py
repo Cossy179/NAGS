@@ -162,6 +162,22 @@ class Limits:
         return f"depth {self.depth}"
 
 
+def describe_limits(a: Limits, b: Limits) -> str:
+    """One limit, or 'x vs y' when the two sides play with different ones."""
+    return a.describe() if a.describe() == b.describe() else f"{a.describe()} vs {b.describe()}"
+
+
+def make_limits(tc: Optional[str], nodes: Optional[int], depth: Optional[int], movetime: Optional[float],
+                margin: float) -> Optional[Limits]:
+    """Limits from one set of options, or None if none is given."""
+    if tc is None and nodes is None and depth is None and movetime is None:
+        return None
+    lim = Limits(margin=margin, nodes=nodes, depth=depth, movetime=movetime)
+    if tc:
+        lim.base, lim.inc = parse_tc(tc)
+    return lim
+
+
 def parse_tc(tc: str) -> Tuple[float, float]:
     """'8+0.08' -> (8.0, 0.08); '60' -> (60.0, 0.0). Seconds, like fastchess/cutechess."""
     base, _, inc = tc.partition("+")
@@ -253,6 +269,7 @@ class EngineSpec:
     name: str
     command: List[str]
     options: Dict[str, str] = field(default_factory=dict)
+    limits: Optional["Limits"] = None  # this engine's own limits (time odds, a node-limited opponent)
 
 
 def engine_command(text: str) -> List[str]:
@@ -316,7 +333,9 @@ def play_game(white: Player, black: Player, opening: Opening, limits: Limits, ad
     board = opening.board()
     start_board = chess.Board(opening.fen)
     players = {chess.WHITE: white, chess.BLACK: black}
-    clocks = {chess.WHITE: limits.base, chess.BLACK: limits.base}
+    # Each side plays with its engine's own limits if it has them, else the match's.
+    side_limits = {c: p.spec.limits or limits for c, p in players.items()}
+    clocks = {c: side_limits[c].base for c in players}
     white_scores: List[Optional[int]] = []
     played: List[chess.Move] = []
     result, reason = "*", ""
@@ -333,12 +352,17 @@ def play_game(white: Player, black: Player, opening: Opening, limits: Limits, ad
 
         mover = board.turn
         player = players[mover]
+        lim = side_limits[mover]
         loss = "0-1" if mover == chess.WHITE else "1-0"
-        if limits.base is not None:
-            limit = chess.engine.Limit(white_clock=clocks[chess.WHITE], black_clock=clocks[chess.BLACK],
-                                       white_inc=limits.inc, black_inc=limits.inc)
+        if lim.base is not None:
+            # An opponent without a clock (fixed nodes, depth or move time) is shown our own.
+            other = clocks[not mover] if clocks[not mover] is not None else clocks[mover]
+            other_inc = side_limits[not mover].inc if clocks[not mover] is not None else lim.inc
+            wc, bc = (clocks[mover], other) if mover == chess.WHITE else (other, clocks[mover])
+            wi, bi = (lim.inc, other_inc) if mover == chess.WHITE else (other_inc, lim.inc)
+            limit = chess.engine.Limit(white_clock=wc, black_clock=bc, white_inc=wi, black_inc=bi)
         else:
-            limit = chess.engine.Limit(nodes=limits.nodes, depth=limits.depth, time=limits.movetime)
+            limit = chess.engine.Limit(nodes=lim.nodes, depth=lim.depth, time=lim.movetime)
         try:
             engine = player.ensure()
             start = time.monotonic()
@@ -349,12 +373,12 @@ def play_game(white: Player, black: Player, opening: Opening, limits: Limits, ad
             result, reason = loss, f"{player.spec.name} crashed or hung ({type(e).__name__})"
             break
 
-        if limits.base is not None:
+        if lim.base is not None:
             clocks[mover] -= elapsed
-            if clocks[mover] < -limits.margin:
+            if clocks[mover] < -lim.margin:
                 result, reason = loss, f"{player.spec.name} lost on time"
                 break
-            clocks[mover] += limits.inc
+            clocks[mover] += lim.inc
 
         move = play.move
         if move is None or move not in board.legal_moves:
@@ -378,7 +402,8 @@ def play_game(white: Player, black: Player, opening: Opening, limits: Limits, ad
         node = node.add_variation(m)
     game.headers.update({"Event": "NAGS SPRT", "Round": round_label, "White": white.spec.name,
                          "Black": black.spec.name, "Result": result, "Termination": reason,
-                         "TimeControl": limits.describe(), "PlyCount": str(len(opening.moves) + len(played))})
+                         "TimeControl": describe_limits(side_limits[chess.WHITE], side_limits[chess.BLACK]),
+                         "PlyCount": str(len(opening.moves) + len(played))})
     return GameResult(result, reason, game)
 
 
@@ -549,11 +574,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--option", action="append", default=[], help="UCI option NAME=VALUE for both engines")
     ap.add_argument("--option1", action="append", default=[], help="UCI option for engine 1 only")
     ap.add_argument("--option2", action="append", default=[], help="UCI option for engine 2 only")
-    lim = ap.add_mutually_exclusive_group(required=True)
+    lim = ap.add_mutually_exclusive_group()
     lim.add_argument("--tc", help="time control 'base+inc' in seconds, e.g. 8+0.08")
     lim.add_argument("--nodes", type=int, help="fixed nodes per move")
     lim.add_argument("--depth", type=int, help="fixed depth per move")
     lim.add_argument("--movetime", type=float, help="fixed seconds per move")
+    for k in ("1", "2"):  # one engine's own limit (time odds, a node-limited opponent), instead of the shared one
+        own = ap.add_mutually_exclusive_group()
+        own.add_argument(f"--tc{k}", help=f"time control of engine {k} only")
+        own.add_argument(f"--nodes{k}", type=int, help=f"fixed nodes per move for engine {k} only")
+        own.add_argument(f"--depth{k}", type=int, help=f"fixed depth per move for engine {k} only")
+        own.add_argument(f"--movetime{k}", type=float, help=f"fixed seconds per move for engine {k} only")
     ap.add_argument("--timemargin", type=float, default=0.0, help="seconds an engine may overrun its clock")
     ap.add_argument("--openings", help="EPD/FEN (one position per line) or PGN file")
     ap.add_argument("--plies", type=int, default=0, help="opening plies to use from PGN games (0 = all)")
@@ -585,12 +616,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         names = [names[0] + "-1", names[1] + "-2"]
     try:
         common = parse_options(args.option)
-        specs = (EngineSpec(names[0], engine_command(args.engine[0]), {**common, **parse_options(args.option1)}),
-                 EngineSpec(names[1], engine_command(args.engine[1]), {**common, **parse_options(args.option2)}))
-        limits = Limits(margin=args.timemargin)
-        if args.tc:
-            limits.base, limits.inc = parse_tc(args.tc)
-        limits.nodes, limits.depth, limits.movetime = args.nodes, args.depth, args.movetime
+        limits = make_limits(args.tc, args.nodes, args.depth, args.movetime, args.timemargin)
+        own = [make_limits(getattr(args, f"tc{k}"), getattr(args, f"nodes{k}"), getattr(args, f"depth{k}"),
+                           getattr(args, f"movetime{k}"), args.timemargin) for k in ("1", "2")]
+        if limits is None and None in own:
+            ap.error("give a limit (--tc, --nodes, --depth or --movetime), or one for each engine (--tc1 ... --tc2 ...)")
+        limits = limits or own[0]
+        specs = (EngineSpec(names[0], engine_command(args.engine[0]), {**common, **parse_options(args.option1)}, own[0]),
+                 EngineSpec(names[1], engine_command(args.engine[1]), {**common, **parse_options(args.option2)}, own[1]))
         openings = load_openings(args.openings, args.plies)
     except (ValueError, OSError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
@@ -614,7 +647,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"ERROR: --resume: {e}", file=sys.stderr)
             return 3
         print(f"Resuming after {sum(match.wdl)} games", flush=True)
-    print(f"{specs[0].name} vs {specs[1].name}: {limits.describe()}, {len(openings)} openings, "
+    shown = describe_limits(specs[0].limits or limits, specs[1].limits or limits)
+    print(f"{specs[0].name} vs {specs[1].name}: {shown}, {len(openings)} openings, "
           f"concurrency {match.concurrency}" + (f", SPRT [{args.sprt[0]:g}, {args.sprt[1]:g}]" if args.sprt else ""),
           flush=True)
     return match.run(args.report)
