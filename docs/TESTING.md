@@ -350,6 +350,23 @@ an engine solves per category at fixed nodes, and with `--baseline` which
 positions a change lost or gained. A solve rate is a regression check, not
 a strength measurement: matches decide.
 
+`tools/suites/nags_sf16.epd` (2026-10-19): 300 positions (163 tactical, 84
+positional, 53 endgame) out of 3,572 analysed, from 3,022 SPRT games
+between head versions at 3+0.03, by Stockfish 16 at 1M nodes (2 threads),
+gap 150 cp:
+
+| Engine (bench) | 10k nodes | 30k nodes | 200k nodes |
+|---|---|---|---|
+| `nags_enhanced` on the head (1399785) | 86.3% (tactical 92.6, positional 78.6, endgame 79.2) | 90.3% | 94.0% (95.1, 95.2, 88.7) |
+
+So the positions are mostly easy for NAGS: the suite catches a change that
+breaks something (a tactic no longer seen, an endgame misjudged), not a few
+Elo. At 10k nodes the batch's experiments (`exp/upcoming-repetition`,
+`exp/probcut`, `exp/ttcapture-lmr`, `exp/rule50-scaling`,
+`exp/capture-history-head`) solve 257-260 against the head's 259, each with
+3-7 positions gained and 5-8 lost: no regression, and nothing beyond the
+noise of fixed-node runs.
+
 ### Speed log
 
 Nodes/second from `bench` (single thread, same VM, idle). These changes do
