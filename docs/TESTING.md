@@ -416,7 +416,7 @@ for part of the time).
 
 | Experiment (branch) | Hypothesis | Bench / speed | Test | Decision | Training impact |
 |---|---|---|---|---|---|
-| Upcoming-repetition detection (`exp/upcoming-repetition`) | A move that can repeat an earlier position (Stockfish's cuckoo tables) lets the side to move claim at least a draw, so alpha can be raised to 0 before searching | 1399785 → 1391069 | SPRT [−5, 0]: running | pending | changes future datagen games, not their format |
+| Upcoming-repetition detection (`exp/upcoming-repetition`) | A move that can repeat an earlier position (Stockfish's cuckoo tables) lets the side to move claim at least a draw, so alpha can be raised to 0 before searching | 1399785 → 1391069 | SPRT [−5, 0]: H1, +4.4 ± 6.7 (4548 games; resumed after two machine restarts); the regression suite at 10k nodes: 258 against the head's 259 | accepted (no regression, probably a small gain) | changes future datagen games, not their format |
 | ProbCut (`exp/probcut`) | A capture whose shallow search beats beta by a margin (200, less 50 when improving) makes the node a cut node; cut it after a depth − 4 search | 1399785 → 1325024 | SPRT [0, 10]: queued | pending | as above |
 | TT capture in LMR (`exp/ttcapture-lmr`) | When the TT move is a capture, quiet moves are less likely to matter: one more ply of reduction | 1399785 → 1337361 | SPRT [0, 10]: queued | pending | as above |
 | Fifty-move evaluation scaling (`exp/rule50-scaling`) | eval · (1 − halfmove/200) prefers progress over shuffling and sees a stale advantage for what it is | 1399785 → 1397756; `search_tests`' KR-K mate in 2 is found a ply later (depth 7), so CI is red on the branch | SPRT [0, 10]: queued | pending | as above |
