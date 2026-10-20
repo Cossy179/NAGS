@@ -557,9 +557,12 @@ batching only removes the per-request overhead. The GPU case has not been
 measured (no GPU here), and that is where batching pays: `python
 tools/gnn_bench.py --models v3 --backends legacy,torch,onnx --device cuda
 --providers tensorrt,cuda,cpu` times every path and checks each one
-against the legacy outputs (`max_dp`, `max_dv`); then `rpc_server.py
---device cuda` (optionally `--backend onnx --providers tensorrt,cuda,cpu
---fp16`) with `NNBatch` 32-64 and `NNPipeline` on. With a fast network
+against the legacy outputs (`max_dp`, `max_dv`); then `python
+tools/e2e_bench.py --model M --device cuda --preset gpu` measures what the
+engine gets from each serving configuration (`rpc_server.py --device cuda`,
+optionally `--backend onnx --providers tensorrt,cuda,cpu --fp16`, with
+`NNBatch` 32-64, `NNPipeline` and `NNGraphs`): MCTS simulations per second,
+round trips, and the alpha-beta arm's depth beside it (docs/TESTING.md). With a fast network
 the server's graph construction (about 0.4 ms a position in Python, one
 core) becomes the limit, near 2,500 positions a second, unless the engine
 sends the graphs (`NNGraphs`, below).

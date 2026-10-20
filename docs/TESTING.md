@@ -82,6 +82,31 @@ covers move generation order and the opening playouts).
   legacy outputs (`max_dp`, `max_dv`); `--device cuda --providers
   tensorrt,cuda,cpu` for the GPU. Speed and results of the inference path
   are in docs/ARCHITECTURE.md ("Neural inference").
+* `tools/e2e_bench.py`: the same end to end, as the engine sees it. For each
+  serving configuration (backend, providers, fp16, `NNBatch`, `NNPipeline`,
+  `NNGraphs`) it starts one `rpc_server.py` and lets `nags` search the same
+  positions for the same time with its MCTS arm on, and reports MCTS
+  simulations per second, positions the server evaluated per second, the
+  round trip and positions per request, and the alpha-beta arm's depth and
+  speed (what the server's CPU use costs it). `--preset gpu --device cuda`
+  is the RTX 3060 run: the old path, the torch backend with and without
+  batching, pipelining and engine-built graphs, fp16, ONNX CUDA and
+  TensorRT. A provider that is not installed is reported as failed and the
+  rest still run. On this repository's 4-core CPU VM (`--preset cpu`, the
+  distilled stand-in network, 8 positions, 1 s a search):
+
+  | Configuration | Sims/s | Round trip | Alpha-beta |
+  |---|---:|---:|---|
+  | `legacy`, `NNBatch` 1 (the original path) | 154 | 6.6 ms | depth 16.9, 1.85M nodes/s |
+  | `torch`, `NNBatch` 1 | 205 (1.3×) | 5.0 ms | 16.9 |
+  | `torch`, `NNBatch` 8 | 274 (1.8×) | 28.5 ms, 7.7 positions | 16.9 |
+  | the same with `NNGraphs` | 318 (2.1×) | 24.5 ms | 17.0 |
+  | `onnx` (CPU provider), `NNBatch` 8, `NNGraphs` | 314 (2.0×) | 24.8 ms | 17.1 |
+
+  Engine-built graphs gain 16% here, twice what the server-side timing
+  suggested: the server's Python graph building also delayed the next
+  request. On the GPU the network's share shrinks, so batching and the
+  graphs should matter more; that is what the GPU run is for.
 * `tools/search_benefit.py`: what more search buys, per decision. Each
   sample position is searched with node budgets N, 2N, 4N, ... and each
   chosen move is scored by a deep reference search; it reports how often
