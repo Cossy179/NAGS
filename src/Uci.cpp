@@ -131,7 +131,7 @@ SearchLimits computeLimits(const GoParams &go, bool whiteToMove, int64_t overhea
     if (time < 0) return limits; // no clock at all: depth/node limited (or unlimited)
 
     int64_t available = std::max<int64_t>(1, time - overhead);
-    int movesToGo = go.movestogo > 0 ? std::min(go.movestogo, 50) : 30;
+    int movesToGo = go.movestogo > 0 ? std::min(go.movestogo, 50) : 20;
     int64_t target = available / movesToGo + inc * 3 / 4;
     int64_t hard = movesToGo == 1 ? available * 9 / 10 : std::min(available / 2, target * 3);
     target = std::min(target, hard);
