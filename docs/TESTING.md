@@ -410,16 +410,18 @@ Experiments in this batch are each tested against `10d3d5a` and merged in
 turn; the combination is checked by a final match of the new head against
 `10d3d5a`.
 
-Roadmap batch, 2026-10-19: on the head `105f7c3`, each against the head
-binary; SPRTs at 3+0.03, 2 at a time (GNN distillation shared the 4-core VM
-for part of the time).
+Roadmap batch, 2026-10-19 to 20: on the head `105f7c3`, each against the
+head binary; SPRTs at 3+0.03, 2 or 3 games at a time (GNN distillation and
+other measurements shared the 4-core VM for part of the time). Of the five
+search changes only upcoming-repetition detection passed; the four rejected
+branches are kept, so the ideas are not repeated without a new hypothesis.
 
 | Experiment (branch) | Hypothesis | Bench / speed | Test | Decision | Training impact |
 |---|---|---|---|---|---|
 | Upcoming-repetition detection (`exp/upcoming-repetition`) | A move that can repeat an earlier position (Stockfish's cuckoo tables) lets the side to move claim at least a draw, so alpha can be raised to 0 before searching | 1399785 → 1391069 | SPRT [−5, 0]: H1, +4.4 ± 6.7 (4548 games; resumed after two machine restarts); the regression suite at 10k nodes: 258 against the head's 259 | accepted (no regression, probably a small gain) | changes future datagen games, not their format |
 | ProbCut (`exp/probcut`) | A capture whose shallow search beats beta by a margin (200, less 50 when improving) makes the node a cut node; cut it after a depth − 4 search | 1399785 → 1325024 | SPRT [0, 10]: H0, −7.7 ± 12.8 (1260 games); regression suite at 10k nodes: 259, as the head | rejected (branch kept) | as above |
 | TT capture in LMR (`exp/ttcapture-lmr`) | When the TT move is a capture, quiet moves are less likely to matter: one more ply of reduction | 1399785 → 1337361 | SPRT [0, 10]: H0, −6.0 ± 11.9 (1280 games); regression suite at 10k nodes: 260 against the head's 259 | rejected (branch kept) | as above |
-| Fifty-move evaluation scaling (`exp/rule50-scaling`) | eval · (1 − halfmove/200) prefers progress over shuffling and sees a stale advantage for what it is | 1399785 → 1397756; `search_tests`' KR-K mate in 2 is found a ply later (depth 7), so CI is red on the branch | SPRT [0, 10]: queued | pending | as above |
+| Fifty-move evaluation scaling (`exp/rule50-scaling`) | eval · (1 − halfmove/200) prefers progress over shuffling and sees a stale advantage for what it is | 1399785 → 1397756; `search_tests`' KR-K mate in 2 is found a ply later (depth 7), so CI is red on the branch | SPRT [0, 10]: H0, −0.8 ± 8.6 (2722 games; resumed after restarts, the last 1400 at 3 games at a time) | rejected (branch kept; the test failure needs no fix) | as above |
 | Capture history on the head (`exp/capture-history-head`) | As `exp/capture-history` (inconclusive against `10d3d5a`), measured on the head | 1399785 → 1346220; first-move cutoffs 84.6% → 85.4% | SPRT [0, 10]: H0, −27.2 ± 19.6 (422 games; an early stop, so the estimate is biased towards the extreme); the code is the original's, so on the head, with correction history and the newer singular extensions, the better ordering costs more than it gives | rejected (branch kept) | as above |
 | GNN serving (`exp/phase1-inference`, `exp/cpp-graph`) | Same replies, less time: fast graph builder, gnn_infer backends (torch bit-identical, ONNX Runtime), threads, batching, reply cache, batched MCTS with virtual loss, engine-built graphs | no bench change; one-position round trip 24.8 → 5.6 ms (bit-identical), MCTS 41 → about 250 simulations/s on one core | tests: bit-identical replies and graphs (thousands of positions), CI | non-functional; options off by default | none: checkpoints, configs and the protocol unchanged (new fields optional) |
 | Hybrid search options (`exp/phase2-hybrid`) | Tree reuse, PUCT growth, FPU, policy temperature, smart stop, time share, TT-valued leaves, root order by prior | no bench change (off by default) | per-move decisions above | kept off: no network good enough to test them in play | none |
