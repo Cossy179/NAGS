@@ -356,7 +356,7 @@ public:
         setRootEval(); // "improving" at ply 2 compares with it
         setPlyMove(0, m);
         board.makeMove(m);
-        int s = -negamax(std::max(0, depth - 1), -beta, -alpha, 1, beta - alpha > 1);
+        int s = -negamax(std::max(0, depth - 1), -beta, -alpha, 1, beta - alpha > 1, beta - alpha <= 1);
         board.unmakeMove();
         if (aborted) return false;
         score = s;
@@ -763,10 +763,10 @@ private:
             board.makeMove(m);
             int score;
             if (i == first) {
-                score = -negamax(depth - 1, -beta, -alpha, 1, true);
+                score = -negamax(depth - 1, -beta, -alpha, 1, true, false);
             } else {
-                score = -negamax(depth - 1, -alpha - 1, -alpha, 1, false);
-                if (!aborted && score > alpha && score < beta) score = -negamax(depth - 1, -beta, -alpha, 1, true);
+                score = -negamax(depth - 1, -alpha - 1, -alpha, 1, false, true);
+                if (!aborted && score > alpha && score < beta) score = -negamax(depth - 1, -beta, -alpha, 1, true, false);
             }
             board.unmakeMove();
             addRootMoveNodes(m, nodes - moveStart);
@@ -800,7 +800,11 @@ private:
 
     // `excluded`: a move to leave out (singular extension verification). Such
     // a search neither uses nor stores TT and tablebase results for the node.
-    int negamax(int depth, int alpha, int beta, int ply, bool isPv, const Move &excluded = Move{}) {
+    // cutNode: a null-window node expected to fail high: every reduced child,
+    // every zero-window child of a PV node, and the unreduced children and
+    // LMR re-searches of an expected all-node. The null move's child and PV
+    // nodes are never cut nodes.
+    int negamax(int depth, int alpha, int beta, int ply, bool isPv, bool cutNode, const Move &excluded = Move{}) {
         pvLength[ply] = ply;
         if (checkStop()) return 0;
         if (board.isDraw()) return 0;
@@ -898,7 +902,7 @@ private:
             plyMoves[ply] = PlyMove{};
             doubleExtensions[ply + 1] = doubleExtensions[ply]; // the null move's subtree continues this line
             board.makeNullMove();
-            int score = -negamax(depth - 1 - reduction, -beta, -beta + 1, ply + 1, false);
+            int score = -negamax(depth - 1 - reduction, -beta, -beta + 1, ply + 1, false, false);
             board.unmakeNullMove();
             if (aborted) return 0;
             if (score >= beta) {
@@ -971,7 +975,7 @@ private:
             if (trySingular && sameMove(m, ttMove)) {
                 int singularBeta = ttScore - 2 * depth;
                 NAGS_STAT(++stats.singularTries);
-                int s = negamax((depth - 1) / 2, singularBeta - 1, singularBeta, ply, false, m);
+                int s = negamax((depth - 1) / 2, singularBeta - 1, singularBeta, ply, false, cutNode, m);
                 if (aborted) return 0;
                 if (s < singularBeta) {
                     // Far below the margin: the TT move is the only move by
@@ -1000,23 +1004,28 @@ private:
             bool givesCheck = board.inCheck();
             int score;
             if (i == 0) {
-                score = -negamax(depth - 1 + extension, -beta, -alpha, ply + 1, isPv);
+                score = -negamax(depth - 1 + extension, -beta, -alpha, ply + 1, isPv, !isPv && !cutNode);
             } else {
                 int reduction = 0;
                 if (depth >= 3 && i >= 2 && quiet && !inCheck && !givesCheck &&
                     !sameMove(m, killers[ply][0]) && !sameMove(m, killers[ply][1])) {
-                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1) - histScore / 8192;
+                    // Two plies more (within the depth - 2 cap) at an expected
+                    // cut node that has not cut off with its first moves: it
+                    // is usually an all-node.
+                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1) - histScore / 8192 +
+                                (cutNode ? 2 : 0);
                     reduction = std::clamp(reduction, 0, depth - 2);
                 }
                 NAGS_STAT(if (reduction) ++stats.lmrSearches);
-                score = -negamax(depth - 1 + extension - reduction, -alpha - 1, -alpha, ply + 1, false);
+                score = -negamax(depth - 1 + extension - reduction, -alpha - 1, -alpha, ply + 1, false,
+                                 reduction > 0 || !cutNode);
                 if (!aborted && reduction && score > alpha) {
                     NAGS_STAT(++stats.lmrResearches);
-                    score = -negamax(depth - 1 + extension, -alpha - 1, -alpha, ply + 1, false);
+                    score = -negamax(depth - 1 + extension, -alpha - 1, -alpha, ply + 1, false, !cutNode);
                 }
                 if (!aborted && score > alpha && score < beta) {
                     NAGS_STAT(++stats.pvsResearches);
-                    score = -negamax(depth - 1 + extension, -beta, -alpha, ply + 1, true);
+                    score = -negamax(depth - 1 + extension, -beta, -alpha, ply + 1, true, false);
                 }
             }
             board.unmakeMove();
