@@ -599,6 +599,18 @@ out of training: prior top-1 21.2% (uniform 5.2%), top-3 46.9%, NLL 2.481
 (uniform 3.182), value correlation with the search 0.964; 3.5 ms a
 position on one CPU core.
 
+The comparison to run once a network is trained at scale is
+`tools/hybrid_eval.py gauntlet`: every arm (`hybrid`, `hybrid-opt`,
+`nn-ab`, and `ab-2t`, `nags_enhanced` with two threads, the cores a hybrid
+uses for its two arms) against `nags_enhanced`, with one GNN server for
+all, the same openings in the same order (each played with both colours),
+the same time control and hash for every engine, and results per arm with
+95% intervals; it resumes after an interruption. At a time control where a
+move gets less than `MctsMinTime` (1000 ms by default) the MCTS arms play
+pure alpha-beta, and it says so: use 60+0.6 or longer, or
+`--mcts-min-time`. With `--concurrency` N it needs about 3N cores (a
+hybrid game runs alpha-beta, MCTS and the server's share).
+
 So the hybrid cannot gain with such a network: its MCTS move agrees with a
 deeper search about half as often as the alpha-beta move does, verification
 (correctly) rejects almost every proposal, and the arm changes about 1% of

@@ -12,6 +12,7 @@
              round trips).
   match      a match (tools/sprt.py) between two arms, with one rpc_server.py serving both:
                ab          nags_enhanced: pure alpha-beta
+               ab-2t       nags_enhanced with two threads: the same cores as a hybrid's two arms
                plain       nags without the network (must equal ab)
                hybrid      nags with the network, default hybrid settings
                hybrid-opt  nags with the network and the hybrid search options (--opt-option)
@@ -22,6 +23,14 @@
   python tools/hybrid_eval.py match --model models/gnn_v3_distill_X.pth --arms hybrid ab --tc 10+0.1 \\
       --concurrency 2 --sprt 0 10 -- --pgnout hybrid.pgn
 
+  gauntlet   every arm against one baseline (default ab) with one rpc_server.py for all:
+             the same openings in the same order (sprt.py --seed), each played with both
+             colours, the same time control and hash for every engine. Results per arm with
+             95% intervals; an interrupted gauntlet continues where it stopped.
+
+  python tools/hybrid_eval.py gauntlet --model models/gnn_v3.pth --device cuda \
+      --arms hybrid hybrid-opt nn-ab ab-2t --tc 60+0.6 --games 400 --concurrency 2 --out-dir gauntlet
+
 Everything after `--` goes to tools/sprt.py as it is.
 """
 
@@ -30,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import statistics
 import subprocess
 import sys
@@ -296,6 +306,7 @@ def arm(name: str, port: int, opt_options: Sequence[str]) -> Dict[str, Any]:
     nn = [f"UseNN=true", f"NNPort={port}", "UseMetaLearner=false"]
     arms = {
         "ab": (_exe("nags_enhanced"), []),
+        "ab-2t": (_exe("nags_enhanced"), ["Threads=2"]),
         "plain": (_exe("nags"), []),
         "hybrid": (_exe("nags"), nn),
         "hybrid-opt": (_exe("nags"), nn + list(opt_options)),
@@ -342,6 +353,108 @@ def match(args: argparse.Namespace, sprt_args: Sequence[str]) -> int:
         return run(0)
     with ServiceProcess("rpc_server.py", server_args, log) as rpc:
         return run(rpc.port)
+
+
+# ----------------------------------------------------------------------------
+# gauntlet
+
+MCTS_ARMS = ("hybrid", "hybrid-opt")
+
+
+def soft_ms(tc: str) -> float:
+    """Roughly the soft limit a move gets at the start of a game (time / 40 + increment)."""
+    base, _, inc = tc.partition("+")
+    return (float(base) / 40 + float(inc or 0)) * 1000
+
+
+def read_status(log: Path) -> Optional[Dict[str, Any]]:
+    """The last status line of a sprt.py log as numbers, and whether the match finished."""
+    if not log.exists():
+        return None
+    text = log.read_text()
+    lines = [l for l in text.splitlines() if l.startswith("Games ")]
+    if not lines:
+        return None
+    m = re.search(r"Games (\d+): \+(\d+) =(\d+) -(\d+) \| penta \[([\d, ]+)\] \| Elo ([+-][\d.]+|nan) ± ([\d.]+|inf)",
+                  lines[-1])
+    if not m:
+        return None
+    return {"games": int(m.group(1)), "wdl": [int(m.group(2)), int(m.group(3)), int(m.group(4))],
+            "penta": [int(x) for x in m.group(5).split(",")], "elo": float(m.group(6)), "error": float(m.group(7)),
+            "finished": "\nEndings: " in "\n" + text or "accepted" in text or "inconclusive" in text}
+
+
+def gauntlet(args: argparse.Namespace, sprt_args: Sequence[str]) -> int:
+    from training_pipeline import ServiceProcess
+
+    if args.baseline in args.arms:
+        raise SystemExit("the baseline is not also an arm")
+    for name in args.arms:
+        arm(name, 0, [])  # unknown names fail before anything starts
+    if args.tc and any(a in MCTS_ARMS for a in args.arms):
+        limit = args.mcts_min_time if args.mcts_min_time is not None else 1000
+        if soft_ms(args.tc) < limit:
+            print(f"WARNING: at {args.tc} a move gets about {soft_ms(args.tc):.0f} ms, under MctsMinTime {limit}: "
+                  "the MCTS arms would mostly play pure alpha-beta (give a longer --tc or --mcts-min-time)",
+                  file=sys.stderr, flush=True)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    server_args = ["--model", args.model, "--device", args.device, "--mc-samples", str(args.mc_samples),
+                   *args.server_arg]
+    if args.concurrency > 1 and not any(a.startswith("--batch-wait-ms") for a in args.server_arg):
+        server_args += ["--batch-wait-ms", "1"]
+    needs_server = any(a in ("hybrid", "hybrid-opt", "nn-ab") for a in [args.baseline, *args.arms])
+
+    def play(port: int) -> List[Dict[str, Any]]:
+        rows = []
+        base = arm(args.baseline, port, args.opt_option or DEFAULT_OPT)
+        for name in args.arms:
+            a = arm(name, port, args.opt_option or DEFAULT_OPT)
+            if name in MCTS_ARMS and args.mcts_min_time is not None:
+                a["options"] = a["options"] + [f"MctsMinTime={args.mcts_min_time}"]
+            log = out_dir / f"{name}_vs_{args.baseline}.log"
+            status = read_status(log)
+            if not (status and status["finished"]):
+                cmd = [sys.executable, str(ROOT / "tools" / "sprt.py"), "--engine", a["engine"], "--engine",
+                       base["engine"], "--name", name, "--name", args.baseline, "--concurrency", str(args.concurrency),
+                       "--seed", str(args.seed), "--openings", args.openings, "--option", f"Hash={args.hash}",
+                       "--pgnout", str(out_dir / f"{name}_vs_{args.baseline}.pgn")]
+                for o in a["options"]:
+                    cmd += ["--option1", o]
+                for o in base["options"]:
+                    cmd += ["--option2", o]
+                if args.tc:
+                    cmd += ["--tc", args.tc]
+                if args.sprt:
+                    cmd += ["--sprt", str(args.sprt[0]), str(args.sprt[1])]
+                if args.games:
+                    cmd += ["--games", str(args.games)]
+                if status:
+                    cmd += ["--resume", str(log)]
+                cmd += list(sprt_args)
+                print(f"== {name} vs {args.baseline}" + (f" (resuming after {status['games']} games)" if status else ""),
+                      flush=True)
+                with open(log, "a") as f:
+                    rc = subprocess.call(cmd, stdout=f, stderr=subprocess.STDOUT)
+                status = read_status(log)
+                if rc == 3 or status is None:
+                    raise SystemExit(f"{name} vs {args.baseline} failed: see {log}")
+            rows.append({"arm": name, "baseline": args.baseline, "options": a["options"], **status})
+            print(f"   {name}: {status['elo']:+.1f} ± {status['error']:.1f} Elo over {status['games']} games", flush=True)
+        return rows
+
+    if needs_server:
+        with ServiceProcess("rpc_server.py", server_args, out_dir / "rpc_server.log") as rpc:
+            rows = play(rpc.port)
+    else:
+        rows = play(0)
+    print(f"\n{'arm':12} {'games':>6} {'W':>5} {'D':>5} {'L':>5} {'Elo vs ' + args.baseline:>18}")
+    for r in rows:
+        print(f"{r['arm']:12} {r['games']:6d} {r['wdl'][0]:5d} {r['wdl'][1]:5d} {r['wdl'][2]:5d} "
+              f"{r['elo']:+10.1f} ± {r['error']:5.1f}")
+    (out_dir / "results.json").write_text(json.dumps({"baseline": args.baseline, "tc": args.tc, "seed": args.seed,
+                                                     "results": rows}, indent=2))
+    return 0
 
 
 # ----------------------------------------------------------------------------
@@ -392,9 +505,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     m.add_argument("--games", type=int)
     m.add_argument("--concurrency", type=int, default=1)
 
+    g = sub.add_parser("gauntlet", parents=[common], help="every arm against one baseline, same openings")
+    g.add_argument("--arms", nargs="+", required=True)
+    g.add_argument("--baseline", default="ab")
+    g.add_argument("--opt-option", action="append", default=[],
+                   help=f"options of the hybrid-opt arm (default: {' '.join(DEFAULT_OPT)})")
+    g.add_argument("--mcts-min-time", type=int, help="MctsMinTime (ms) for the MCTS arms (engine default: 1000)")
+    g.add_argument("--tc")
+    g.add_argument("--sprt", nargs=2, type=float)
+    g.add_argument("--games", type=int)
+    g.add_argument("--concurrency", type=int, default=1)
+    g.add_argument("--seed", type=int, default=1, help="opening order, the same for every arm")
+    g.add_argument("--hash", type=int, default=64, help="MB for every engine")
+    g.add_argument("--out-dir", default="gauntlet", help="logs, PGNs and results.json")
+
     args = ap.parse_args(argv)
     if args.cmd == "match":
         return match(args, sprt_args)
+    if args.cmd == "gauntlet":
+        return gauntlet(args, sprt_args)
     out = accuracy(args) if args.cmd == "accuracy" else decisions(args)
     if getattr(args, "json", None):
         Path(args.json).write_text(json.dumps(out, indent=2))
