@@ -6,6 +6,7 @@ import random
 import sys
 from pathlib import Path
 
+import chess
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -65,3 +66,13 @@ def test_fit_and_policy(tmp_path):
     p = json.loads(out.read_text())
     assert p["oracle"] <= p["rule"] < p["random"] and p["rule"] <= p["uniform_2N"]
     assert dd.auc([0.9, 0.8, 0.1], [1, 1, 0]) == 1.0 and dd.auc([0.1, 0.9], [1, 0]) == 0.0
+
+
+def test_mate_scores_are_capped_in_the_features():
+    board = chess.Board()
+    its = [{"move": "e2e4", "score": 30, "depth": 1}, {"move": "e2e4", "score": 29990, "depth": 2},
+           {"move": "e2e4", "score": 40, "depth": 3}]
+    f = dd.search_features(board, its, 1.0)
+    assert f["score_abs"] == 40 and f["score_drop"] == dd.SCORE_CAP - 40 and f["score_swing"] == dd.SCORE_CAP - 30
+    f = dd.search_features(board, [{"move": "e2e4", "score": -29990, "depth": 1}], 1.0)
+    assert f["score_abs"] == dd.SCORE_CAP and f["score_swing"] == 0

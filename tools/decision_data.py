@@ -41,6 +41,7 @@ from search_benefit import cp, sample_positions, value_of  # noqa: E402
 FEATURES = ("log_budget", "depth", "best_changes", "stable_iterations", "score_abs", "score_drop", "score_swing",
             "legal_moves", "in_check", "pieces")
 CAP = 1000  # cp: a move's loss is counted up to this (mate-sized losses would dominate any mean)
+SCORE_CAP = 2000  # cp: search scores, mates included, as features
 
 
 # ----------------------------------------------------------------------------
@@ -49,7 +50,9 @@ CAP = 1000  # cp: a move's loss is counted up to this (mate-sized losses would d
 def search_features(board: chess.Board, iterations: List[Dict[str, Any]], budget_factor: float) -> Dict[str, float]:
     """What the search knows at its end: per-iteration best moves and scores (last one = its decision)."""
     moves = [it["move"] for it in iterations]
-    scores = [it["score"] for it in iterations]
+    # Mate scores (about 30000) are capped like score_abs: a swing from a mate score to a normal one
+    # would otherwise be some 800 standard deviations of the usual swings, and the model certain.
+    scores = [max(-SCORE_CAP, min(SCORE_CAP, it["score"])) for it in iterations]
     changes = sum(1 for a, b in zip(moves, moves[1:]) if a != b)
     stable = 0
     for a, b in zip(reversed(moves[:-1]), reversed(moves[1:])):
@@ -58,7 +61,7 @@ def search_features(board: chess.Board, iterations: List[Dict[str, Any]], budget
         stable += 1
     last3 = scores[-3:] or [0]
     return {"log_budget": math.log2(budget_factor), "depth": iterations[-1]["depth"] if iterations else 0,
-            "best_changes": changes, "stable_iterations": stable, "score_abs": min(abs(scores[-1]), 2000) if scores else 0,
+            "best_changes": changes, "stable_iterations": stable, "score_abs": abs(scores[-1]) if scores else 0,
             "score_drop": max(0, scores[-2] - scores[-1]) if len(scores) > 1 else 0,
             "score_swing": max(last3) - min(last3), "legal_moves": board.legal_moves.count(),
             "in_check": float(board.is_check()), "pieces": len(board.piece_map())}
