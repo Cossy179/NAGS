@@ -157,6 +157,13 @@ class SearchControl {
 public:
     using Clock = std::chrono::steady_clock;
 
+    // RepetitionRule: false (the default), any earlier occurrence of a position
+    // is a draw, the stronger heuristic for play; true, the laws' rule (a
+    // position from before the root draws only at its third occurrence), so
+    // that a reported score is never a draw the game would not give. Set
+    // between searches only.
+    bool lawsRepetition = false;
+
     void begin(const SearchLimits &l, const std::atomic<bool> *externalStop,
                const std::atomic<bool> *ponderFlag = nullptr) {
         limits = l;
@@ -530,6 +537,13 @@ private:
         return score;
     }
 
+    // A draw, and a draw one move away, at `ply` plies from the root, under the
+    // repetition rule in use (SearchControl::lawsRepetition).
+    bool isDrawAt(int ply) const { return ctl->lawsRepetition ? board.isDraw(ply) : board.isDraw(); }
+    bool drawsInOneAt(int ply) const {
+        return ctl->lawsRepetition ? board.upcomingRepetition(ply) : board.upcomingRepetition();
+    }
+
     // Continuation table for the move played `back` plies before `ply`.
     ContTable *contFor(int ply, int back) const {
         if (ply < back) return nullptr;
@@ -798,11 +812,11 @@ private:
     int negamax(int depth, int alpha, int beta, int ply, bool isPv, const Move &excluded = Move{}) {
         pvLength[ply] = ply;
         if (checkStop()) return 0;
-        if (board.isDraw()) return 0;
+        if (isDrawAt(ply)) return 0;
         if (ply >= MAX_PLY - 1) return eval::evaluate(board);
         // A move that repeats an earlier position is a draw (isDraw), so the
         // node is worth at least that.
-        if (alpha < 0 && board.upcomingRepetition()) {
+        if (alpha < 0 && drawsInOneAt(ply)) {
             alpha = 0;
             if (alpha >= beta) return alpha;
         }
@@ -1108,7 +1122,7 @@ private:
         // A capture into bare kings or a lone minor piece is a dead draw
         // (the network has never seen such positions).
         if (board.isInsufficientMaterial()) return 0;
-        if (alpha < 0 && board.upcomingRepetition()) { // a quiet move draws (see negamax)
+        if (alpha < 0 && drawsInOneAt(ply)) { // a quiet move draws (see negamax)
             alpha = 0;
             if (alpha >= beta) return alpha;
         }
@@ -1185,7 +1199,7 @@ private:
             const bool quietEvasion = inCheck && !eval::isNoisy(board, m);
             board.makeMove(m);
             ++legal;
-            int score = quietEvasion && board.isDraw() ? 0 : -quiescence(-beta, -alpha, ply + 1);
+            int score = quietEvasion && isDrawAt(ply + 1) ? 0 : -quiescence(-beta, -alpha, ply + 1);
             board.unmakeMove();
             if (aborted) return 0;
             if (score > best) {
@@ -1226,6 +1240,8 @@ public:
 
     // Number of best lines reported (UCI MultiPV).
     void setMultiPv(int n) { multiPv = std::max(1, n); }
+    void setLawsRepetition(bool on) { control.lawsRepetition = on; }
+    bool lawsRepetition() const { return control.lawsRepetition; }
     int multiPvCount() const { return multiPv; }
 
     void clearHistory() {

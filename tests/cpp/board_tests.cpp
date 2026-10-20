@@ -172,6 +172,12 @@ static void testDraws() {
     CHECK(!b.isDraw(), "start position reported as draw");
     CHECK(b.applyMovesUCI({"g1f3", "g8f6", "f3g1", "f6g8"}), "knight shuffle rejected");
     CHECK(b.isRepetition(), "repetition of the start position not detected");
+    // The laws' rule (RepetitionRule Laws): a repetition inside the search tree
+    // is a draw, one of a position from before the root (or of the root) only
+    // at its third occurrence; with 0 plies from the root, the claimable threefold.
+    CHECK(!b.isRepetition(0) && !b.isRepetition(4) && !b.isDraw(0), "second occurrence of a pre-root position counted as a draw");
+    CHECK(b.isRepetition(5) && b.isDraw(5), "repetition inside the search tree not detected");
+    CHECK(b.applyMovesUCI({"g1f3", "g8f6", "f3g1", "f6g8"}) && b.isRepetition(0) && b.isDraw(0), "third occurrence not detected");
     b.setStartPos();
     CHECK(b.applyMovesUCI({"e2e4", "g8f6", "g1f3", "f6g8", "f3g1"}), "moves rejected");
     CHECK(!b.isRepetition(), "false repetition after a pawn move");
@@ -298,6 +304,17 @@ static bool someMoveRepeats(TestBoard &b) {
     return false;
 }
 
+// The same with the laws' rule, `fromRoot` plies below a search root.
+static bool someMoveRepeats(TestBoard &b, int fromRoot) {
+    for (const Move &m : b.generateLegalMoves()) {
+        b.makeMove(m);
+        const bool rep = b.isRepetition(fromRoot + 1);
+        b.unmakeMove();
+        if (rep) return true;
+    }
+    return false;
+}
+
 static void testUpcomingRepetition() {
     TestBoard b;
     b.setStartPos();
@@ -312,7 +329,7 @@ static void testUpcomingRepetition() {
     const char *starts[] = {"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
                             "4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1", "r3k3/8/2n5/8/8/5B2/8/4K2R w Kq - 0 1",
                             "1q2k3/8/8/8/8/8/8/1Q2K3 w - - 0 1", "4k3/3n4/8/2b5/8/4N3/8/2R1K3 b - - 0 1"};
-    int positives = 0, positions = 0;
+    int positives = 0, positions = 0, lawsThird = 0, lawsFewer = 0;
     for (int game = 0; game < 400; ++game) {
         b.setFromFEN(starts[game % 5]);
         for (int ply = 0; ply < 80; ++ply) {
@@ -320,9 +337,17 @@ static void testUpcomingRepetition() {
             CHECK(b.upcomingRepetition() == expected, "game %d ply %d: upcomingRepetition %d, a repeating move %d (%s)",
                   game, ply, b.upcomingRepetition(), expected, b.getFEN().c_str());
             positives += expected;
+            for (int fromRoot : {0, 1, 2, 3, 4, 6, 9, 200}) {
+                const bool laws = someMoveRepeats(b, fromRoot);
+                CHECK(b.upcomingRepetition(fromRoot) == laws, "game %d ply %d, %d plies from the root: %d, expected %d (%s)",
+                      game, ply, fromRoot, b.upcomingRepetition(fromRoot), laws, b.getFEN().c_str());
+                lawsThird += fromRoot == 0 && laws;
+                lawsFewer += fromRoot == 0 && expected && !laws;
+            }
             ++positions;
             auto moves = b.generateLegalMoves();
-            if (moves.empty() || b.isDraw()) break;
+            // On to the claimable draw (third occurrence), so that both rules meet repetitions.
+            if (moves.empty() || b.isDraw(0)) break;
             std::vector<Move> quiet;
             for (const Move &m : moves)
                 if (b.pieceAt(m.to) == Piece::None && pieceTypeOf(b.pieceAt(m.from)) != PAWN && !m.isCastling)
@@ -331,11 +356,22 @@ static void testUpcomingRepetition() {
                 b.makeNullMove(); // repetitions are not looked for across a null move
                 continue;
             }
-            const auto &pool = !quiet.empty() && rng() % 10 ? quiet : moves;
+            // Half the time, repeat a position when a move can (third occurrences come up too).
+            std::vector<Move> repeating;
+            if (expected && rng() % 2)
+                for (const Move &m : moves) {
+                    b.makeMove(m);
+                    if (b.isRepetition()) repeating.push_back(m);
+                    b.unmakeMove();
+                }
+            const auto &pool = !repeating.empty() ? repeating : !quiet.empty() && rng() % 10 ? quiet : moves;
             b.makeMove(pool[rng() % pool.size()]);
         }
     }
     CHECK(positives > 300, "only %d of %d positions had a repeating move", positives, positions);
+    // Both cases come up: moves that make a third occurrence, and second ones the laws do not count.
+    CHECK(lawsThird > 50 && lawsFewer > 50, "laws' rule barely exercised: %d third occurrences, %d second ones", lawsThird,
+          lawsFewer);
 }
 #endif
 

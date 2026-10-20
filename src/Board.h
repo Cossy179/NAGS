@@ -69,6 +69,10 @@ public:
     bool isDraw() const;
     bool isRepetition() const;
     bool upcomingRepetition() const { return false; } // FastBoard only (nags_basic searches as before)
+    // The laws' rule inside a search (see FastBoard::isDraw(int)).
+    bool isDraw(int pliesFromRoot) const;
+    bool isRepetition(int pliesFromRoot) const;
+    bool upcomingRepetition(int) const { return false; }
     bool isInsufficientMaterial() const;
 
     uint64_t perft(int depth);

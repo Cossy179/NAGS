@@ -92,6 +92,14 @@ public:
     // of the Zobrist differences of all piece moves on an empty board, as in
     // Stockfish's upcoming_repetition (Kelly, 2013).
     bool upcomingRepetition() const;
+    // The laws' rule inside a search whose root is `pliesFromRoot` plies back
+    // (RepetitionRule "Laws"): a repetition of a position from the search tree
+    // is still a draw (either side could repeat it again), one of a position
+    // from before the root, or of the root, only at its third occurrence.
+    // With 0 every position is from before the root: the claimable threefold.
+    bool isDraw(int pliesFromRoot) const;
+    bool isRepetition(int pliesFromRoot) const;
+    bool upcomingRepetition(int pliesFromRoot) const;
     bool isInsufficientMaterial() const;
 
     static bool isValidSquare(int sq) { return sq >= 0 && sq < 64; }

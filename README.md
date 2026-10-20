@@ -121,6 +121,7 @@ The NNUE network is embedded when available. The Python services are **not** req
 | `Hash` | Transposition-table memory |
 | `Threads` | Lazy SMP worker count |
 | `MultiPV` | Number of reported candidate lines |
+| `RepetitionRule` | `Twofold` (default): any earlier occurrence of a position is a draw, the stronger search heuristic; `Laws`: a position from before the search only draws at its third occurrence, so no reported score is a draw the rules would not give |
 | `UseNNUE` / `EvalFile` | Enable NNUE or select a compatible network |
 | `SyzygyPath` / `SyzygyProbeLimit` | Endgame tablebase probing |
 | `Move Overhead` | Reserve time for GUI/system latency |

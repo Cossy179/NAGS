@@ -929,6 +929,44 @@ bool FastBoard::upcomingRepetition() const {
     return false;
 }
 
+bool FastBoard::isRepetition(int pliesFromRoot) const {
+    const int n = static_cast<int>(history.size());
+    int stop = n - std::min(halfmoveClock, pliesFromNull);
+    if (stop < 0) stop = 0;
+    int earlier = 0;
+    for (int i = n - 2; i >= stop; i -= 2)
+        if (history[i].hash == hash && (i > n - pliesFromRoot || ++earlier >= 2)) return true;
+    return false;
+}
+
+bool FastBoard::isDraw(int pliesFromRoot) const {
+    if (halfmoveClock >= 100) return !inCheck() || !generateLegalMoves().empty();
+    return isRepetition(pliesFromRoot) || isInsufficientMaterial();
+}
+
+bool FastBoard::upcomingRepetition(int pliesFromRoot) const {
+    // As upcomingRepetition(), but a move back to a position from before the
+    // root (i >= pliesFromRoot plies back) draws only if that position had
+    // occurred before too, so that the move makes its third occurrence.
+    const int n = static_cast<int>(history.size());
+    const int end = std::min({halfmoveClock, pliesFromNull, n});
+    if (end < 3) return false;
+    uint64_t other = hash ^ history[n - 1].hash ^ zSide;
+    for (int i = 3; i <= end; i += 2) {
+        other ^= history[n - i + 1].hash ^ history[n - i].hash ^ zSide;
+        if (other != 0) continue;
+        const uint64_t moveKey = hash ^ history[n - i].hash;
+        int j = static_cast<int>(moveKey & (kCuckooSize - 1));
+        if (cuckooKey[j] != moveKey) j = static_cast<int>((moveKey >> 16) & (kCuckooSize - 1));
+        if (cuckooKey[j] != moveKey) continue;
+        if (betweenBB[cuckooFrom[j]][cuckooTo[j]] & all_occupied) continue;
+        if (i < pliesFromRoot) return true;
+        for (int k = n - i - 2; k >= n - end; k -= 2)
+            if (history[k].hash == history[n - i].hash) return true;
+    }
+    return false;
+}
+
 bool FastBoard::isInsufficientMaterial() const {
     for (int c = 0; c < 2; ++c)
         if (pieces[c][PAWN] | pieces[c][ROOK] | pieces[c][QUEEN]) return false;
