@@ -87,6 +87,11 @@ public:
     // The moves since the last capture, pawn move or null move (those the
     // repetition rules look back over), oldest first.
     std::vector<Move> recentMoves() const;
+    // The side to move has a move to a position that occurred before (so,
+    // with isDraw()'s single repetition, a move that draws): a cuckoo table
+    // of the Zobrist differences of all piece moves on an empty board, as in
+    // Stockfish's upcoming_repetition (Kelly, 2013).
+    bool upcomingRepetition() const;
     bool isInsufficientMaterial() const;
 
     static bool isValidSquare(int sq) { return sq >= 0 && sq < 64; }
@@ -197,6 +202,13 @@ private:
     }
 
     static uint64_t zPiece[12][64];
+    // Cuckoo table: key = zPiece[p][a] ^ zPiece[p][b] ^ zSide for every
+    // non-pawn piece p and squares a < b it moves between; slots without a
+    // move have cuckooFrom -1.
+    static constexpr int kCuckooSize = 8192;
+    static uint64_t cuckooKey[kCuckooSize];
+    static int8_t cuckooFrom[kCuckooSize], cuckooTo[kCuckooSize];
+    static Bitboard betweenBB[64][64]; // squares strictly between two squares on a line
     static int psqValue[12][64]; // contribution of a piece on a square to psq
     static int phaseValue[12];
     static uint64_t zSide;

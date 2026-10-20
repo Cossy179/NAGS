@@ -800,6 +800,12 @@ private:
         if (checkStop()) return 0;
         if (board.isDraw()) return 0;
         if (ply >= MAX_PLY - 1) return eval::evaluate(board);
+        // A move that repeats an earlier position is a draw (isDraw), so the
+        // node is worth at least that.
+        if (alpha < 0 && board.upcomingRepetition()) {
+            alpha = 0;
+            if (alpha >= beta) return alpha;
+        }
 
         // Mate distance pruning.
         alpha = std::max(alpha, -MATE_SCORE + ply);
@@ -1102,6 +1108,10 @@ private:
         // A capture into bare kings or a lone minor piece is a dead draw
         // (the network has never seen such positions).
         if (board.isInsufficientMaterial()) return 0;
+        if (alpha < 0 && board.upcomingRepetition()) { // a quiet move draws (see negamax)
+            alpha = 0;
+            if (alpha >= beta) return alpha;
+        }
 
         const bool isPv = beta - alpha > 1;
         const uint64_t key = board.zobrist();
