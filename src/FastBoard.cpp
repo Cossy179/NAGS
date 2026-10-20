@@ -462,7 +462,8 @@ bool FastBoard::setFromFEN(const std::string &fen) {
         if (sq < 0 || ep.size() != 2) return false;
         // An impossible en-passant square is ignored (most engines do the
         // same); an en-passant capture would remove a pawn that is not there.
-        if (plausibleEpSquare(b, sq, b.side)) b.epSquare = sq;
+        // So is one no pawn could capture on (FenChecks.h).
+        if (plausibleEpSquare(b, sq, b.side) && epCapturable(b, sq, b.side)) b.epSquare = sq;
     }
     if (b.inCheck(opposite(b.side))) return false;
 
@@ -773,8 +774,11 @@ void FastBoard::makeMove(const Move &m) {
 
     int movingType = pieceTypeOf(moving);
     if (movingType == PAWN && (m.to - m.from == 16 || m.from - m.to == 16)) {
-        epSquare = (m.from + m.to) / 2;
-        hash ^= zEnpassant[epSquare & 7];
+        const int ep = (m.from + m.to) / 2;
+        if (epCapturable(*this, ep, opposite(side))) {  // FenChecks.h
+            epSquare = ep;
+            hash ^= zEnpassant[epSquare & 7];
+        }
     }
 
     if (movingType == PAWN || entry.captured != Piece::None) halfmoveClock = 0;

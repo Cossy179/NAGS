@@ -512,7 +512,8 @@ private:
     }
 
     // Order: TT move, winning/equal captures and promotions (MVV/LVA), killers
-    // and the countermove, losing captures (negative SEE), quiet moves by history.
+    // and the countermove, quiet moves by history, losing captures and promotions
+    // (negative SEE).
     int moveScore(const Move &m, const Move &ttMove, int ply, const Move &counter = Move{},
                   const ContTable *cont1 = nullptr, const ContTable *cont2 = nullptr) const {
         if (!ttMove.isNull() && sameMove(m, ttMove)) return 1 << 30;
@@ -521,7 +522,7 @@ private:
             int attacker = eval::pieceValue(board.pieceAt(m.from));
             int score = victim * 16 - attacker / 16;
             if (m.promotion != Piece::None) score += eval::pieceValue(m.promotion) * 16;
-            return (eval::see(board, m) >= 0 ? (1 << 24) : (1 << 22)) + score;
+            return (eval::see(board, m) >= 0 ? (1 << 24) : -(1 << 24)) + score; // losing ones below every quiet move
         }
         if (ply < MAX_PLY) {
             if (sameMove(m, killers[ply][0])) return (1 << 23) + 2;
@@ -593,16 +594,17 @@ private:
     }
 
     // Staged move ordering for one node: TT move, winning/equal captures
-    // (MVV/LVA), killers and countermove, losing captures, quiet moves by
-    // history (ties in generation order). Moves are generated only when their
-    // stage is reached: a TT move cutoff needs no move generation at all, and
-    // quiet moves are generated and scored (with the history as it is then)
-    // only after the captures and killers.
+    // (MVV/LVA), killers and countermove, quiet moves by history (ties in
+    // generation order), losing captures and promotions (negative SEE).
+    // Moves are generated only when their stage is reached: a TT move cutoff
+    // needs no move generation at all, and quiet moves are generated and
+    // scored (with the history as it is then) only after the captures and
+    // killers.
     class MovePicker {
     public:
         MovePicker(const SearchWorker &w, const Move &ttMove, int ply, const Move &counter, const ContTable *cont1,
-                   const ContTable *cont2, bool noisyOnly)
-            : w(w), cont1(cont1), cont2(cont2), noisyOnly(noisyOnly) {
+                   const ContTable *cont2, bool noisyOnly, const ContTable *cont4 = nullptr)
+            : w(w), cont1(cont1), cont2(cont2), cont4(cont4), noisyOnly(noisyOnly) {
             if (!ttMove.isNull() && w.board.toPseudoLegal(ttMove, tt) && (!noisyOnly || eval::isNoisy(w.board, tt)))
                 hasTt = true;
             if (ply < MAX_PLY) {
@@ -638,18 +640,32 @@ private:
                     moves.push_back(m);
                     return found(moves.size() - 1, false);
                 }
-                stage = Stage::LosingCaptures;
-            }
-            if (stage == Stage::LosingCaptures) {
-                if (nBad && !skipLosingCaptures) return found(take(bad, nBad), true);
                 stage = Stage::Quiets;
             }
-            if (!quietsGenerated) generateQuiets();
-            if (nQuiet) return found(take(quiet, nQuiet), false);
+            if (stage == Stage::Quiets) {
+                if (!quietsGenerated) generateQuiets();
+                if (nQuiet) return found(take(quiet, nQuiet), false);
+                stage = Stage::LosingCaptures;
+            }
+            if (nBad && !skipLosingCaptures) return found(take(bad, nBad), true);
             return -1;
         }
 
         const Move &moveAt(int k) const { return moves[k]; }
+        // Drops the quiet moves not returned yet, once the picker has reached
+        // their stage: late-move and futility pruning would skip every one of
+        // them (nothing is searched between them that could change that).
+        // Other stages are unaffected, so the search is the same.
+        // Returns the number of moves dropped other than `excluded` (for the
+        // pruning statistics; counted only in NAGS_STATS builds).
+        int skipQuietMoves(const Move &excluded) {
+            if (stage != Stage::Quiets) return 0;
+            int dropped = 0;
+            if constexpr (kSearchStats)
+                for (int k = 0; k < nQuiet; ++k) dropped += !sameMove(moves[quiet[k]], excluded);
+            nQuiet = 0;
+            return dropped;
+        }
         // Stage of the move last returned by next(): 0 TT move, 1 winning
         // capture, 2 killer/countermove, 3 losing capture, 4 quiet.
         int lastStage() const { return lastStageIdx; }
@@ -658,7 +674,7 @@ private:
         int seeOfLast() const { return lastSeeKnown ? see[last] : eval::see(w.board, moves[last]); }
 
     private:
-        enum class Stage { Tt, GoodCaptures, Special, LosingCaptures, Quiets };
+        enum class Stage { Tt, GoodCaptures, Special, Quiets, LosingCaptures };
 
         int found(int k, bool seeKnown) {
             last = k;
@@ -705,10 +721,11 @@ private:
                 for (int j = 0; j < 3; ++j) dup |= emitted[j] && sameMove(m, special[j]);
                 if (dup) continue;
                 int s = w.history[stm][m.from][m.to];
-                if (cont1 || cont2) {
+                if (cont1 || cont2 || cont4) {
                     const int piece = static_cast<int>(b.pieceAt(m.from)) - 1;
                     if (cont1) s += (*cont1)[piece][m.to];
                     if (cont2) s += (*cont2)[piece][m.to];
+                    if (cont4) s += (*cont4)[piece][m.to];
                 }
                 score[k] = s;
                 quiet[nQuiet++] = static_cast<uint8_t>(k);
@@ -732,7 +749,7 @@ private:
         }
 
         const SearchWorker &w;
-        const ContTable *cont1, *cont2;
+        const ContTable *cont1, *cont2, *cont4;
         const bool noisyOnly;
         MoveList moves;
         int score[MoveList::kCapacity];
@@ -926,8 +943,11 @@ private:
         // tried (most nodes cut off after a few moves).
         const Move prevMove = board.lastMove();
         const Move counter = counterMoveFor(prevMove);
-        ContTable *cont1 = contFor(ply, 1), *cont2 = contFor(ply, 2);
-        MovePicker picker(*this, ttMove, ply, counter, cont1, cont2, false);
+        // Continuation history after the moves one, two and four plies back
+        // (the last orders quiet moves only; pruning and reductions use the
+        // first two).
+        ContTable *cont1 = contFor(ply, 1), *cont2 = contFor(ply, 2), *cont4 = contFor(ply, 4);
+        MovePicker picker(*this, ttMove, ply, counter, cont1, cont2, false, cont4);
 
         const Color us = board.sideToMove();
         int originalAlpha = alpha;
@@ -958,11 +978,13 @@ private:
             // searched, so checkmate / stalemate detection is unaffected.
             if (!isPv && !inCheck && quiet && i > 0 && depth <= 3 && std::abs(alpha) < MATE_BOUND) {
                 if (quietsTried >= (3 + depth * depth) / (improving ? 1 : 2)) { // late-move pruning
-                    NAGS_STAT(++stats.lmp);
+                    [[maybe_unused]] const int dropped = picker.skipQuietMoves(excluded);
+                    NAGS_STAT(stats.lmp += 1 + dropped);
                     continue;
                 }
                 if (staticEval + 120 * depth <= alpha) { // futility pruning
-                    NAGS_STAT(++stats.futility);
+                    [[maybe_unused]] const int dropped = picker.skipQuietMoves(excluded);
+                    NAGS_STAT(stats.futility += 1 + dropped);
                     continue;
                 }
                 if (histScore < -4096 * depth) { // history pruning
@@ -1061,7 +1083,7 @@ private:
                                 const Move &qm = picker.moveAt(quietsSearched[q]);
                                 updateHistory(table[qm.from][qm.to], -bonus);
                             }
-                            for (ContTable *cont : {cont1, cont2}) {
+                            for (ContTable *cont : {cont1, cont2, inCheck ? nullptr : cont4}) {
                                 if (!cont) continue;
                                 updateContHistory((*cont)[static_cast<int>(board.pieceAt(m.from)) - 1][m.to], bonus);
                                 for (int q = 0; q < nQuietsSearched; ++q) {
