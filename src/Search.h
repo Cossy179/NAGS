@@ -923,6 +923,12 @@ private:
         const int ttScore = ttHit ? scoreFromTT(hit.score, ply) : 0;
         const bool trySingular = !excluding && depth >= 6 && ttHit && !ttMove.isNull() && hit.depth >= depth - 3 &&
                                  hit.bound != Bound::Upper && std::abs(ttScore) < TB_BOUND && ply < MAX_PLY / 2;
+        // A capture as the best move found before: quiet moves are less
+        // likely to matter here, so they are reduced a ply more.
+        // (The TT keeps from/to/promotion only: toPseudoLegal restores the
+        // en-passant flag and checks the move fits this position.)
+        Move ttPseudo;
+        const bool ttCapture = !ttMove.isNull() && board.toPseudoLegal(ttMove, ttPseudo) && eval::isNoisy(board, ttPseudo);
 
         int i = 0; // number of legal moves tried so far
         int quietsTried = 0;
@@ -1005,7 +1011,8 @@ private:
                 int reduction = 0;
                 if (depth >= 3 && i >= 2 && quiet && !inCheck && !givesCheck &&
                     !sameMove(m, killers[ply][0]) && !sameMove(m, killers[ply][1])) {
-                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1) - histScore / 8192;
+                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1) + (ttCapture ? 1 : 0) -
+                                histScore / 8192;
                     reduction = std::clamp(reduction, 0, depth - 2);
                 }
                 NAGS_STAT(if (reduction) ++stats.lmrSearches);
