@@ -102,6 +102,34 @@ does well there is a candidate for the engine's soft limit, and then for an
 SPRT; this replaces game results credited to every move as the signal for
 learning how to spend time.
 
+First measurement (2026-10-19, `nags_enhanced` on the head, bench 1399785):
+599 positions (two seeds of 300, `nags_balanced.epd` after random plies),
+N = 20,000 nodes, budgets N to 8N, reference 64N. Twice the budget changed
+the move in 10.3% of the decisions. Held-out (a quarter of the positions):
+log-loss 0.263 against 0.351 for the base rate, AUC 0.859. The weights per
+standard deviation say where more search pays: not after many stable
+iterations (−1.50, by far the strongest), after a score drop (+0.34), not
+in check (−0.41, few choices), fewer legal moves (+0.23 the other way),
+more depth (+0.23); the score itself, its swing and the material matter
+little. Mean loss against the reference at the same nodes as 2N
+everywhere:
+
+| Allocation | Mean loss (cp) |
+|---|---:|
+| 2N everywhere | 5.7 |
+| N or 4N at random (a third get 4N) | 4.3 |
+| N or 4N by the model | 3.5 |
+| N or 4N in hindsight | 2.1 |
+
+The model takes a third of what hindsight gains over random allocation,
+and its strongest inputs are the ones the engine's time management already
+scales by (best-move stability, score drops, node share): this supports
+the existing rules rather than replacing them. That more search pays
+unevenly (random N/4N beats 2N everywhere) is the case for spending time
+by position at all. These are shallow budgets (20k-160k nodes); a rule
+for the engine's soft limit from this model is still to be written and
+SPRT-tested.
+
 ## 3. Strength: SPRT matches with `tools/sprt.py`
 
 Build the baseline (for example the `main` branch) into a separate directory,
