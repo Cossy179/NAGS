@@ -77,3 +77,39 @@ def test_decisions(tmp_path):
     assert len(rows) == 2 and all(r["alpha_beta_move"] and r["reference_best"] for r in rows)
     summary = json.loads((tmp_path / "summary.json").read_text())
     assert summary["positions"] == 2 and sum(summary["categories"].values()) == 2
+
+
+def test_gauntlet_status_and_tc(tmp_path):
+    log = tmp_path / "x.log"
+    assert hybrid_eval.read_status(log) is None
+    log.write_text("a vs b: nodes 2000\nGames 2: +1 =1 -0 | penta [0, 0, 1, 1, 0] | Elo +191.0 ± 900.1\n")
+    s = hybrid_eval.read_status(log)
+    assert s["games"] == 2 and s["wdl"] == [1, 1, 0] and s["penta"] == [0, 0, 1, 1, 0] and not s["finished"]
+    log.write_text(log.read_text() + "Games 4: +2 =1 -1 | penta [0, 1, 0, 1, 0] | Elo +88.0 ± 410.0\n"
+                                     "Endings: checkmate 3, threefold_repetition 1\n")
+    s = hybrid_eval.read_status(log)
+    assert s["games"] == 4 and s["elo"] == 88.0 and s["error"] == 410.0 and s["finished"]
+    assert hybrid_eval.soft_ms("10+0.1") == pytest.approx(350.0) and hybrid_eval.soft_ms("60") == pytest.approx(1500.0)
+
+
+@pytest.mark.skipif(not (ROOT / "build" / "nags").exists(), reason="nags not built")
+def test_gauntlet(tmp_path, capsys):
+    model = tmp_path / "v3.pth"
+    _tiny_checkpoint(model)
+    out = tmp_path / "g"
+    argv = ["gauntlet", "--model", str(model), "--arms", "hybrid", "ab-2t", "--mcts-min-time", "0", "--games", "2",
+            "--out-dir", str(out), "--", "--nodes", "3000"]
+    assert hybrid_eval.main(argv) == 0
+    res = json.loads((out / "results.json").read_text())
+    assert res["baseline"] == "ab" and [r["arm"] for r in res["results"]] == ["hybrid", "ab-2t"]
+    assert all(r["games"] == 2 and r["finished"] for r in res["results"])
+    assert "MctsMinTime=0" in res["results"][0]["options"] and "Threads=2" in res["results"][1]["options"]
+    # Run again: both matches are finished, so nothing is played and the results stand.
+    capsys.readouterr()
+    assert hybrid_eval.main(argv) == 0
+    assert "==" not in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        hybrid_eval.main(["gauntlet", "--model", str(model), "--arms", "ab", "--out-dir", str(out)])
+    # An unknown arm fails before anything is played.
+    with pytest.raises(SystemExit):
+        hybrid_eval.main(["gauntlet", "--model", str(model), "--arms", "nonsense", "--out-dir", str(out)])

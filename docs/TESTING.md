@@ -605,6 +605,18 @@ embedded, `nags_fast`, `nags_enhanced` and `nags` bench with NNUE;
 Whether the hybrid can gain strength depends on a trained GNN, which has not
 been trained yet.
 
+The comparison to run once a network is trained at scale is
+`tools/hybrid_eval.py gauntlet`: every arm (`hybrid`, `hybrid-opt`,
+`nn-ab`, and `ab-2t`, `nags_enhanced` with two threads, the cores a hybrid
+uses for its two arms) against `nags_enhanced`, with one GNN server for
+all, the same openings in the same order (each played with both colours),
+the same time control and hash for every engine, and results per arm with
+95% intervals; it resumes after an interruption. At a time control where a
+move gets less than `MctsMinTime` (1000 ms by default) the MCTS arms play
+pure alpha-beta, and it says so: use 60+0.6 or longer, or
+`--mcts-min-time`. With `--concurrency` N it needs about 3N cores (a
+hybrid game runs alpha-beta, MCTS and the server's share).
+
 The reduction table alone was tested first, at 5+0.05, and stopped
 undecided at +21.2 ± 21.9 after 674 games (LLR 1.29); it was then tested
 together with the pruning at the faster 3+0.03 to get more games per hour.
