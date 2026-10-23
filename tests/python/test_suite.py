@@ -40,8 +40,10 @@ def test_make_and_run(tmp_path):
         "6k1/5ppp/8/8/8/8/5PPP/R5K1 w - -",                               # Ra8#
     ]) + "\n")
     out = tmp_path / "suite.epd"
+    # Qxd5 leaves a queen up, which some networks score above the default --max-score (1500).
     assert suite.main(["make", "--source", str(src), "--plies", "0", "--count", "3", "--reference",
-                       _engine("nags_enhanced"), "--nodes", "20000", "--min-gap", "100", "--out", str(out)]) == 0
+                       _engine("nags_enhanced"), "--nodes", "20000", "--min-gap", "100", "--max-score", "100000",
+                       "--out", str(out)]) == 0
     rows = suite.read_suite(str(out))
     assert {r["bm"][0] for r in rows} == {"f3f7", "d1d5", "a1a8"}
     assert {r["category"] for r in rows} <= set(suite.CATEGORIES)
@@ -72,9 +74,10 @@ def test_make_with_too_few_qualifying_positions(tmp_path):
     src = tmp_path / "src.epd"
     src.write_text("4k3/8/8/3q4/8/8/8/3QK3 w - -\n" + chess.STARTING_FEN.rsplit(" ", 2)[0] + "\n")
     out = tmp_path / "suite.epd"
-    # Only Qxd5 qualifies; the run stops after --max-candidates and writes what it found.
+    # Only Qxd5 qualifies (a queen up: --max-score as above); the run stops after --max-candidates
+    # and writes what it found.
     assert suite.main(["make", "--source", str(src), "--plies", "0", "--count", "5", "--max-candidates", "50",
                        "--reference", _engine("nags_enhanced"), "--nodes", "20000", "--min-gap", "100",
-                       "--out", str(out)]) == 0
+                       "--max-score", "100000", "--out", str(out)]) == 0
     assert [r["bm"] for r in suite.read_suite(str(out))] == [["d1d5"]]
     assert not (tmp_path / "suite.epd.partial").exists()
