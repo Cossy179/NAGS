@@ -307,6 +307,72 @@ A more reliable absolute rating needs longer time controls, or engines with
 published CCRL ratings as opponents. Use the same ladder and time control
 when comparing future versions.
 
+### Ladder: unrestricted opponents at fixed strength (`tools/ladder.py`)
+
+The `UCI_Elo` scale above ends at 3190, where NAGS already scores 35%.
+`tools/ladder.py` rates against Stockfish at full strength instead, held
+fixed by a node limit per move (`tools/ladder/sf16_nodes.json`: 8k to 512k
+nodes, one thread): a node-limited engine plays the same moves on any
+machine, so the ladder's scale stays put across hardware and over time.
+`anchor` plays each rung against the next once and stores the rungs'
+ratings on the ladder's own scale (errors accumulate along the ladder and
+are stored with them); `rate` plays an engine against the rungs near its
+strength, combines the results by inverse variance (including the rungs'
+own uncertainty) and appends the rating, bench signature, machine and
+limits to a results file. Rating NAGS at a time control on two machines
+measures what the hardware is worth; rating it with `--nodes` takes the
+hardware out entirely. `tools/sprt.py` takes per-engine limits for this
+(`--tc1` / `--tc2`, `--nodes1` / `--nodes2`, `--depth1/2`, `--movetime1/2`),
+which also gives time-odds matches. Leela Chess Zero needs its GPU backend
+to play at strength, so it belongs in a ladder run on the GPU machine
+(any UCI engine can be a rung).
+
+First measurements (2026-10-19, 4-core Xeon VM; the three lowest rungs
+anchored, 200 games a match; deterministic at fixed nodes, so a repeated
+match gives the same games):
+
+| Rung | Rating | Measured against |
+|---|---:|---|
+| sf16-8k | 0 (base) | – |
+| sf16-16k | +175 ± 36 | +175 ± 36 over sf16-8k (8k scored +11 =85 −104) |
+| sf16-32k | +324 ± 49 | +149 ± 33 over sf16-16k |
+
+| Engine (bench) | Limits | Games per rung | Result per rung (W D L for the engine) | Rating |
+|---|---|---:|---|---:|
+| `nags_enhanced` on the head (1399785), Hash 64 | 256,000 nodes a move | 100 | 8k: 29 34 37 (−28 ± 62); 16k: 10 35 55 (+7 ± 67); 32k: 6 21 73 (+43 ± 92) | −1 ± 41 |
+
+So NAGS needs about 32 times Stockfish 16's nodes for the same strength
+(256k nodes is about 0.14 s of NAGS search on this machine, roughly a move
+at 10+0.1). The higher rungs (64k-512k) are not anchored yet; `anchor`
+skips the three above, so they only cost the matches still missing.
+
+### Suites (`tools/suite.py`)
+
+`make` picks positions whose best move, by a deep reference search
+(Stockfish 16 by default, MultiPV 2), beats every other by at least 150 cp,
+and files them as tactical (capture, promotion, check or mate), endgame (at
+most six pieces besides the kings) or positional; `run` reports how many
+an engine solves per category at fixed nodes, and with `--baseline` which
+positions a change lost or gained. A solve rate is a regression check, not
+a strength measurement: matches decide.
+
+`tools/suites/nags_sf16.epd` (2026-10-19): 300 positions (163 tactical, 84
+positional, 53 endgame) out of 3,572 analysed, from 3,022 SPRT games
+between head versions at 3+0.03, by Stockfish 16 at 1M nodes (2 threads),
+gap 150 cp:
+
+| Engine (bench) | 10k nodes | 30k nodes | 200k nodes |
+|---|---|---|---|
+| `nags_enhanced` on the head (1399785) | 86.3% (tactical 92.6, positional 78.6, endgame 79.2) | 90.3% | 94.0% (95.1, 95.2, 88.7) |
+
+So the positions are mostly easy for NAGS: the suite catches a change that
+breaks something (a tactic no longer seen, an endgame misjudged), not a few
+Elo. At 10k nodes the batch's experiments (`exp/upcoming-repetition`,
+`exp/probcut`, `exp/ttcapture-lmr`, `exp/rule50-scaling`,
+`exp/capture-history-head`) solve 257-260 against the head's 259, each with
+3-7 positions gained and 5-8 lost: no regression, and nothing beyond the
+noise of fixed-node runs.
+
 ### Speed log
 
 Nodes/second from `bench` (single thread, same VM, idle). These changes do

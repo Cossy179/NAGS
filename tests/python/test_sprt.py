@@ -223,3 +223,61 @@ def test_engine_paths_stay_whole(tmp_path):
     exe.write_text("")
     assert sprt.engine_command(str(exe)) == [str(exe)]
     assert sprt.engine_command("python3 -u engine.py") == ["python3", "-u", "engine.py"]
+
+
+class _RecordingEngine:
+    def __init__(self, log):
+        self.log = log
+
+    def play(self, board, limit, info=None, game=None):
+        self.log.append((board.turn, limit))
+        return type("Play", (), {"move": next(iter(board.legal_moves)), "info": {}})()
+
+
+class _RecordingPlayer:
+    def __init__(self, spec, log):
+        self.spec = spec
+        self.engine = _RecordingEngine(log)
+
+    def ensure(self):
+        return self.engine
+
+    def kill(self):
+        pass
+
+
+def test_per_engine_limits():
+    """Time odds and a node-limited opponent: each side gets its own limit."""
+    log = []
+    timed = sprt.EngineSpec("timed", ["x"], {}, sprt.make_limits("10+0.1", None, None, None, 0.0))
+    nodes = sprt.EngineSpec("nodes", ["y"], {}, sprt.make_limits(None, 5000, None, None, 0.0))
+    shared = sprt.make_limits(None, None, 3, None, 0.0)
+    adj = sprt.Adjudication(max_plies=6)
+    opening = sprt.Opening(chess.STARTING_FEN, [])
+    game = sprt.play_game(_RecordingPlayer(timed, log), _RecordingPlayer(nodes, log), opening, shared, adj)
+    assert len(log) == 6
+    for turn, limit in log:
+        if turn == chess.WHITE:  # the timed engine: its clock, and its own shown for the clockless opponent
+            assert limit.nodes is None and limit.white_inc == 0.1 and limit.black_clock == limit.white_clock
+        else:
+            assert limit.nodes == 5000 and limit.white_clock is None
+    assert game.game.headers["TimeControl"] == "10+0.1 vs nodes 5000"
+    # Without its own limits an engine plays with the match's.
+    log.clear()
+    plain = sprt.EngineSpec("plain", ["z"], {})
+    sprt.play_game(_RecordingPlayer(plain, log), _RecordingPlayer(nodes, log), opening, shared, adj)
+    assert {l.depth for t, l in log if t == chess.WHITE} == {3} and {l.nodes for t, l in log if t == chess.BLACK} == {5000}
+    assert sprt.describe_limits(shared, shared) == "depth 3"
+
+
+@needs_engines
+def test_time_odds_match_end_to_end(tmp_path, capsys):
+    code = sprt.main(["--engine", _engine("nags_fast"), "--engine", _engine("nags_basic"), "--tc1", "1+0.01",
+                      "--nodes2", "500", "--games", "2", "--openings", str(ROOT / "tools/openings/nags_balanced.epd"),
+                      "--report", "1000"])
+    assert code == 0
+    assert "1+0.01 vs nodes 500" in capsys.readouterr().out
+    with pytest.raises(SystemExit):  # no limit at all
+        sprt.main(["--engine", "a", "--engine", "b", "--games", "2"])
+    with pytest.raises(SystemExit):  # one engine without a limit
+        sprt.main(["--engine", "a", "--engine", "b", "--nodes1", "10", "--games", "2"])
