@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <random>
 #include <set>
@@ -141,6 +142,38 @@ static void testTT() {
     CHECK(tt.sizeMb() == 1 && !tt.probe(b, hit), "same-size resize did not clear the table");
     tt.store(a, 3, Bound::Exact, 3, m);
     CHECK(tt.probe(a, hit) && hit.score == 3, "table unusable after a same-size resize");
+}
+
+// The experimental time model (src/TimeModel.h) gives what its formula gives
+// in Python with the same constants for this feature vector, stays in its
+// range, and spends less after more stable iterations.
+static void testTimeModel() {
+    timemodel::Features f;
+    f.depth = 12;
+    f.bestChanges = 2;
+    f.stableIterations = 5;
+    f.scoreAbs = 30;
+    f.scoreDrop = 10;
+    f.scoreSwing = 25;
+    f.legalMoves = 35;
+    f.pieces = 24;
+    const double p = timemodel::changeProbability(f);
+    CHECK(std::fabs(p - 0.237052148409) < 1e-9, "time model: p = %.12f, expected 0.237052148409", p);
+    CHECK(std::fabs(timemodel::softScale(f) - 1.10740829324) < 1e-9, "time model: scale %.12f, expected 1.10740829324",
+          timemodel::softScale(f));
+    double prev = 1e9;
+    for (int stable = 0; stable <= 30; ++stable) {
+        f.stableIterations = stable;
+        const double s = timemodel::softScale(f);
+        CHECK(s >= timemodel::kMinScale && s <= timemodel::kMaxScale, "time model: scale %f out of range", s);
+        CHECK(s <= prev, "time model: more time after %d stable iterations than after %d", stable, stable - 1);
+        prev = s;
+    }
+    f.stableIterations = 5;
+    f.depth = 200; // beyond the measured range: counted as kDepthCap
+    const double deep = timemodel::changeProbability(f);
+    f.depth = timemodel::kDepthCap;
+    CHECK(deep == timemodel::changeProbability(f), "time model: depth not capped");
 }
 
 static void testLimits() {
@@ -338,6 +371,7 @@ int main() {
     if (haveNet) testEvalSymmetry();
     testTT();
     testLimits();
+    testTimeModel();
     TranspositionTable tt(16);
     testSearch<Board>(nullptr, "Board/noTT");
     testSearch<FastBoard>(&tt, "FastBoard/TT");

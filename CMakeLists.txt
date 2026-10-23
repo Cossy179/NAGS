@@ -149,6 +149,8 @@ if(NAGS_BUILD_TESTS)
   foreach(engine nags_basic nags_fast nags_enhanced)
     nags_uci_test(${engine}_multipv ${engine} multipv.txt "depth 5 [^ ]+ [^ ]+ multipv 3 .*bestmove")
     nags_uci_test(${engine}_ponder ${engine} ponder.txt "bestmove [a-h][78][a-h][56]")
+    nags_uci_test(${engine}_time_model ${engine} time_model.txt
+      "option name TimeModel type check default false.*bestmove [a-h][78][a-h][56]")
   endforeach()
 
   # Without its Python services, nags must search exactly like nags_enhanced.

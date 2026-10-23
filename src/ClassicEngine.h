@@ -37,6 +37,7 @@ public:
         lines.push_back("option name Move Overhead type spin default 50 min 0 max 5000");
         lines.push_back("option name MultiPV type spin default 1 min 1 max 256");
         lines.push_back("option name Ponder type check default false");
+        lines.push_back("option name TimeModel type check default false"); // experimental (src/TimeModel.h)
         for (const auto &l : uci::syzygyOptionLines()) lines.push_back(l);
         if constexpr (eval::HasNnue<BoardT>::value) {
             lines.push_back("option name UseNNUE type check default true");
@@ -96,6 +97,12 @@ public:
         if (optName == "MultiPV") {
             if (!uci::parseInt(value, v)) { message = "invalid MultiPV value '" + value + "'"; return false; }
             searcher.setMultiPv(static_cast<int>(std::clamp<long long>(v, 1, 256)));
+            return true;
+        }
+        if (optName == "TimeModel") {
+            bool on = false;
+            if (!uci::parseBool(value, on)) { message = "invalid TimeModel value '" + value + "'"; return false; }
+            searcher.setTimeModel(on);
             return true;
         }
         if (optName == "Ponder") {

@@ -1,0 +1,4 @@
+uci
+setoption name TimeModel value true
+position startpos moves e2e4
+go wtime 3000 btime 3000 winc 30 binc 30

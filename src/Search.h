@@ -18,6 +18,7 @@
 #include "Legality.h"
 #include "Syzygy.h"
 #include "TT.h"
+#include "TimeModel.h"
 
 #include <algorithm>
 #include <array>
@@ -1229,6 +1230,10 @@ public:
     void setMultiPv(int n) { multiPv = std::max(1, n); }
     int multiPvCount() const { return multiPv; }
 
+    // Experimental soft-limit rule (src/TimeModel.h); off by default.
+    void setTimeModel(bool on) { timeModel = on; }
+    bool timeModelEnabled() const { return timeModel; }
+
     void clearHistory() {
         for (auto &w : workers) w->clearHistory();
     }
@@ -1307,6 +1312,8 @@ public:
         int maxDepth = limits.depth > 0 ? std::min(limits.depth, MAX_PLY - 8) : MAX_PLY - 8;
         int prevScore = 0;
         int stableIterations = 0; // completed iterations since the best move last changed
+        int bestChanges = 0;      // for the time model: best-move changes, last three capped scores
+        int recentScores[3] = {0, 0, 0};
         for (int depth = 1; depth <= maxDepth; ++depth) {
             IterationResult r;
             if (multi) {
@@ -1333,7 +1340,11 @@ public:
                 report(depth, r.score, r.pv, 0);
             }
             stableIterations = depth > 1 && sameMove(r.bestMove, result.bestMove) ? stableIterations + 1 : 0;
+            bestChanges += depth > 1 && stableIterations == 0;
             int scoreDrop = depth > 1 ? prevScore - r.score : 0;
+            const int cappedScore = std::clamp(r.score, -timemodel::kScoreCap, timemodel::kScoreCap);
+            const int cappedDrop = depth > 1 ? std::max(0, recentScores[(depth - 2) % 3] - cappedScore) : 0;
+            recentScores[(depth - 1) % 3] = cappedScore;
             prevScore = r.score;
             result.bestMove = r.bestMove;
             result.score = r.score;
@@ -1349,6 +1360,21 @@ public:
                 static constexpr double kStability[5] = {2.0, 1.5, 1.2, 1.0, 0.85};
                 double scale = kStability[std::min(stableIterations, 4)];
                 if (scoreDrop > 20) scale *= 1.0 + std::min(scoreDrop, 120) / 240.0;
+                if (timeModel) {
+                    timemodel::Features f;
+                    f.depth = depth;
+                    f.bestChanges = bestChanges;
+                    f.stableIterations = stableIterations;
+                    f.scoreAbs = std::abs(cappedScore);
+                    f.scoreDrop = cappedDrop;
+                    const int seen = std::min(depth, 3);
+                    f.scoreSwing = *std::max_element(recentScores, recentScores + seen) -
+                                   *std::min_element(recentScores, recentScores + seen);
+                    f.legalMoves = static_cast<int>(rootMoves.size());
+                    f.pieces = popcount(root.occupancy());
+                    f.inCheck = root.inCheck();
+                    scale = timemodel::softScale(f);
+                }
                 // Node share of the best move in the last iteration (all its
                 // aspiration attempts): a move that took nearly all of the
                 // search is clear, one that took little of it was contested,
@@ -1406,4 +1432,5 @@ private:
     SearchControl control;
     std::vector<std::unique_ptr<SearchWorker<BoardT>>> workers;
     int multiPv = 1;
+    bool timeModel = false;
 };
