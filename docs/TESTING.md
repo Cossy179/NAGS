@@ -282,6 +282,28 @@ over months.
 | 2026-10-04 | `af50fc5` (Step 1 search, NNUE network 5) | 2881 ± 34 |
 | 2026-10-06 | `3619db2` (NNUE network 7: 8 output buckets, 56.5M positions) | 2944 ± 34 |
 | 2026-10-07 | `b81c8fe` (search batch: quiescence TT, IIR and improving, history rework, continuation history, SEE pruning) | **2994 ± 32** |
+| 2026-10-23 | `989184c` (main: lazy move generation, fail-low TT move, node-share time management, correction history, singular extensions from depth 6, search correctness fixes, en-passant hash, losing captures last, continuation history four plies back; network 7) | **3111 ± 34** |
+
+#### 2026-10-23: main after the October search work
+
+Same setup (`nags_enhanced` at `989184c`, bench 1466858, network 7, 1
+thread, 64 MB hash; 80 games per level at 10+0.1, 3 at a time):
+
+| Stockfish `UCI_Elo` | Result | Score | Elo difference | Implied rating | 2026-10-07 score |
+|---|---|---|---|---|---|
+| 2800 | +55 =16 −9 | 78.8% | +228 ± 80 | 3028 ± 80 | 67.5% |
+| 3000 | +35 =30 −15 | 62.5% | +89 ± 66 | 3089 ± 66 | 45% |
+| 3190 (the maximum) | +16 =39 −25 | 44.4% | −39 ± 47 | 3151 ± 47 | 35% |
+
+Combined (inverse-variance weighted): **3111 ± 34**, +117 over `b81c8fe` on
+the same levels. The search changes admitted since then measured about
++110 in self-play (taking the port checks where there were any), so this
+time the self-play gains carried over to Stockfish about in full, unlike
+the earlier batches (a third to a half). The levels disagree in the usual
+direction (3028 at 2800, 3151 at 3190), so "about 3050-3150" is the fair
+reading. At 44% against Stockfish's strongest strength-limited level this
+scale has little room left; the node-limited ladder (below) is the one for
+later versions. No game was lost on time.
 
 #### 2026-10-07: search batch
 
@@ -410,6 +432,11 @@ match gives the same games):
 | Engine (bench) | Limits | Games per rung | Result per rung (W D L for the engine) | Rating |
 |---|---|---:|---|---:|
 | `nags_enhanced` on the head (1399785), Hash 64 | 256,000 nodes a move | 100 | 8k: 29 34 37 (−28 ± 62); 16k: 10 35 55 (+7 ± 67); 32k: 6 21 73 (+43 ± 92) | −1 ± 41 |
+| `nags_enhanced` on main `989184c` (1466858), Hash 64, 2026-10-23 | 256,000 nodes a move | 100 | 8k: 25 33 42 (−60 ± 53); 16k: 14 31 55 (+24 ± 63); 32k: 9 18 73 (+61 ± 97) | −13 ± 37 |
+
+The two builds are level node for node (−13 ± 37 against −1 ± 41): what
+main gained since is speed and time use, which a fixed node count does not
+see, while the 10+0.1 calibration above (+117) does.
 
 So NAGS needs about 32 times Stockfish 16's nodes for the same strength
 (256k nodes is about 0.14 s of NAGS search on this machine, roughly a move
