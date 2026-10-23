@@ -1,5 +1,6 @@
 """tools/decision_data.py: collecting decisions, the logistic model and offline policy evaluation."""
 
+import argparse
 import importlib.util
 import json
 import random
@@ -33,6 +34,22 @@ def test_collect(tmp_path):
     for r in rows:
         for b in r["budgets"]:
             assert set(b["features"]) == set(dd.FEATURES) and 0 <= b["loss"] <= dd.CAP and b["nodes"] > 0
+
+
+def test_positions_from_games(tmp_path):
+    pgn = tmp_path / "g.pgn"
+    pgn.write_text('[Result "*"]\n\n1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 *\n\n[Result "*"]\n\n1. d4 d5 2. c4 *\n')
+    args = argparse.Namespace(openings=str(pgn), positions=5, plies=20, seed=1)
+    fens = dd.positions(args)
+    after = set()
+    for moves in (["e4", "e5", "Nf3", "Nc6", "Bb5", "a6"], ["d4", "d5", "c4"]):
+        board = chess.Board()
+        for m in moves:
+            board.push_san(m)
+            after.add(board.fen())
+    assert len(fens) == 5 == len(set(fens)) and set(fens) <= after  # positions of the games, no random moves
+    args.openings = str(ROOT / "tools" / "openings" / "nags_balanced.epd")
+    assert len(dd.positions(args)) == 5
 
 
 def synthetic(n, seed=0):

@@ -18,6 +18,7 @@ says almost nothing about one decision (docs/ARCHITECTURE.md). This measures dec
 
   python tools/decision_data.py collect --engine build/nags_enhanced --positions 300 --nodes 20000 \\
       --budgets 1 2 4 8 --reference 64 --out decisions.jsonl
+  python tools/decision_data.py collect --engine build/nags_enhanced --openings games.pgn ...  # positions of games
   python tools/decision_data.py fit --data decisions.jsonl --json tm_model.json
   python tools/decision_data.py policy --data decisions.jsonl --model tm_model.json
 """
@@ -84,8 +85,17 @@ def run_search(engine, fen: str, nodes: int) -> Tuple[Optional[chess.Move], List
     return best, its, used
 
 
+def positions(args: argparse.Namespace) -> List[str]:
+    """Game positions (a PGN or jsonl file's, in random order), or random plies after EPD openings."""
+    if args.openings.endswith((".pgn", ".jsonl")):
+        from suite import source_positions
+
+        return list(source_positions(args.openings, args.positions, args.plies, args.seed))
+    return sample_positions(args.openings, args.positions, args.plies, args.seed)
+
+
 def collect(args: argparse.Namespace) -> int:
-    fens = sample_positions(args.openings, args.positions, args.plies, args.seed)
+    fens = positions(args)
     engine = chess.engine.SimpleEngine.popen_uci([args.engine])
     engine.configure({k: v for k, v in (("Threads", 1), ("Hash", args.hash)) if k in engine.options})
     ref_nodes = args.nodes * args.reference
@@ -263,9 +273,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("collect")
     c.add_argument("--engine", required=True)
-    c.add_argument("--openings", default=str(Path(__file__).with_name("openings") / "nags_balanced.epd"))
+    c.add_argument("--openings", default=str(Path(__file__).with_name("openings") / "nags_balanced.epd"),
+                   help="EPD openings (random plies after them), or a PGN / jsonl file of game positions")
     c.add_argument("--positions", type=int, default=200)
-    c.add_argument("--plies", type=int, default=20)
+    c.add_argument("--plies", type=int, default=20, help="random plies after an EPD opening")
     c.add_argument("--nodes", type=int, default=20000)
     c.add_argument("--budgets", type=int, nargs="+", default=[1, 2, 4, 8])
     c.add_argument("--reference", type=int, default=64, help="reference search as a multiple of --nodes")

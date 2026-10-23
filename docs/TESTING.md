@@ -119,7 +119,8 @@ covers move generation order and the opening playouts).
 ### Decisions: where more search pays (`tools/decision_data.py`)
 
 The per-decision measurement behind time management. `collect` searches
-sample positions at node budgets N, 2N, 4N, ... and stores, for each
+sample positions (random plies after the openings, or with `--openings
+games.pgn` the positions of real games) at node budgets N, 2N, 4N, ... and stores, for each
 budget, the move, the value it loses against a deep reference search, and
 what the search knew when it stopped (best-move changes and stability,
 score and its swings, depth, legal moves, check, material). `fit` learns
