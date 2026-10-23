@@ -52,7 +52,12 @@ K p n b r q k = 0-11, ascending squares, low nibble first), int16 score
 `nags_datagen` keeps its command line, and with `--threads 1` its output
 is a function of the binary, the embedded network and the arguments; a
 change that keeps the bench node count also keeps it byte-identical
-(checked for every non-functional commit).
+(checked for every non-functional commit). `--repetition third` (opt-in)
+ends a game at the third occurrence of a position, as the laws do, instead
+of the first repetition; the default writes the same bytes as before, and a
+data set made with `third` has the same format (some games run longer, and a
+few change result: in 40 games at 3000 nodes, one game the old rule called a
+draw was won).
 
 ### `tools/nnue/train.py`
 

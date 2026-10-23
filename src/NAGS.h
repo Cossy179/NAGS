@@ -292,6 +292,10 @@ private:
     void runMctsBatched(long long budget, const std::atomic<bool> &stopMcts);
     void simulate();
     Selected selectLeaf(std::vector<PendingLeaf> &batch);
+    // mctsBoard, `depth` plies below the MCTS root, is a draw under the search's repetition rule.
+    bool isDrawAt(int depth) const {
+        return searcher.lawsRepetition() ? mctsBoard.isDraw(depth) : mctsBoard.isDraw();
+    }
     void backup(MCTSNode *leaf, float value, bool virtualLoss);
     void revertVirtualLoss(MCTSNode *leaf);
     void evaluateWithFallback(std::vector<PendingLeaf> &batch);

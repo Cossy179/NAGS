@@ -87,6 +87,13 @@ public:
     // The moves since the last capture, pawn move or null move (those the
     // repetition rules look back over), oldest first.
     std::vector<Move> recentMoves() const;
+    // The laws' rule inside a search whose root is `pliesFromRoot` plies back
+    // (RepetitionRule "Laws"): a repetition of a position from the search tree
+    // is still a draw (either side could repeat it again), one of a position
+    // from before the root, or of the root, only at its third occurrence.
+    // With 0 every position is from before the root: the claimable threefold.
+    bool isDraw(int pliesFromRoot) const;
+    bool isRepetition(int pliesFromRoot) const;
     bool isInsufficientMaterial() const;
 
     static bool isValidSquare(int sq) { return sq >= 0 && sq < 64; }

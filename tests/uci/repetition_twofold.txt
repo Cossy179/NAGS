@@ -1,0 +1,4 @@
+setoption name UseNN value false
+setoption name UseMetaLearner value false
+position startpos moves e2e4 e7e5 g1f3 b8c6 f3g1 c6b8 g1f3
+go depth 8

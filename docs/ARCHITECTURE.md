@@ -48,7 +48,23 @@ either.
   (deterministic, about 0.25 s) instead of trusting hard-coded constants.
 * Draws: fifty-move rule (checkmate takes precedence), repetition and
   insufficient material. Inside the search a single earlier occurrence of the
-  position counts as a repetition.
+  position counts as a repetition (`RepetitionRule` `Twofold`, the default):
+  a search heuristic, stronger in play than the laws' rule (which cost
+  17.6 ± 9.9 Elo, `exp/repetition-rule-head`), but not what the game gives.
+  After 1.e4 e5 2.Nf3 Nc6 3.Ng1 Nb8 4.Nf3 it reports 4...Nc6 as `cp 0` although
+  only the second occurrence follows. `RepetitionRule` `Laws` keeps the draw
+  for a repetition inside the search tree (either side could repeat it again)
+  but gives a position from before the root, or the root itself, a draw only
+  at its third occurrence (the same game: about `cp -50` at depth 12, with a
+  real line): the setting
+  for analysis and for any score shown as an evaluation. It applies to every
+  draw test of the search and of the MCTS arm, which then keeps no tree between moves
+  (a draw in it depends on where the root is). Games themselves are
+  adjudicated by the laws everywhere a result is recorded: `tools/sprt.py`
+  claims a draw at the third occurrence (python-chess), and `nags_datagen
+  --repetition third` ends its games there too (its default, `first`, ends
+  them at the first repetition, as the data for the networks in training has
+  always been made).
 * `setFromFEN` validates the FEN (8x8 board, exactly one king per side, no
   pawns on the back ranks, side to move, castling, en passant, the side not to
   move is not in check) and leaves the board unchanged on failure. Castling

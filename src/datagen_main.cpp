@@ -54,6 +54,10 @@ struct Options {
     int maxOpeningScore = 400; // skip openings the search already judges lopsided
     int hashMB = 16;
     uint64_t seed = 1;
+    // When a repetition ends a game: at the first one (the default, the rule
+    // the search plays by) or, with "--repetition third", at the third
+    // occurrence, as the laws give it (the search still plays by its own rule).
+    bool thirdRepetition = false;
 };
 
 struct Record {
@@ -87,7 +91,7 @@ std::atomic<long long> gamesStarted{0}, gamesDone{0}, positionsWritten{0};
 
 void usage() {
     std::cerr << "usage: nags_datagen --out FILE [--games N] [--threads N] [--nodes N] [--random-plies N]\n"
-                 "                    [--max-opening-score CP] [--hash MB] [--seed N]\n";
+                 "                    [--max-opening-score CP] [--hash MB] [--seed N] [--repetition first|third]\n";
 }
 
 bool parseArgs(int argc, char **argv, Options &o) {
@@ -99,6 +103,11 @@ bool parseArgs(int argc, char **argv, Options &o) {
         if (a == "--out") {
             o.out = v;
             o.binary = v.size() >= 4 && v.compare(v.size() - 4, 4, ".bin") == 0;
+            continue;
+        }
+        if (a == "--repetition") {
+            if (v != "first" && v != "third") { std::cerr << "--repetition: first or third\n"; return false; }
+            o.thirdRepetition = v == "third";
             continue;
         }
         if (!uci::parseInt(v, n) || n < 0) { std::cerr << "invalid value for " << a << "\n"; return false; }
@@ -117,6 +126,9 @@ bool parseArgs(int argc, char **argv, Options &o) {
 
 bool isQuiet(const FastBoard &b, const Move &m) { return !eval::isNoisy(b, m); }
 
+// The game is drawn (fifty-move rule, repetition by --repetition, insufficient material).
+bool isGameDraw(const Options &o, const FastBoard &b) { return o.thirdRepetition ? b.isDraw(0) : b.isDraw(); }
+
 // Plays one game; returns false if the opening was rejected. Appends the
 // positions to keep (without results) to `records` and sets `result`.
 bool playGame(const Options &o, std::mt19937_64 &rng, Searcher<FastBoard> &searcher, TranspositionTable &tt,
@@ -127,7 +139,7 @@ bool playGame(const Options &o, std::mt19937_64 &rng, Searcher<FastBoard> &searc
         if (moves.empty()) return false;
         board.makeMove(moves[rng() % moves.size()]);
     }
-    if (board.generateLegalMoves().empty() || board.isDraw()) return false;
+    if (board.generateLegalMoves().empty() || isGameDraw(o, board)) return false;
 
     tt.clear();
     searcher.clearHistory();
@@ -148,7 +160,7 @@ bool playGame(const Options &o, std::mt19937_64 &rng, Searcher<FastBoard> &searc
             result = board.inCheck() ? (board.sideToMove() == Color::White ? 0.0 : 1.0) : 0.5;
             return true;
         }
-        if (board.isDraw() || ply >= 400) {
+        if (isGameDraw(o, board) || ply >= 400) {
             result = 0.5;
             return true;
         }

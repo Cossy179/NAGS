@@ -536,7 +536,7 @@ void NAGSController::simulate() {
     float value; // side to move at `node`
     if (node->terminal) {
         value = node->terminalValue;
-    } else if (depth > 0 && mctsBoard.isDraw()) {
+    } else if (depth > 0 && isDrawAt(depth)) {
         node->terminal = true;
         node->terminalValue = 0.0f;
         value = 0.0f;
@@ -706,7 +706,7 @@ NAGSController::Selected NAGSController::selectLeaf(std::vector<PendingLeaf> &ba
         result = Selected::Collision;
     } else if (node->terminal) {
         backup(node, node->terminalValue, true);
-    } else if (!path.empty() && mctsBoard.isDraw()) {
+    } else if (!path.empty() && isDrawAt(static_cast<int>(depth))) {
         node->terminal = true;
         node->terminalValue = 0.0f;
         backup(node, 0.0f, true);
@@ -905,7 +905,10 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
 
     // ---- MCTS arm: only with a live network (and not while pondering) -------
     // With MctsReuse the subtree of the new root is taken from the last tree.
-    std::unique_ptr<MCTSNode> reused = config.mctsReuse ? reuseSubtree(root) : nullptr;
+    // Under the laws' repetition rule a draw in the tree depends on where its root is, so a tree is
+    // not carried over to the next root.
+    const bool reuse = config.mctsReuse && !searcher.lawsRepetition();
+    std::unique_ptr<MCTSNode> reused = reuse ? reuseSubtree(root) : nullptr;
     mctsRoot.reset();
     reuseRootFen.clear();
     mctsBoard = root;
@@ -1066,7 +1069,7 @@ NagsResult NAGSController::search(const FastBoard &root, const SearchLimits &lim
           << deltas.bandit_exploration_delta << " meta " << (metaUsed ? "on" : "off");
         onString(m.str());
     }
-    if (config.mctsReuse && mctsRoot) {
+    if (reuse && mctsRoot) {
         reuseRootFen = root.getFEN(); // the next search may continue in this tree
     } else {
         mctsRoot.reset();

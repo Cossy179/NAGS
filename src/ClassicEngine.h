@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -37,6 +38,7 @@ public:
         lines.push_back("option name Move Overhead type spin default 50 min 0 max 5000");
         lines.push_back("option name MultiPV type spin default 1 min 1 max 256");
         lines.push_back("option name Ponder type check default false");
+        lines.push_back("option name RepetitionRule type combo default Twofold var Twofold var Laws");
         for (const auto &l : uci::syzygyOptionLines()) lines.push_back(l);
         if constexpr (eval::HasNnue<BoardT>::value) {
             lines.push_back("option name UseNNUE type check default true");
@@ -96,6 +98,19 @@ public:
         if (optName == "MultiPV") {
             if (!uci::parseInt(value, v)) { message = "invalid MultiPV value '" + value + "'"; return false; }
             searcher.setMultiPv(static_cast<int>(std::clamp<long long>(v, 1, 256)));
+            return true;
+        }
+        if (optName == "RepetitionRule") {
+            // Twofold: any earlier occurrence of a position is a draw (the stronger search heuristic, the
+            // default). Laws: a position from before the root draws only at its third occurrence, so no
+            // reported score is a draw the rules would not give (analysis, adjudication).
+            std::string rule = value;
+            for (char &c : rule) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (rule != "twofold" && rule != "laws") {
+                message = "invalid RepetitionRule value '" + value + "' (Twofold or Laws)";
+                return false;
+            }
+            searcher.setLawsRepetition(rule == "laws");
             return true;
         }
         if (optName == "Ponder") {

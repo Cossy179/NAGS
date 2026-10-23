@@ -182,6 +182,12 @@ static void testDraws() {
     CHECK(!b.isDraw(), "start position reported as draw");
     CHECK(b.applyMovesUCI({"g1f3", "g8f6", "f3g1", "f6g8"}), "knight shuffle rejected");
     CHECK(b.isRepetition(), "repetition of the start position not detected");
+    // The laws' rule (RepetitionRule Laws): a repetition inside the search tree
+    // is a draw, one of a position from before the root (or of the root) only
+    // at its third occurrence; with 0 plies from the root, the claimable threefold.
+    CHECK(!b.isRepetition(0) && !b.isRepetition(4) && !b.isDraw(0), "second occurrence of a pre-root position counted as a draw");
+    CHECK(b.isRepetition(5) && b.isDraw(5), "repetition inside the search tree not detected");
+    CHECK(b.applyMovesUCI({"g1f3", "g8f6", "f3g1", "f6g8"}) && b.isRepetition(0) && b.isDraw(0), "third occurrence not detected");
     // After pawn moves, a knight shuffle repeats the position reached by them.
     b.setStartPos();
     CHECK(b.applyMovesUCI({"e2e4", "e7e5", "g1f3", "g8f6", "f3g1", "f6g8"}) && b.isRepetition(),
@@ -308,12 +314,71 @@ static void testGenerationModes() {
     CHECK(checked > 1000, "generation modes checked on only %d positions", checked);
 }
 
+// The laws' rule against a direct count of earlier occurrences, over random
+// games steered into repetitions: `fromRoot` plies below a search root, an
+// earlier occurrence inside the tree draws, pre-root ones only from two on;
+// a root further back than the game equals the twofold rule.
+static void testRepetitionRuleRandom() {
+    TestBoard b;
+    std::mt19937 rng(4242);
+    const char *starts[] = {"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                            "4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1", "r3k3/8/2n5/8/8/5B2/8/4K2R w Kq - 0 1",
+                            "1q2k3/8/8/8/8/8/8/1Q2K3 w - - 0 1", "4k3/3n4/8/2b5/8/4N3/8/2R1K3 b - - 0 1"};
+    int thirds = 0, seconds = 0;
+    for (int game = 0; game < 300; ++game) {
+        CHECK(b.setFromFEN(starts[game % 5]), "start position rejected");
+        std::vector<uint64_t> keys{b.zobrist()}; // positions since the last irreversible move, oldest first
+        for (int ply = 0; ply < 100; ++ply) {
+            auto moves = b.generateLegalMoves();
+            if (moves.empty()) break;
+            std::vector<Move> quiet;
+            for (const Move &m : moves)
+                if (b.pieceAt(m.to) == Piece::None && pieceTypeOf(b.pieceAt(m.from)) != PAWN && !m.isCastling)
+                    quiet.push_back(m);
+            // Half the time, repeat a position when a move can (so third occurrences come up).
+            std::vector<Move> repeating;
+            if (rng() % 2)
+                for (const Move &m : moves) {
+                    b.makeMove(m);
+                    if (b.isRepetition()) repeating.push_back(m);
+                    b.unmakeMove();
+                }
+            const auto &pool = !repeating.empty() ? repeating : !quiet.empty() && rng() % 12 ? quiet : moves;
+            b.makeMove(pool[rng() % pool.size()]);
+            if (b.getHalfmoveClock() == 0) keys.clear();
+            keys.push_back(b.zobrist());
+            const int last = static_cast<int>(keys.size()) - 1;
+            for (int fromRoot : {0, 1, 2, 3, 4, 6, 9, 10000}) {
+                int pre = 0;
+                bool inTree = false;
+                for (int i = 0; i < last; ++i) {
+                    if (keys[i] != keys[last]) continue;
+                    if (i > last - fromRoot) inTree = true; // inside the search tree
+                    else ++pre;                             // the root or before it
+                }
+                const bool expected = inTree || pre >= 2;
+                CHECK(b.isRepetition(fromRoot) == expected, "game %d ply %d, %d plies from the root: %d, expected %d (%s)",
+                      game, ply, fromRoot, b.isRepetition(fromRoot), expected, b.getFEN().c_str());
+                if (fromRoot == 0) {
+                    thirds += pre >= 2;
+                    seconds += pre == 1;
+                }
+            }
+            CHECK(b.isRepetition(10000) == b.isRepetition(), "game %d ply %d: a root before the game differs from twofold",
+                  game, ply);
+            if (b.isDraw(0)) break; // the claimable draw ends the game
+        }
+    }
+    CHECK(thirds > 50 && seconds > 50, "laws' rule barely exercised: %d third occurrences, %d second ones", thirds, seconds);
+}
+
 int main() {
     testPerft();
     testNullMove();
     testHashConsistency();
     testFenValidation();
     testDraws();
+    testRepetitionRuleRandom();
     testApplyMoves();
     testGenerationModes();
     if (failures) {

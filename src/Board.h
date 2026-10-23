@@ -68,6 +68,9 @@ public:
     // as is usual inside a search) or insufficient material.
     bool isDraw() const;
     bool isRepetition() const;
+    // The laws' rule inside a search (see FastBoard::isDraw(int)).
+    bool isDraw(int pliesFromRoot) const;
+    bool isRepetition(int pliesFromRoot) const;
     bool isInsufficientMaterial() const;
 
     uint64_t perft(int depth);

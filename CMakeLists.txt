@@ -138,6 +138,12 @@ if(NAGS_BUILD_TESTS)
     nags_uci_test(${engine}_mate_in_one ${engine} mate_in_one.txt "score mate 1 .*bestmove f3f7")
     nags_uci_test(${engine}_bad_input ${engine} bad_input.txt "invalid FEN.*bestmove [a-h][1-8][a-h][1-8]")
     nags_uci_test(${engine}_movetime ${engine} movetime.txt "bestmove [a-h][1-8][a-h][1-8]")
+    # After 1.e4 e5 2.Nf3 Nc6 3.Ng1 Nb8 4.Nf3, 4...Nc6 makes only the second occurrence of a position:
+    # the default rule (Twofold, a search heuristic) scores it as a draw, the laws' rule does not.
+    nags_uci_test(${engine}_repetition_twofold ${engine} repetition_twofold.txt
+      "depth 8 seldepth [0-9]+ score cp 0 .*bestmove b8c6")
+    nags_uci_test(${engine}_repetition_laws ${engine} repetition_laws.txt
+      "depth 8 seldepth [0-9]+ score cp -[1-9][0-9]* .*bestmove [a-h][1-8][a-h][1-8]")
   endforeach()
   nags_uci_test(nags_enhanced_threads nags_enhanced threads.txt "Threads set to 4.*bestmove [a-h][1-8][a-h][1-8]")
   configure_file(tests/uci/syzygy.txt.in ${CMAKE_CURRENT_BINARY_DIR}/syzygy_uci.txt @ONLY)
