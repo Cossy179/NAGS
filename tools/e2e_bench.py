@@ -13,8 +13,11 @@ move time, its MCTS arm always on. Reported per configuration, from the engine's
   ab depth    the alpha-beta arm's mean completed depth, and ab knps its speed: what the server's
               CPU use costs the rest of the engine
 
-The first search of each configuration is a warm-up and is not counted (it includes ONNX
-export and TensorRT engine builds, which can take minutes).
+Each server evaluates a batch of every size first, with a long timeout (ONNX export and
+TensorRT engine builds can take minutes, and a search that met them would leave the server
+alone for a minute after its first timed-out request); then the first search of each
+configuration is a warm-up and is not counted. A configuration with no MCTS simulation in any
+search fails.
 
   python tools/e2e_bench.py --model models/gnn_v3.pth --device cuda --preset gpu --positions 40 \\
       --movetime 2000 --json e2e_gpu.json
@@ -41,7 +44,7 @@ for p in (ROOT, ROOT / "tools"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from hybrid_eval import Engine, _exe, parse_summary  # noqa: E402
+from hybrid_eval import Engine, _exe, parse_summary, warm_server  # noqa: E402
 
 OPENINGS = str(ROOT / "tools" / "openings" / "nags_balanced.epd")
 
@@ -127,13 +130,15 @@ def run_config(cfg: Config, args: argparse.Namespace, fens: Sequence[str], log_d
     server = ["--model", args.model, "--device", args.device, "--mc-samples", str(args.mc_samples), *cfg.server]
     options = {"UseNN": "true", "UseMetaLearner": "false", "MctsMinTime": "0", "Threads": "1",
                "Hash": str(args.hash), **cfg.options}
-    with ServiceProcess("rpc_server.py", server, log_dir / f"e2e_{cfg.name}.log",
-                        startup_timeout=args.startup_timeout) as rpc:
+    log = log_dir / f"e2e_{cfg.name}.log"
+    with ServiceProcess("rpc_server.py", server, log, startup_timeout=args.startup_timeout) as rpc:
+        # Model load, ONNX export, TensorRT engine builds: before the engine's first (short) request.
+        warm_server(rpc.port, fens, (1, int(options.get("NNBatch", 1))), timeout=args.startup_timeout)
         options["NNPort"] = str(rpc.port)
         engine = Engine([args.engine], options)
         try:
             go = f"go movetime {args.movetime}"
-            engine.go(fens[0], go)  # warm-up: model load, ONNX export, TensorRT engine build
+            engine.go(fens[0], go)  # warm-up search
             runs = []
             for fen in fens:
                 lines = engine.go(fen, go)
@@ -150,8 +155,10 @@ def run_config(cfg: Config, args: argparse.Namespace, fens: Sequence[str], log_d
     out = summarise(cfg.name, runs)
     out["server_args"] = server
     out["engine_options"] = cfg.options
+    if not any(r["mcts_sims"] for r in runs):
+        raise RuntimeError(f"no MCTS simulation in any search (the engine could not use the server): see {log}")
     if out["rpc_failures"]:
-        out["warning"] = f"{out['rpc_failures']} failed requests: see {log_dir / f'e2e_{cfg.name}.log'}"
+        out["warning"] = f"{out['rpc_failures']} failed requests: see {log}"
     return out
 
 

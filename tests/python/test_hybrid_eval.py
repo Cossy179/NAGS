@@ -39,6 +39,51 @@ def test_parse_summary_and_categories():
     assert hybrid_eval.parse_summary(["bestmove e2e4"]) == {}
 
 
+def _fake_server(reply):
+    """A server answering every request line with reply(request); returns (server, the requests seen)."""
+    import socketserver
+    import threading
+
+    seen = []
+
+    class Handler(socketserver.StreamRequestHandler):
+        def handle(self):
+            for line in self.rfile:
+                req = json.loads(line)
+                seen.append(req)
+                self.wfile.write((json.dumps(reply(req)) + "\n").encode())
+                self.wfile.flush()
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, seen
+
+
+def test_warm_server_sends_each_batch_size_once():
+    server, seen = _fake_server(lambda req: {"results": [{"value": 0.0} for _ in req["fens"]]})
+    try:
+        fens = [chess.STARTING_FEN, "4k3/8/8/8/8/8/8/4K2R w K - 0 1"]
+        hybrid_eval.warm_server(server.server_address[1], fens, (8, 1, 8), timeout=10)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert [len(r["fens"]) for r in seen] == [1, 8]
+    for r in seen:
+        assert all(len(m) == chess.Board(f).legal_moves.count() for f, m in zip(r["fens"], r["moves"]))
+    assert seen[1]["fens"][1] == fens[1]
+
+
+def test_warm_server_reports_a_failed_reply():
+    server, _ = _fake_server(lambda req: {"error": "ValueError: no model"})
+    try:
+        with pytest.raises(RuntimeError, match="no model"):
+            hybrid_eval.warm_server(server.server_address[1], [chess.STARTING_FEN], timeout=10)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def _tiny_checkpoint(path):
     from gnn_v3 import RelationalGNNEvaluator, save_checkpoint_v3
 

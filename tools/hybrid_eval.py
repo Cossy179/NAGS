@@ -186,6 +186,25 @@ class Engine:
             self.proc.kill()
 
 
+def warm_server(port: int, fens: Sequence[str], batches: Sequence[int] = (1,), timeout: float = 900.0) -> None:
+    """Evaluate a batch of each size once, with a long timeout, before an engine connects. A server's
+    first inference (model load, an ONNX export, a TensorRT engine build) can take much longer than a
+    search's request timeout (a tenth of its hard limit), and after a request that times out the engine
+    leaves the server alone for a minute: the searches in that minute would run without MCTS."""
+    import socket
+
+    boards = [chess.Board(f) for f in fens] or [chess.Board()]
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s, s.makefile("rwb") as io:
+        for n in sorted(set(batches)):
+            sample = [boards[i % len(boards)] for i in range(max(1, n))]
+            io.write((json.dumps({"fens": [b.fen() for b in sample],
+                                  "moves": [[m.uci() for m in b.legal_moves] for b in sample]}) + "\n").encode())
+            io.flush()
+            reply = json.loads(io.readline() or "{}")
+            if "results" not in reply:
+                raise RuntimeError(f"server warm-up failed: {reply.get('error', 'no reply')}")
+
+
 def parse_summary(lines: Sequence[str]) -> Dict[str, str]:
     """The fields of the hybrid's 'info string nags ...' line (name -> value), plus 'reason'."""
     line = next((l for l in reversed(lines) if l.startswith("info string nags ")), None)
@@ -226,6 +245,7 @@ def decisions(args: argparse.Namespace) -> Dict[str, Any]:
                    *args.server_arg]
     log = Path(args.log)
     with ServiceProcess("rpc_server.py", server_args, log) as rpc:
+        warm_server(rpc.port, fens)
         options = {"UseNN": "true", "NNPort": str(rpc.port), "UseMetaLearner": "false", "MctsMinTime": "0"}
         for o in args.option:
             k, v = o.split("=", 1)
@@ -352,6 +372,7 @@ def match(args: argparse.Namespace, sprt_args: Sequence[str]) -> int:
     if not needs_server:
         return run(0)
     with ServiceProcess("rpc_server.py", server_args, log) as rpc:
+        warm_server(rpc.port, [chess.STARTING_FEN], (1, 8, 32))
         return run(rpc.port)
 
 
@@ -445,6 +466,7 @@ def gauntlet(args: argparse.Namespace, sprt_args: Sequence[str]) -> int:
 
     if needs_server:
         with ServiceProcess("rpc_server.py", server_args, out_dir / "rpc_server.log") as rpc:
+            warm_server(rpc.port, [chess.STARTING_FEN], (1, 8, 32))
             rows = play(rpc.port)
     else:
         rows = play(0)
