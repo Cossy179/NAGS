@@ -16,6 +16,12 @@ These check move generation (perft), hashing, search results on known
 positions, UCI behaviour, the Python services, the training pipeline and the
 match runner's statistics.
 
+On the Windows PC (2026-10-23, `0291007`): all 49 `ctest` tests pass; in
+`pytest`, two tests fail for Windows reasons (`test_sprt.py::
+test_engine_paths_stay_whole`, `test_ladder.py::test_anchor_and_rate`) and
+the GNN tests need `torch_geometric`; see "Known issues on Windows" in
+`docs/NNUE.md`.
+
 ## 2. Fingerprint: `bench`
 
 ```bash

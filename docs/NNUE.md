@@ -169,9 +169,9 @@ command.
 
 **Setup (Windows; Linux is the same with `build/` paths):**
 
-1. Install Git, CMake 3.15+, Visual Studio 2022 (or its Build Tools) with
-   "Desktop development with C++", Python 3.10–3.12, and a current NVIDIA
-   driver.
+1. Install Git, CMake 3.15+, Visual Studio 2022 (or its Build Tools; the
+   2019 Build Tools, MSVC 14.29, work too) with "Desktop development with
+   C++", Python 3.10–3.13, and a current NVIDIA driver.
 2. Clone and build:
    ```
    git clone https://github.com/Cossy179/NAGS.git
@@ -214,9 +214,10 @@ It can be stopped at any time (Ctrl+C, a restart): run the same command
 again and it carries on where it was. Finished batches are kept, training
 continues from its checkpoint, and test matches resume from their logs.
 Each step's result is appended to `data\round_<positions>.txt`. Expect
-roughly a day for 200M positions on a 6-core CPU (data generation is most
-of it), then about an hour per design to train on an RTX 3060 and one to
-two hours per test match.
+about 38 hours of data generation for 200M positions on a 6-core CPU, then
+about an hour (`current`) to two hours (`kb4`) per design on an RTX 3060;
+test matches take minutes to hours, depending on how far apart the networks
+are (measured figures below).
 
 If a new network was copied to `nets\nags.nnue`: rebuild
 (`cmake --build build --config Release --parallel`), check `bench`, record
@@ -224,6 +225,66 @@ the match in `docs/TESTING.md` and the network in the table below, and
 commit. For the next round raise `--target-positions` (new games come from
 the stronger engine) and run the command again. `--skip-datagen` trains on
 the data that is there; `--skip-test` stops after training.
+
+### Measured on a Windows PC (October 2026)
+
+The round that produced network 8 ran on an AMD Ryzen 5 3500X (6 cores,
+6 threads: no SMT), an RTX 3060 12 GB, 16 GB of RAM, the Visual Studio 2019
+Build Tools and Python 3.13 with PyTorch 2.11 (`cu128` wheels for a driver
+reporting CUDA 12.8):
+
+| Step | Measured |
+|------|----------|
+| `nags_datagen`, `--threads 6` | 1,465 positions/s (5 threads: 1,301; 12 threads: 1,414, so more threads than the CPU has do not help); about 87 positions a game |
+| 201.7M positions | about 38 hours of generation, spread over eight sittings (stopped and resumed each time) |
+| Loading them for training (6.4 GB, from a SATA hard disk) | 50–77 s; kept in GPU memory (8.7 GB of 12 GB in use) |
+| Training `current`, 20 epochs | 212 s an epoch (about 950,000 positions/s): 71 minutes |
+| Training `kb4`, 20 epochs | 365 s an epoch (about 550,000 positions/s): 2 hours |
+| Test matches at 3+0.03, 5 at a time | 5–11 minutes each here (208–410 games), because the networks were far apart; close networks need thousands of games |
+
+Practical notes from that round:
+
+* **Data on another drive.** `--data-dir D:\NAGS\data` puts everything
+  (data, networks, checkpoints, match logs, the round summary) on that
+  drive. A SATA hard disk (about 100 MB/s, 3M positions/s) is fast enough:
+  training holds the data in GPU memory, and streaming would still read
+  faster than training uses it.
+* **The target overshoots by up to one batch.** The total is checked
+  between batches, so the last batch is played to its end (201.7M for a
+  200M target).
+* **Resuming starts a new batch.** After a stop, the next batch gets a new
+  seed and `nags_datagen`'s counter starts at zero; the running total is
+  the `<positions> of <target> positions` line `run_round.py` prints before
+  each batch.
+* **Start long runs from your own console** (Explorer, the Start menu, a
+  `.cmd` file), not as a child of another application: a run started from
+  inside an app that then updated itself (a packaged Store app) was ended
+  with it.
+* **A click in a classic console window pauses its output** ("Select" in
+  the title bar). A paused window stalls a program that prints, such as the
+  trainer's epoch lines: press Esc, or turn QuickEdit off.
+* **Python.** The Microsoft Store build of Python 3.10 hung in a venv; the
+  python.org 3.13 build works. The PyTorch CUDA wheel is about 2.75 GB: if
+  the download times out, `pip install --timeout 120 --retries 10 ...`; pip's
+  cache grew to about 20 GB (`pip cache purge`).
+
+Known issues on Windows (at `0291007`):
+
+* `tools/calibrate.py` still splits `--engine` with POSIX rules, which drop
+  the backslashes of a Windows path (`tools/sprt.py` was fixed): give the
+  engine path with forward slashes, e.g. `C:/.../nags_enhanced.exe`.
+* Before `sprt.py` was fixed, every game of a match failed to start
+  (`FileNotFoundError`), and the runner still scored the 204 failures as a
+  tie and accepted H0. `run_round.py` now checks that a network loads before
+  a match, but a match in which every game is an engine failure still ends
+  with a decision: check the `Endings:` line of a surprising result.
+* `tests/python/test_sprt.py::test_engine_paths_stay_whole` fails on
+  Windows because the test's own file name contains a backslash, which
+  Windows reads as a directory separator (the function under test is fine);
+  `tests/python/test_ladder.py::test_anchor_and_rate` fails because the
+  recorded bench is `None`. The GNN tests need `torch_geometric`.
+* Calibrations from different machines are not comparable: network 7
+  rated 3010 ± 31 on this PC and 3111 ± 34 on the VM (`docs/TESTING.md`).
 
 ## Networks
 
