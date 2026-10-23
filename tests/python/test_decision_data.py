@@ -81,7 +81,13 @@ def test_fit_and_policy(tmp_path):
     out = tmp_path / "p.json"
     assert dd.main(["policy", "--data", str(data), "--model", str(model), "--json", str(out)]) == 0
     p = json.loads(out.read_text())
-    assert p["oracle"] <= p["rule"] < p["random"] and p["rule"] <= p["uniform_2N"]
+    assert p["oracle"] <= p["rule"] < p["random"] and p["rule"] <= p["uniform"]
+    assert p["rule_minus_engine"] == pytest.approx(p["rule"] - p["engine"]) and p["rule_minus_engine_95"] >= 0
+    assert dd.main(["policy", "--data", str(data), "--model", str(model), "--base", "2", "--json", str(out)]) == 0
+    p2 = json.loads(out.read_text())
+    assert p2["base"] == 2 and p2["oracle"] <= p2["rule"] <= p2["random"]
+    with pytest.raises(SystemExit):
+        dd.main(["policy", "--data", str(data), "--base", "4"])  # no 8N or 16N budgets
     assert p["oracle"] <= p["engine"] < p["random"]  # the stability rule also sees the unstable positions
     assert dd.engine_rule({"stable_iterations": 9, "score_drop": 0}) == 0.85
     assert dd.engine_rule({"stable_iterations": 0, "score_drop": 300}) == 3.0

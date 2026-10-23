@@ -228,45 +228,57 @@ def fit(args: argparse.Namespace) -> Dict[str, Any]:
 # policy
 
 def policy(args: argparse.Namespace) -> Dict[str, Any]:
-    """Each position gets N or 4N (or 2N for 'uniform'); the same nodes on average as 2N everywhere."""
+    """Each position gets kN or 4kN (or 2kN for 'uniform'): the same nodes on average as 2kN everywhere."""
+    k = args.base
     rows = read(args.data)
-    by = lambda r, k: next(b for b in r["budgets"] if b["budget"] == k)  # noqa: E731
-    need = {1, 2, 4}
+    by = lambda r, b: next(x for x in r["budgets"] if x["budget"] == b)  # noqa: E731
+    need = {k, 2 * k, 4 * k}
     rows = [r for r in rows if need <= {b["budget"] for b in r["budgets"]}]
     if not rows:
-        raise SystemExit("needs budgets 1, 2 and 4 in every row")
+        raise SystemExit(f"needs budgets {k}, {2 * k} and {4 * k} in every row")
     model = json.loads(Path(args.model).read_text()) if args.model else None
 
     def benefit(r) -> float:
-        f = by(r, 1)["features"]
+        f = by(r, k)["features"]
         if model:
-            x = [float(f[k]) for k in model["features"]]
+            x = [float(f[n]) for n in model["features"]]
             xs = [(v - m) / s for v, m, s in zip(x, model["mean"], model["std"])]
             return predict(model["weights"], xs)
         # Without a model: the stability rule (fewer stable iterations, more search).
         return -f["stable_iterations"] + 0.01 * f["score_swing"]
 
-    def spend(scores: Sequence[float], seed: int = 0) -> float:
-        # A third of the positions at 4N and two thirds at N cost 2N on average (ties in random order).
-        tie = random.Random(seed)
-        ranked = sorted(range(len(rows)), key=lambda i: (-scores[i], tie.random()))
-        extra = set(ranked[:len(rows) // 3])
-        return sum(by(rows[i], 4 if i in extra else 1)["loss"] for i in range(len(rows))) / len(rows)
+    def losses(scores: Sequence[float], seeds: int = 1) -> List[float]:
+        # A third of the positions at 4kN and two thirds at kN cost 2kN on average (ties in random order);
+        # each position's loss, averaged over the tie orders.
+        out = [0.0] * len(rows)
+        for s in range(seeds):
+            tie = random.Random(s)
+            ranked = sorted(range(len(rows)), key=lambda i: (-scores[i], tie.random()))
+            extra = set(ranked[:len(rows) // 3])
+            for i in range(len(rows)):
+                out[i] += by(rows[i], 4 * k if i in extra else k)["loss"] / seeds
+        return out
 
-    uniform = sum(by(r, 2)["loss"] for r in rows) / len(rows)
-    rule = spend([benefit(r) for r in rows])
-    engine = statistics_mean([spend([engine_rule(by(r, 1)["features"]) for r in rows], s) for s in range(20)])
-    oracle = spend([by(r, 1)["loss"] - by(r, 4)["loss"] for r in rows])
-    random_rule = statistics_mean([spend([0.0] * len(rows), s) for s in range(20)])  # every order equally likely
-    out = {"positions": len(rows), "uniform_2N": uniform, "rule": rule, "engine": engine, "random": random_rule,
-           "oracle": oracle,
+    mean = statistics_mean
+    rule = losses([benefit(r) for r in rows], 20)
+    engine = losses([engine_rule(by(r, k)["features"]) for r in rows], 20)
+    diff = [a - b for a, b in zip(rule, engine)]
+    sd = math.sqrt(sum((d - mean(diff)) ** 2 for d in diff) / max(1, len(diff) - 1))
+    out = {"positions": len(rows), "base": k, "uniform": mean([by(r, 2 * k)["loss"] for r in rows]),
+           "rule": mean(rule), "engine": mean(engine), "rule_minus_engine": mean(diff),
+           "rule_minus_engine_95": 1.96 * sd / math.sqrt(len(diff)),
+           "random": mean(losses([0.0] * len(rows), 20)),  # every order equally likely
+           "oracle": mean(losses([by(r, k)["loss"] - by(r, 4 * k)["loss"] for r in rows])),
            "rule_name": "model" if model else "stability"}
-    print(f"{len(rows)} positions, mean loss in cp at the same total nodes (2N on average):")
-    print(f"  2N everywhere            {uniform:7.1f}")
-    print(f"  N or 4N, chosen at random {random_rule:6.1f}")
-    print(f"  N or 4N by the engine's rule {engine:4.1f} (stability and score drop, as nags_enhanced's soft limit)")
-    print(f"  N or 4N by the {out['rule_name']:<9} {rule:7.1f}")
-    print(f"  N or 4N in hindsight      {oracle:6.1f} (the best any rule could do)")
+    n = lambda m: f"{m * k}N" if m * k > 1 else "N"  # noqa: E731
+    lo, mid, hi = n(1), n(2), n(4)
+    print(f"{len(rows)} positions, mean loss in cp at the same total nodes ({mid} on average):")
+    print(f"  {mid} everywhere{'':13} {out['uniform']:6.1f}")
+    print(f"  {lo} or {hi}, chosen at random  {out['random']:6.1f}")
+    print(f"  {lo} or {hi} by the engine's rule {out['engine']:4.1f} (stability and score drop, as the soft limit)")
+    print(f"  {lo} or {hi} by the {out['rule_name']:<10} {out['rule']:6.1f} "
+          f"({out['rule_minus_engine']:+.2f} ± {out['rule_minus_engine_95']:.2f} against the engine's rule, 95%)")
+    print(f"  {lo} or {hi} in hindsight       {out['oracle']:6.1f} (the best any rule could do)")
     if args.json:
         Path(args.json).write_text(json.dumps(out, indent=2))
     return out
@@ -312,6 +324,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p = sub.add_parser("policy")
     p.add_argument("--data", required=True)
     p.add_argument("--model", help="a 'fit' --json (default: the stability rule)")
+    p.add_argument("--base", type=int, default=1, help="allocate k or 4k times --nodes (default k = 1)")
     p.add_argument("--json")
     args = ap.parse_args(argv)
     if args.cmd == "collect":
