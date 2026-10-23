@@ -31,20 +31,24 @@ constexpr int kScoreCap = 2000;
 // z = kWeights[0] + sum kWeights[i] * feature i, in the order of Features.
 // Fitted 2026-10-23 on 1,026 positions of 3+0.03 games between nags_enhanced
 // builds (4,104 decisions at 40k to 640k nodes; twice the nodes changed the
-// move in 24.7%), depth capped at 30 and stable iterations at 20 as here:
-//   decision_data.py fit --features depth,best_changes,stable_iterations,score_abs,
+// move in 24.7%), stable iterations capped at 10 as here:
+//   decision_data.py fit --features best_changes,stable_iterations,score_abs,
 //       score_drop,score_swing,legal_moves,in_check,pieces
-// Held-out log-loss 0.517 (base rate 0.583), AUC 0.734.
-constexpr double kWeights[10] = {-0.718578,   0.148724,   0.0717681, -0.22216,  -0.000397416,
-                                 0.0109518,   -0.00668061, -0.0093152, -0.410399, -0.036346};
+// Held-out log-loss 0.506 (base rate 0.583), AUC 0.748. Depth is not used:
+// it did not help on held-out decisions, and it would make the rule spend
+// more the longer the time control (the cap on stable iterations, which
+// also grow with depth, is there for the same reason).
+constexpr double kWeights[10] = {1.33176,  0,          0.10849,    -0.231353, -0.000467761,
+                                 0.011008, -0.00881373, -0.0187236, -0.63139,  -0.0396226};
 constexpr int kDepthCap = 30;
-constexpr int kStableCap = 20;
+constexpr int kStableCap = 10;
 // The scale for a change probability p: (p / kReference)^kExponent, kept in
-// [kMinScale, kMaxScale]. On the measured decisions it has the old rule's
-// ratio between "best move just changed" and "stable 4+ iterations" (2.0 /
-// 0.85) and its mean (1.08).
-constexpr double kReference = 0.203961;
-constexpr double kExponent = 0.67856;
+// [kMinScale, kMaxScale]. The exponent gives the old rule's ratio between
+// "best move just changed" and "stable 4+ iterations" (2.0 / 0.85) on the
+// measured decisions; the reference makes the engine's mean time a move at
+// 3+0.03 and 10+0.1 clocks the old rule's.
+constexpr double kReference = 0.21246;
+constexpr double kExponent = 0.605597;
 constexpr double kMinScale = 0.4;
 constexpr double kMaxScale = 3.0;
 

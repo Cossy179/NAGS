@@ -158,8 +158,8 @@ static void testTimeModel() {
     f.legalMoves = 35;
     f.pieces = 24;
     const double p = timemodel::changeProbability(f);
-    CHECK(std::fabs(p - 0.237052148409) < 1e-9, "time model: p = %.12f, expected 0.237052148409", p);
-    CHECK(std::fabs(timemodel::softScale(f) - 1.10740829324) < 1e-9, "time model: scale %.12f, expected 1.10740829324",
+    CHECK(std::fabs(p - 0.207742113756) < 1e-9, "time model: p = %.12f, expected 0.207742113756", p);
+    CHECK(std::fabs(timemodel::softScale(f) - 0.986492609427) < 1e-9, "time model: scale %.12f, expected 0.986492609427",
           timemodel::softScale(f));
     double prev = 1e9;
     for (int stable = 0; stable <= 30; ++stable) {
