@@ -102,15 +102,19 @@ public:
         }
         if (optName == "RepetitionRule") {
             // Twofold: any earlier occurrence of a position is a draw (the stronger search heuristic, the
-            // default). Laws: a position from before the root draws only at its third occurrence, so no
-            // reported score is a draw the rules would not give (analysis, adjudication).
+            // default). Laws: a position from before the root draws only at its third occurrence, so a
+            // second occurrence is not scored as a draw the game would not give (analysis, adjudication).
             std::string rule = value;
             for (char &c : rule) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             if (rule != "twofold" && rule != "laws") {
                 message = "invalid RepetitionRule value '" + value + "' (Twofold or Laws)";
                 return false;
             }
-            searcher.setLawsRepetition(rule == "laws");
+            const bool laws = rule == "laws";
+            // Stored scores were found under the other rule (a draw score can be one the new rule
+            // does not give, or the reverse): a change of rule starts from an empty table.
+            if (tt && laws != searcher.lawsRepetition()) tt->clear();
+            searcher.setLawsRepetition(laws);
             return true;
         }
         if (optName == "Ponder") {
@@ -176,8 +180,10 @@ public:
         if (depth <= 0) depth = defaultBenchDepth;
         int threads = searcher.threadCount();
         int lines = searcher.multiPvCount();
+        const bool laws = searcher.lawsRepetition();
         searcher.setThreads(1); // helper threads would make the node count nondeterministic
         searcher.setMultiPv(1);
+        searcher.setLawsRepetition(false); // the fingerprint is the default rule's
         // The fingerprint depends on the table size (index collisions), so
         // bench always uses the default.
         const size_t hashMb = tt ? tt->sizeMb() : 0;
@@ -204,6 +210,7 @@ public:
         for (const auto &line : bench::summary(total, ms)) uci::send(line);
         searcher.setThreads(threads);
         searcher.setMultiPv(lines);
+        searcher.setLawsRepetition(laws);
         if (tt && hashMb != tt->sizeMb()) tt->resize(hashMb);
         newGame();
     }

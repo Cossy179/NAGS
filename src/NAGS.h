@@ -281,6 +281,7 @@ private:
     struct PendingLeaf {
         MCTSNode *node = nullptr;
         uint64_t key = 0; // EvalCache key of its position
+        bool cacheable = true; // its reply may be stored in the EvalCache (see RpcEvaluator::evaluate)
         bool hasTTValue = false;
         float ttValue = 0.0f; // its value from an exact TT score (MctsTTValue)
         std::vector<Move> path;

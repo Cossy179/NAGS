@@ -358,8 +358,10 @@ EvalResult RpcEvaluator::evaluate(FastBoard &board, const std::vector<Move> &leg
     if (!enabled || now < retryAfter) return fallback.evaluate(board, legal);
     const uint64_t key = EvalCache::keyOf(board);
     // For a network that reads histories, a position that repeats an earlier one is another input
-    // than the same position met first (the cache key cannot tell them apart). Only the root can be
-    // one: in the tree a repetition is a draw, never sent.
+    // than the same position met first (the cache key cannot tell them apart). With the default
+    // repetition rule only the root can be one (in the tree a repetition is a draw, never sent);
+    // under RepetitionRule Laws a second occurrence of a pre-root position in the tree can be too
+    // (the batched MCTS path guards its leaves the same way).
     const bool cacheable = !(serverHistory && board.isRepetition());
     if (cacheable) {
         EvalResult cached;
@@ -713,12 +715,15 @@ NAGSController::Selected NAGSController::selectLeaf(std::vector<PendingLeaf> &ba
     } else {
         std::vector<Move> legal = mctsBoard.generateLegalMoves();
         const uint64_t key = EvalCache::keyOf(mctsBoard);
+        // A repetition is another input for a network that reads histories (RpcEvaluator::evaluate);
+        // only under RepetitionRule Laws does one reach this point.
+        const bool cacheable = !(network.wantsHistory() && mctsBoard.isRepetition());
         EvalResult cached;
         if (legal.empty()) {
             node->terminal = true;
             node->terminalValue = mctsBoard.inCheck() ? -1.0f : 0.0f; // checkmated / stalemate
             backup(node, node->terminalValue, true);
-        } else if (network.cache().probe(key, legal, cached)) {
+        } else if (cacheable && network.cache().probe(key, legal, cached)) {
             expand(node, legal, cached);
             mctsUsedNetwork = true;
             float tv;
@@ -730,6 +735,7 @@ NAGSController::Selected NAGSController::selectLeaf(std::vector<PendingLeaf> &ba
             PendingLeaf leaf;
             leaf.node = node;
             leaf.key = key;
+            leaf.cacheable = cacheable;
             leaf.hasTTValue = ttValue(mctsBoard, leaf.ttValue);
             leaf.path = std::move(path);
             leaf.request.fen = mctsBoard.getFEN();
@@ -832,7 +838,7 @@ void NAGSController::runMctsBatched(long long budget, const std::atomic<bool> &s
             for (size_t i = 0; i < batch.size(); ++i) {
                 PendingLeaf &leaf = batch[i];
                 leaf.node->pending = false;
-                network.cache().store(leaf.key, leaf.request.legal, results[i]);
+                if (leaf.cacheable) network.cache().store(leaf.key, leaf.request.legal, results[i]);
                 expand(leaf.node, leaf.request.legal, results[i]);
                 mctsTTValues += leaf.hasTTValue;
                 backup(leaf.node, leaf.hasTTValue ? leaf.ttValue : results[i].value, true);

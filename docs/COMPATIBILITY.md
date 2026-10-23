@@ -55,9 +55,9 @@ change that keeps the bench node count also keeps it byte-identical
 (checked for every non-functional commit). `--repetition third` (opt-in)
 ends a game at the third occurrence of a position, as the laws do, instead
 of the first repetition; the default writes the same bytes as before, and a
-data set made with `third` has the same format (some games run longer, and a
-few change result: in 40 games at 3000 nodes, one game the old rule called a
-draw was won).
+data set made with `third` has the same format (some games run longer and some
+change result: in 40 games at 3000 nodes, 4221 positions instead of 4020, 27.5%
+of them labelled draws instead of 30.3%).
 
 ### `tools/nnue/train.py`
 

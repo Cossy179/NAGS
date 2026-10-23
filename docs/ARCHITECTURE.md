@@ -55,16 +55,18 @@ either.
   only the second occurrence follows. `RepetitionRule` `Laws` keeps the draw
   for a repetition inside the search tree (either side could repeat it again)
   but gives a position from before the root, or the root itself, a draw only
-  at its third occurrence (the same game: about `cp -50` at depth 12, with a
-  real line): the setting
+  at its third occurrence (the same game: `cp -36` at depth 12, with a real
+  line): the setting
   for analysis and for any score shown as an evaluation. It applies to every
   draw test of the search and of the MCTS arm, which then keeps no tree between moves
-  (a draw in it depends on where the root is). Games themselves are
-  adjudicated by the laws everywhere a result is recorded: `tools/sprt.py`
-  claims a draw at the third occurrence (python-chess), and `nags_datagen
-  --repetition third` ends its games there too (its default, `first`, ends
-  them at the first repetition, as the data for the networks in training has
-  always been made).
+  (a draw in it depends on where the root is). Changing the rule clears the
+  transposition table (its scores were found under the other rule); `bench`
+  always uses `Twofold`. Where game results are recorded: `tools/sprt.py`
+  adjudicates python-chess's claimable draws (a threefold repetition,
+  including one the next move would make, and the fifty-move rule);
+  `nags_datagen` ends its games at the first repetition by default, as the
+  data for the networks in training has always been made, or with
+  `--repetition third` at the third occurrence.
 * `setFromFEN` validates the FEN (8x8 board, exactly one king per side, no
   pawns on the back ranks, side to move, castling, en passant, the side not to
   move is not in check) and leaves the board unchanged on failure. Castling

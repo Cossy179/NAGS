@@ -315,9 +315,11 @@ static void testGenerationModes() {
 }
 
 // The laws' rule against a direct count of earlier occurrences, over random
-// games steered into repetitions: `fromRoot` plies below a search root, an
-// earlier occurrence inside the tree draws, pre-root ones only from two on;
-// a root further back than the game equals the twofold rule.
+// games steered into repetitions and with occasional null moves: `fromRoot`
+// plies below a search root, an earlier occurrence inside the tree draws,
+// pre-root ones only from two on; a root further back than the game equals
+// the twofold rule. (Distances 0-3 behave alike: a position recurs with the
+// same side to move at least 4 plies later.)
 static void testRepetitionRuleRandom() {
     TestBoard b;
     std::mt19937 rng(4242);
@@ -335,6 +337,13 @@ static void testRepetitionRuleRandom() {
             for (const Move &m : moves)
                 if (b.pieceAt(m.to) == Piece::None && pieceTypeOf(b.pieceAt(m.from)) != PAWN && !m.isCastling)
                     quiet.push_back(m);
+            if (!b.inCheck() && rng() % 23 == 0) {
+                // A null move ends the window the rules look back over: the
+                // positions before it no longer count.
+                b.makeNullMove();
+                keys.assign(1, b.zobrist());
+                continue;
+            }
             // Half the time, repeat a position when a move can (so third occurrences come up).
             std::vector<Move> repeating;
             if (rng() % 2)
