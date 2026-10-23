@@ -133,13 +133,14 @@ def read(path: str) -> List[Dict[str, Any]]:
     return [json.loads(l) for l in Path(path).read_text().splitlines() if l.strip()]
 
 
-def examples(rows: Sequence[Dict[str, Any]]) -> Tuple[List[List[float]], List[int], List[int]]:
+def examples(rows: Sequence[Dict[str, Any]], names: Sequence[str] = FEATURES
+             ) -> Tuple[List[List[float]], List[int], List[int]]:
     """(features at budget b_j, did b_{j+1} choose another move, row index) for each consecutive pair."""
     X, y, idx = [], [], []
     for r_i, r in enumerate(rows):
         bs = r["budgets"]
         for a, b in zip(bs, bs[1:]):
-            X.append([float(a["features"][f]) for f in FEATURES])
+            X.append([float(a["features"][f]) for f in names])
             y.append(int(a["move"] != b["move"]))
             idx.append(r_i)
     return X, y, idx
@@ -197,7 +198,11 @@ def fit(args: argparse.Namespace) -> Dict[str, Any]:
     order = list(range(len(rows)))
     rng.shuffle(order)
     test_rows = set(order[:max(1, int(len(rows) * args.holdout))])
-    X, y, idx = examples(rows)
+    names = args.features.split(",") if args.features else list(FEATURES)
+    unknown = set(names) - set(FEATURES)
+    if unknown:
+        raise SystemExit(f"unknown features: {', '.join(sorted(unknown))} (known: {', '.join(FEATURES)})")
+    X, y, idx = examples(rows, names)
     train = [i for i, r in enumerate(idx) if r not in test_rows]
     test = [i for i, r in enumerate(idx) if r in test_rows]
     Xs, mean, std = standardise([X[i] for i in train])
@@ -206,14 +211,14 @@ def fit(args: argparse.Namespace) -> Dict[str, Any]:
     yt = [y[i] for i in test]
     pt = [predict(w, x) for x in Xt]
     base = sum(y[i] for i in train) / len(train)
-    out = {"features": list(FEATURES), "mean": mean, "std": std, "weights": w, "train_examples": len(train),
+    out = {"features": names, "mean": mean, "std": std, "weights": w, "train_examples": len(train),
            "test_examples": len(test), "base_rate": base, "test_logloss": logloss(pt, yt),
            "test_logloss_base": logloss([base] * len(yt), yt), "test_auc": auc(pt, yt)}
     print(f"{len(rows)} positions, {len(train)} training and {len(test)} held-out decisions "
           f"(moves change with twice the budget in {base:.1%})")
     print(f"  held-out log-loss {out['test_logloss']:.4f} (base rate alone {out['test_logloss_base']:.4f}), "
           f"AUC {out['test_auc']:.3f}")
-    print("  weights (per standard deviation): " + ", ".join(f"{f} {c:+.2f}" for f, c in zip(FEATURES, w[1:])))
+    print("  weights (per standard deviation): " + ", ".join(f"{f} {c:+.2f}" for f, c in zip(names, w[1:])))
     if args.json:
         Path(args.json).write_text(json.dumps(out, indent=2))
     return out
@@ -234,33 +239,46 @@ def policy(args: argparse.Namespace) -> Dict[str, Any]:
 
     def benefit(r) -> float:
         f = by(r, 1)["features"]
-        x = [float(f[k]) for k in FEATURES]
         if model:
+            x = [float(f[k]) for k in model["features"]]
             xs = [(v - m) / s for v, m, s in zip(x, model["mean"], model["std"])]
             return predict(model["weights"], xs)
         # Without a model: the stability rule (fewer stable iterations, more search).
         return -f["stable_iterations"] + 0.01 * f["score_swing"]
 
-    def spend(scores: Sequence[float]) -> float:
-        # A third of the positions at 4N and two thirds at N cost 2N on average.
-        ranked = sorted(range(len(rows)), key=lambda i: -scores[i])
+    def spend(scores: Sequence[float], seed: int = 0) -> float:
+        # A third of the positions at 4N and two thirds at N cost 2N on average (ties in random order).
+        tie = random.Random(seed)
+        ranked = sorted(range(len(rows)), key=lambda i: (-scores[i], tie.random()))
         extra = set(ranked[:len(rows) // 3])
         return sum(by(rows[i], 4 if i in extra else 1)["loss"] for i in range(len(rows))) / len(rows)
 
     uniform = sum(by(r, 2)["loss"] for r in rows) / len(rows)
     rule = spend([benefit(r) for r in rows])
+    engine = statistics_mean([spend([engine_rule(by(r, 1)["features"]) for r in rows], s) for s in range(20)])
     oracle = spend([by(r, 1)["loss"] - by(r, 4)["loss"] for r in rows])
-    random_rule = statistics_mean([spend([random.Random(s).random() for _ in rows]) for s in range(20)])
-    out = {"positions": len(rows), "uniform_2N": uniform, "rule": rule, "random": random_rule, "oracle": oracle,
+    random_rule = statistics_mean([spend([0.0] * len(rows), s) for s in range(20)])  # every order equally likely
+    out = {"positions": len(rows), "uniform_2N": uniform, "rule": rule, "engine": engine, "random": random_rule,
+           "oracle": oracle,
            "rule_name": "model" if model else "stability"}
     print(f"{len(rows)} positions, mean loss in cp at the same total nodes (2N on average):")
     print(f"  2N everywhere            {uniform:7.1f}")
     print(f"  N or 4N, chosen at random {random_rule:6.1f}")
+    print(f"  N or 4N by the engine's rule {engine:4.1f} (stability and score drop, as nags_enhanced's soft limit)")
     print(f"  N or 4N by the {out['rule_name']:<9} {rule:7.1f}")
     print(f"  N or 4N in hindsight      {oracle:6.1f} (the best any rule could do)")
     if args.json:
         Path(args.json).write_text(json.dumps(out, indent=2))
     return out
+
+
+def engine_rule(f: Dict[str, float]) -> float:
+    """nags_enhanced's soft-limit scale (src/Search.h) from these features: best-move stability and a score
+    drop. Its third factor, the best move's share of the nodes, is not measured here."""
+    scale = (2.0, 1.5, 1.2, 1.0, 0.85)[min(int(f["stable_iterations"]), 4)]
+    if f["score_drop"] > 20:
+        scale *= 1.0 + min(f["score_drop"], 120) / 240.0
+    return scale
 
 
 def statistics_mean(xs: Sequence[float]) -> float:
@@ -287,6 +305,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     f.add_argument("--data", required=True)
     f.add_argument("--holdout", type=float, default=0.25)
     f.add_argument("--l2", type=float, default=1.0)
+    f.add_argument("--features", help="comma-separated subset of the features (default: all); an engine's own "
+                   "rule cannot use log_budget, which only the measurement knows")
     f.add_argument("--seed", type=int, default=0)
     f.add_argument("--json")
     p = sub.add_parser("policy")

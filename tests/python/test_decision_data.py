@@ -82,7 +82,19 @@ def test_fit_and_policy(tmp_path):
     assert dd.main(["policy", "--data", str(data), "--model", str(model), "--json", str(out)]) == 0
     p = json.loads(out.read_text())
     assert p["oracle"] <= p["rule"] < p["random"] and p["rule"] <= p["uniform_2N"]
+    assert p["oracle"] <= p["engine"] < p["random"]  # the stability rule also sees the unstable positions
+    assert dd.engine_rule({"stable_iterations": 9, "score_drop": 0}) == 0.85
+    assert dd.engine_rule({"stable_iterations": 0, "score_drop": 300}) == 3.0
     assert dd.auc([0.9, 0.8, 0.1], [1, 1, 0]) == 1.0 and dd.auc([0.1, 0.9], [1, 0]) == 0.0
+    # A subset of the features (what an engine knows at the end of an iteration), used by policy too.
+    sub = tmp_path / "sub.json"
+    assert dd.main(["fit", "--data", str(data), "--features", "stable_iterations,in_check", "--json", str(sub)]) == 0
+    m = json.loads(sub.read_text())
+    assert m["features"] == ["stable_iterations", "in_check"] and len(m["weights"]) == 3 and m["test_auc"] > 0.8
+    assert dd.main(["policy", "--data", str(data), "--model", str(sub)]) == 0
+    assert dd.main(["policy", "--data", str(data)]) == 0  # no model: the stability rule
+    with pytest.raises(SystemExit):
+        dd.main(["fit", "--data", str(data), "--features", "stable_iterations,nodes"])
 
 
 def test_mate_scores_are_capped_in_the_features():
