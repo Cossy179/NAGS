@@ -1013,11 +1013,11 @@ private:
                 int reduction = 0;
                 if (depth >= 3 && i >= 2 && quiet && !inCheck && !givesCheck &&
                     !sameMove(m, killers[ply][0]) && !sameMove(m, killers[ply][1])) {
-                    // Two plies more (within the depth - 2 cap) at an expected
+                    // One ply more (within the depth - 2 cap) at an expected
                     // cut node that has not cut off with its first moves: it
                     // is usually an all-node.
                     reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1) - histScore / 8192 +
-                                (cutNode ? 2 : 0);
+                                (cutNode ? 1 : 0);
                     reduction = std::clamp(reduction, 0, depth - 2);
                 }
                 NAGS_STAT(if (reduction) ++stats.lmrSearches);
