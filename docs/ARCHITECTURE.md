@@ -143,6 +143,13 @@ uses the given time minus the overhead (without the node-share factor).
 `go infinite` (or a bare `go`)
 searches until `stop`, and `bestmove` is never sent before that.
 
+Experimental, off by default: with the UCI option `TimeModel` the
+stability and score-drop factors are replaced by a logistic model of the
+probability that searching twice as long would change the move
+(`src/TimeModel.h`, fitted by `tools/decision_data.py` on positions of
+real games; docs/TESTING.md, "Decisions"). The node-share factor still
+applies.
+
 ### Evaluation (`Eval.h`)
 
 Material, piece-square tables and a bishop-pair bonus. The king's table is
