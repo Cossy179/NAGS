@@ -58,8 +58,7 @@ either.
   at its third occurrence (the same game: about `cp -50` at depth 12, with a
   real line): the setting
   for analysis and for any score shown as an evaluation. It applies to every
-  draw test of the search (including the one-move-away test of upcoming
-  repetitions) and of the MCTS arm, which then keeps no tree between moves
+  draw test of the search and of the MCTS arm, which then keeps no tree between moves
   (a draw in it depends on where the root is). Games themselves are
   adjudicated by the laws everywhere a result is recorded: `tools/sprt.py`
   claims a draw at the third occurrence (python-chess), and `nags_datagen

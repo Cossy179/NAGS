@@ -538,12 +538,9 @@ private:
         return score;
     }
 
-    // A draw, and a draw one move away, at `ply` plies from the root, under the
-    // repetition rule in use (SearchControl::lawsRepetition).
+    // A draw at `ply` plies from the root, under the repetition rule in use
+    // (SearchControl::lawsRepetition).
     bool isDrawAt(int ply) const { return ctl->lawsRepetition ? board.isDraw(ply) : board.isDraw(); }
-    bool drawsInOneAt(int ply) const {
-        return ctl->lawsRepetition ? board.upcomingRepetition(ply) : board.upcomingRepetition();
-    }
 
     // Continuation table for the move played `back` plies before `ply`.
     ContTable *contFor(int ply, int back) const {
@@ -831,12 +828,6 @@ private:
         if (checkStop()) return 0;
         if (isDrawAt(ply)) return 0;
         if (ply >= MAX_PLY - 1) return eval::evaluate(board);
-        // A move that repeats an earlier position is a draw (isDraw), so the
-        // node is worth at least that.
-        if (alpha < 0 && drawsInOneAt(ply)) {
-            alpha = 0;
-            if (alpha >= beta) return alpha;
-        }
 
         // Mate distance pruning.
         alpha = std::max(alpha, -MATE_SCORE + ply);
@@ -1144,10 +1135,6 @@ private:
         // A capture into bare kings or a lone minor piece is a dead draw
         // (the network has never seen such positions).
         if (board.isInsufficientMaterial()) return 0;
-        if (alpha < 0 && drawsInOneAt(ply)) { // a quiet move draws (see negamax)
-            alpha = 0;
-            if (alpha >= beta) return alpha;
-        }
 
         const bool isPv = beta - alpha > 1;
         const uint64_t key = board.zobrist();
