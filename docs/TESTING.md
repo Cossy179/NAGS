@@ -49,10 +49,10 @@ of writing:
 
 | Engine | Bench nodes |
 |--------|-------------|
-| `nags_basic` | 1416774 |
-| `nags_fast` | 1071658 |
-| `nags_enhanced` | 1053769 |
-| `nags` | 1053769 |
+| `nags_basic` | 1417097 |
+| `nags_fast` | 1337849 |
+| `nags_enhanced` | 1509779 |
+| `nags` | 1509779 |
 
 When search improvements make a run much faster, raise the depth (in the
 engine's `main` file) and record the new fingerprints. `bench` always
@@ -598,6 +598,9 @@ speed log), openings from `nags_balanced.epd` and resign adjudication
 | Late-move pruning up to depth 8 (was 3; same move-count threshold (3 + depth²) / (2 − improving); futility and history pruning stay at depth ≤ 3); on `bf54628`, against it | SPRT [0, 10], 3+0.03, 3 at a time on the 4-core VM (resumed once) | no decision at the 8000-game cap (+2034 =4025 -1941), LLR −1.53 | +4.0 ± 4.9 | – (not adopted: undecided at the cap) |
 | Losing captures and promotions (negative SEE) after the quiet moves instead of before them, in the move picker and the root ordering; on `bf54628`, against it | SPRT [0, 10], 3+0.03, 3 at a time on the 4-core VM | H1 after 1646 games (+454 =809 -383) | +15.0 ± 11.4 | 1450268 |
 | Continuation history four plies back (the side to move's own previous move) added to the quiet-move ordering score and updated at cutoffs (not in check); history pruning and reductions keep plies 1 and 2; on `36d2108`, against it | SPRT [0, 10], 3+0.03, 3 at a time on the 4-core VM | H1 after 7064 games (+1843 =3525 -1696) | +7.2 ± 5.3 | 1466858 |
+| 768 → 256 clipped-ReLU network (the network-7 design, 8 output buckets) on 201.7M new positions (about 2.3M games by the network-7 engine at `bb1e03c`, seeds 9001–9024, generated and trained on the Windows PC), vs network 7; engine at `7d32d3e` | SPRT [0, 10], 3+0.03, 5 at a time on the Windows PC | H1 after 208 games (+108 =82 -18) | +160.9 ± 35.8 | – (kb4 below is stronger) |
+| Network 8: the same 201.7M positions, 4 king buckets (mirrored) + SCReLU, 8 output buckets (format version 3), vs network 7; engine at `7d32d3e` | SPRT [0, 10], 3+0.03, 5 at a time on the Windows PC | H1 after 228 games (+144 =63 -21) | +209.6 ± 41.7 | 1509779 |
+| Network 8 vs the clipped-ReLU network above (same data and epochs) | SPRT [−5, 5], 3+0.03, 5 at a time on the Windows PC | H1 after 410 games (+147 =173 -90; 3 losses on time by network 8, 1 by the other) | +48.6 ± 25.0 | – |
 
 ### Experiment record
 

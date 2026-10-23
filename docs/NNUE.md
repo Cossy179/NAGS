@@ -227,10 +227,11 @@ the data that is there; `--skip-test` stops after training.
 
 ## Networks
 
-All networks so far use the architecture and training settings above (20
-epochs, batch 16384, Adam 1e-3 with a cosine schedule to 1e-5, λ = 0.75)
-and differ only in their data. Each was admitted by a match against the
-previous default (`docs/TESTING.md`).
+All networks use the training settings above (20 epochs, batch 16384, Adam
+1e-3 with a cosine schedule to 1e-5, λ = 0.75). Networks 1-7 share the
+768 → 256 clipped-ReLU design and differ only in their data; network 8 adds
+king buckets and SCReLU. Each was admitted by a match against the previous
+default (`docs/TESTING.md`).
 
 | Network | Data | Validation loss | Result |
 |---------|------|-----------------|--------|
@@ -240,7 +241,8 @@ previous default (`docs/TESTING.md`).
 | 4 | network 3's data plus 2.7M positions from the network-2 engine (seed 4) and 8.2M from the network-3 engine (seed 5): 26.9M | 0.00780 | +92.3 ± 32.1 against network 3 at 3+0.03; +15.7 ± 11.8 at 20000 nodes against the same network trained without the 8.1M hand-written-evaluation-engine positions |
 | 5 | network 4's data plus 11.5M positions from ~137,000 games by the network-4 engine (seed 6): 38.4M (trained in two runs with `--stop-after` / `--resume`, 4 threads) | 0.00815 | +68.8 ± 28.1 against network 4 at 20000 nodes |
 | 6 | network 5's data plus 9.3M positions from ~110,000 games by the network-5 engine (seeds 7 and 8): 47.7M. First network with **8 output buckets** (`--buckets 8`, format version 2) | 0.00830 | +101.0 ± 34.2 against network 5 at 3+0.03 (the gain combines the new data and the buckets) |
-| 7 (`nets/nags.nnue`) | network 6's data plus 8.86M positions from ~104,000 games by the network-6 engine (seed 9): 56.5M, 8 buckets (trained in three runs with `--stop-after` / `--resume`) | 0.00843 | +27.4 ± 16.9 against network 6 at 3+0.03 |
+| 7 | network 6's data plus 8.86M positions from ~104,000 games by the network-6 engine (seed 9): 56.5M, 8 buckets (trained in three runs with `--stop-after` / `--resume`) | 0.00843 | +27.4 ± 16.9 against network 6 at 3+0.03 |
+| 8 (`nets/nags.nnue`) | 201.7M new positions only (none of network 7's data): about 2.3M games by the network-7 engine at `bb1e03c` (5000 nodes, seeds 9001–9024), generated on the 6-core Windows PC and trained on its RTX 3060 (`run_round.py`, design `kb4`, about 2 h). **4 king buckets** (mirrored) + **SCReLU**, 8 output buckets, format version 3 | 0.00843 (0.00859 for the clipped-ReLU design on the same data and held-out positions) | +209.6 ± 41.7 against network 7 at 3+0.03; +48.6 ± 25.0 against the clipped-ReLU design trained on the same data, which itself scored +160.9 ± 35.8 against network 7 |
 
 A 512-wide network trained on network 5's data reached a lower validation
 loss (0.00778 against 0.00815 on the same held-out positions), but its build
@@ -249,8 +251,8 @@ searches about 25% fewer nodes per second and lost to network 5 by
 at longer time controls or with faster inference (e.g. AVX2 builds by
 default, or an int8 output layer).
 
-King buckets and SCReLU (format version 3) are supported but not yet in the
-default network. A first check on a small data set (network 6's 8.9M
+King buckets and SCReLU (format version 3) are in the default network from
+network 8 on. A first check on a small data set (network 6's 8.9M
 newest positions, 6 epochs, 8 output buckets, all three trained alike):
 
 | Design | Validation loss | Match |
@@ -262,7 +264,10 @@ newest positions, 6 epochs, 8 output buckets, all three trained alike):
 The king-bucket network fits these positions better but did not play
 better: with four times the input weights it overfits so little data
 (training loss 0.0074 against 0.0094). Whether it pays off needs a test at
-a few hundred million positions.
+a few hundred million positions. At 201.7M positions it does: trained on
+the same data, it beat the clipped-ReLU design by +48.6 ± 25.0 and became
+network 8. (A first attempt at these matches played no games: `sprt.py`
+then split Windows engine paths with POSIX rules, since fixed.)
 
 Validation losses are not comparable across rows once NNUE-engine positions
 enter the validation set (from network 3 on). Labels from games played by
