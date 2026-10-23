@@ -149,6 +149,8 @@ Run `uci` for the full live option list.
 | 04 Oct 2026 | **2,881 ± 34** | Search improvements + NNUE network 5 |
 | 06 Oct 2026 | **2,944 ± 34** | NNUE network 7 |
 | 07 Oct 2026 | **2,994 ± 32** | Additional search improvements |
+| 23 Oct 2026 | **3,111 ± 34** | October search work, network 7 |
+| 23 Oct 2026 | **3,115 ± 31** | NNUE network 8 (king buckets + SCReLU, 201.7M positions), Windows PC |
 
 These figures are estimates on **Stockfish's strength-limited `UCI_Elo` ladder at 10+0.1**. They are **not** ratings against unrestricted Stockfish, nor directly comparable with tournament Elo. The historical Windows AVX2 benchmark reported up to **1.48 million nodes per second** on the documented test machine; that number varies with hardware, build and workload. The default network (network 8: 4 king buckets + SCReLU, +209.6 ± 41.7 Elo over network 7 at 3+0.03) was trained using **201.7 million positions**.
 
