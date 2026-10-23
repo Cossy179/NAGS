@@ -322,7 +322,7 @@ over months.
 | 2026-10-06 | `3619db2` (NNUE network 7: 8 output buckets, 56.5M positions) | 2944 ± 34 |
 | 2026-10-07 | `b81c8fe` (search batch: quiescence TT, IIR and improving, history rework, continuation history, SEE pruning) | **2994 ± 32** |
 | 2026-10-23 | `989184c` (main: lazy move generation, fail-low TT move, node-share time management, correction history, singular extensions from depth 6, search correctness fixes, en-passant hash, losing captures last, continuation history four plies back; network 7) | **3111 ± 34** |
-| 2026-10-23 | `0291007` (network 8: 4 king buckets + SCReLU, 201.7M positions; on the Windows PC) | **3115 ± 31** |
+| 2026-10-23 | `0291007` (network 8: 4 king buckets + SCReLU, 201.7M positions; on the Windows PC, where network 7 rates 3010 ± 31) | **3115 ± 31** |
 
 #### 2026-10-23: network 8 (Windows PC)
 
@@ -330,27 +330,28 @@ over months.
 hash) against Stockfish 16 (the official `stockfish-windows-x86-64-avx2`
 build) with `UCI_LimitStrength`, 80 games per level at 10+0.1, **5 at a
 time on the 6-core Windows PC** (Ryzen 5 3500X) instead of 3 on the 4-core
-VM:
+VM. For a like-for-like comparison network 7 was calibrated right after,
+with the same binary (network 7 loaded by `EvalFile`), machine and
+settings:
 
-| Stockfish `UCI_Elo` | Result | Score | Elo difference | Implied rating | Network 7 (`989184c`, VM) |
-|---|---|---|---|---|---|
-| 2800 | +54 =21 −5 | 80.6% | +248 ± 79 | 3048 ± 79 | 78.8% |
-| 3000 | +29 =43 −8 | 63.1% | +93 ± 49 | 3093 ± 49 | 62.5% |
-| 3190 (the maximum) | +16 =41 −23 | 45.6% | −30 ± 47 | 3160 ± 47 | 44.4% |
+| Stockfish `UCI_Elo` | Network 8: result | Score | Implied rating | Network 7, same PC: result | Score | Implied rating | Network 7 (`989184c`, VM) |
+|---|---|---|---|---|---|---|---|
+| 2800 | +54 =21 −5 | 80.6% | 3048 ± 79 | +55 =17 −8 | 79.4% | 3034 ± 70 | 78.8% |
+| 3000 | +29 =43 −8 | 63.1% | 3093 ± 49 | +22 =31 −27 | 46.9% | 2978 ± 49 | 62.5% |
+| 3190 (the maximum) | +16 =41 −23 | 45.6% | 3160 ± 47 | +8 =30 −42 | 28.7% | 3032 ± 50 | 44.4% |
+| Combined | | | **3115 ± 31** | | | **3010 ± 31** | 3111 ± 34 |
 
-Combined (inverse-variance weighted): **3115 ± 31**, level with network 7's
-3111 ± 34 although network 8 beat network 7 by +209.6 ± 41.7 in self-play
-at 3+0.03. Each level's score is one or two points higher, well inside the
-errors. Likely reasons: self-play between two versions of one engine
-overstates evaluation gains; this scale is close to its ceiling (3190), and
-a strength-limited Stockfish loses mainly by its deliberate random
-weakening, which a better evaluation does not exploit much more; and the
-machine and concurrency differ from the network-7 run, so the comparison is
-not exact. Stockfish lost 2 games on time at 3190 (NAGS none). The
-node-limited ladder (below), or network 7 calibrated on this PC with the
-same settings, would separate the network from the machine.
-`tools/calibrate.py` still splits `--engine` with POSIX rules, so on
-Windows the engine path was given with forward slashes.
+On the same machine network 8 rates **+105 ± 44** above network 7, about
+half of its self-play margin (+209.6 ± 41.7 at 3+0.03), in line with how
+earlier self-play gains carried over. The 2800 level barely separates them
+(both near 80%); 3000 and 3190 do. The same engine rates about 100 lower on
+this PC than on the VM (network 7: 3010 against 3111), so ratings from the
+two machines are not comparable: Stockfish's AVX2 build probably gains more
+from this CPU than NAGS does, and 5 games ran at a time instead of 3.
+Stockfish lost 2 games on time in each calibration (at 3190 against
+network 8, at 3000 against network 7); NAGS none. `tools/calibrate.py`
+still splits `--engine` with POSIX rules, so on Windows the engine path was
+given with forward slashes.
 
 #### 2026-10-23: main after the October search work
 
