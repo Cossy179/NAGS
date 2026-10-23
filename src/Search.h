@@ -1289,15 +1289,23 @@ public:
             }
         }
 
+        // Each helper's last completed iteration (written by that helper,
+        // read after it has been joined).
+        struct Completed {
+            int depth = 0;
+            IterationResult result;
+        };
+        std::vector<Completed> completed(workers.size());
         std::vector<std::thread> helpers;
         for (size_t i = 1; i < workers.size(); ++i) {
-            helpers.emplace_back([this, i] {
+            helpers.emplace_back([this, i, &completed] {
                 SearchWorker<BoardT> &w = *workers[i];
                 int prev = 0;
                 for (int depth = 1 + static_cast<int>(i % 2); depth < MAX_PLY - 8; ++depth) {
                     IterationResult r;
                     if (!w.iterate(depth, prev, r)) break;
                     prev = r.score;
+                    completed[i] = {depth, r};
                 }
                 w.flushNodes();
             });
@@ -1307,6 +1315,7 @@ public:
         int maxDepth = limits.depth > 0 ? std::min(limits.depth, MAX_PLY - 8) : MAX_PLY - 8;
         int prevScore = 0;
         int stableIterations = 0; // completed iterations since the best move last changed
+        bool mainSwitched = false; // an interrupted iteration replaced the best move by another one
         for (int depth = 1; depth <= maxDepth; ++depth) {
             IterationResult r;
             if (multi) {
@@ -1323,6 +1332,7 @@ public:
                     if (r.improved && !r.bestMove.isNull()) {
                         // A root move was fully searched in the interrupted
                         // iteration and beat the previous best: report and use it.
+                        mainSwitched = !sameMove(r.bestMove, result.bestMove);
                         result.bestMove = r.bestMove;
                         result.pv = r.pv;
                         result.score = r.score;
@@ -1368,6 +1378,57 @@ public:
         control.stop.store(true, std::memory_order_relaxed);
         for (auto &t : helpers) t.join();
         main.flushNodes();
+        // With helpers, the threads vote: each completed result adds
+        // (score - lowest score + 14) * depth to its move, and the move with
+        // the most votes is played (the main thread's on a tie). A deeper or
+        // better-scored line elsewhere can so replace the main thread's. A
+        // proven win is decided by mate distance instead: the shortest mate
+        // found by any thread is played. Not with a depth limit or MultiPV,
+        // where the main thread's result is the one asked for. The vote (not
+        // the mate rule) is also skipped when the main thread's last,
+        // interrupted iteration replaced its best move by another one: that
+        // newer evidence would be weighed at the older depth.
+        if (!helpers.empty() && !multi && limits.depth == 0 && result.depth > 0) {
+            completed[0] = {result.depth, IterationResult{result.bestMove, result.score, result.pv}};
+            int lowest = INF_SCORE, highest = -INF_SCORE;
+            for (const auto &c : completed)
+                if (c.depth > 0) {
+                    lowest = std::min(lowest, c.result.score);
+                    highest = std::max(highest, c.result.score);
+                }
+            auto votesFor = [&](const Move &m) {
+                int64_t v = 0;
+                for (const auto &c : completed)
+                    if (c.depth > 0 && sameMove(c.result.bestMove, m))
+                        v += static_cast<int64_t>(c.result.score - lowest + 14) * c.depth;
+                return v;
+            };
+            size_t best = 0;
+            int64_t bestVotes = votesFor(result.bestMove);
+            for (size_t i = 1; i < completed.size(); ++i) {
+                if (completed[i].depth == 0) continue;
+                if (highest >= MATE_BOUND) { // the shortest proven mate; the main thread's on a tie
+                    if (completed[i].result.score > completed[best].result.score) best = i;
+                    continue;
+                }
+                if (mainSwitched) continue;
+                const int64_t v = votesFor(completed[i].result.bestMove);
+                // Among threads with the winning move, the deepest one's line is reported.
+                if (v > bestVotes || (v == bestVotes && sameMove(completed[i].result.bestMove, completed[best].result.bestMove) &&
+                                      completed[i].depth > completed[best].depth)) {
+                    best = i;
+                    bestVotes = v;
+                }
+            }
+            if (best != 0) {
+                const Completed &c = completed[best];
+                result.bestMove = c.result.bestMove;
+                result.score = c.result.score;
+                result.pv = c.result.pv;
+                result.depth = c.depth;
+                report(c.depth, c.result.score, c.result.pv, 0);
+            }
+        }
         result.nodes = control.nodes.load(std::memory_order_relaxed);
         if (result.pv.size() >= 2) result.ponderMove = result.pv[1];
         return result;
