@@ -194,8 +194,11 @@ On positions of games the model is no better than the engine's rule
 either, and allocating at random is worse than not allocating at all. The
 room is real (hindsight halves the loss), but these features do not find
 it. The rule from this fit (`exp/time-model`, UCI option `TimeModel`, off
-by default) is being SPRT-tested regardless: offline scoring cannot see how
-a rule moves time between the moves of a game.
+by default; its level set so that it spends the old rule's time a move)
+was SPRT-tested regardless, since offline scoring cannot see how a rule
+moves time between the moves of a game: at 3+0.03, SPRT [0, 10], `TimeModel`
+on against off in the same binary, H0 after 978 games, −12.1 ± 14.8
+(+227 =490 −261). The offline result held in play.
 
 ## 3. Strength: SPRT matches with `tools/sprt.py`
 
