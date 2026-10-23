@@ -149,18 +149,53 @@ everywhere:
 | Allocation | Mean loss (cp) |
 |---|---:|
 | 2N everywhere | 5.7 |
-| N or 4N at random (a third get 4N) | 4.3 |
+| N or 4N at random (a third get 4N) | 4.5 |
+| N or 4N by the engine's own rule (best-move stability and score drop) | 3.5 |
 | N or 4N by the model | 3.5 |
+| N or 4N by stability alone, not capped at 4 iterations | 3.3 |
 | N or 4N in hindsight | 2.1 |
 
-The model takes a third of what hindsight gains over random allocation,
-and its strongest inputs are the ones the engine's time management already
-scales by (best-move stability, score drops, node share): this supports
-the existing rules rather than replacing them. That more search pays
-unevenly (random N/4N beats 2N everywhere) is the case for spending time
-by position at all. These are shallow budgets (20k-160k nodes); a rule
-for the engine's soft limit from this model is still to be written and
-SPRT-tested.
+(The random row first read 4.3: every position was given the same random
+number, so "random" was the first third of the file. The engine's rule was
+added to `policy` on 2026-10-23.)
+
+The model does no better than the rule the engine already uses: its
+strongest inputs are the ones the soft limit already scales by (best-move
+stability, score drops), and on these positions they carry all of its
+advantage over random allocation. That more search pays unevenly (random
+N/4N beats 2N everywhere) is the case for spending time by position at
+all. These are shallow budgets (20k-160k nodes) on opening positions (31-32
+pieces); the measurement on positions of real games is below.
+
+Second measurement (2026-10-23, `nags_enhanced` at `24dc875`, bench
+1466858): 1,026 positions of 5,100 games at 3+0.03 between builds of
+`main` (`--openings games.pgn`; pieces: quartiles 12, 20, 26), N = 40,000
+nodes, budgets N to 16N (to 640k nodes, about a 10+0.1 move), reference
+64N. Twice the budget changed the move in 24.7% of the decisions (10.3% in
+the openings). A fit on what the engine knows at the end of an iteration
+(`--features best_changes,stable_iterations,score_abs,score_drop,score_swing,legal_moves,in_check,pieces`,
+stable iterations capped at 10; depth left out, as it did not help on
+held-out decisions): log-loss 0.506 against 0.583, AUC 0.748; per standard
+deviation, stable iterations −0.85, pieces −0.35, score swing −0.35, legal
+moves −0.23, score drop +0.22, best-move changes +0.19, check −0.17. Mean
+loss in cp, the model fitted on one half of the positions and scored on
+the other:
+
+| Allocation | N or 4N | 2N or 8N | 4N or 16N |
+|---|---:|---:|---:|
+| 2kN everywhere | 11.5 | 9.1 | 7.4 |
+| kN or 4kN at random | 13.2 | 10.2 | 8.5 |
+| kN or 4kN by the engine's rule | 11.9 | 9.1 | 5.9 |
+| kN or 4kN by the model | 10.5 | 9.0 | 7.9 |
+| model minus engine's rule (95%) | −1.5 ± 2.4 | −0.1 ± 1.2 | +2.1 ± 2.3 |
+| kN or 4kN in hindsight | 4.0 | 4.5 | 2.3 |
+
+On positions of games the model is no better than the engine's rule
+either, and allocating at random is worse than not allocating at all. The
+room is real (hindsight halves the loss), but these features do not find
+it. The rule from this fit (`exp/time-model`, UCI option `TimeModel`, off
+by default) is being SPRT-tested regardless: offline scoring cannot see how
+a rule moves time between the moves of a game.
 
 ## 3. Strength: SPRT matches with `tools/sprt.py`
 
@@ -644,6 +679,50 @@ move gets less than `MctsMinTime` (1000 ms by default) the MCTS arms play
 pure alpha-beta, and it says so: use 60+0.6 or longer, or
 `--mcts-min-time`. With `--concurrency` N it needs about 3N cores (a
 hybrid game runs alpha-beta, MCTS and the server's share).
+
+#### The neural baseline: what a trained network has to show
+
+Written down before a network trained at scale exists, so that its result
+decides and is not interpreted afterwards. The question: does neural
+guidance, either ordering alpha-beta's root moves by the network's prior
+(`nn-ab`) or the hybrid's MCTS arm (`hybrid`, `hybrid-opt`), beat plain
+alpha-beta with the same resources? If neither does, that is the evidence
+to reconsider the architecture before adding features to it.
+
+Equal resources: the same CPU search threads on both sides, the same time
+control, hash, openings and order. `nn-ab` searches with one thread, like
+`ab`; the hybrid arms with two (alpha-beta and MCTS), like `ab-2t`. The
+GPU, and the server's thread that feeds it, come on top for the neural
+side: if the neural search cannot win with them, it cannot win without.
+
+1. **Readiness** (minutes, no games). `hybrid_eval.py accuracy` on held-out
+   positions and `hybrid_eval.py decisions --positions 150 --movetime 2000`
+   (both moves scored by a 2M-node reference). The MCTS arms go on to games
+   only if the MCTS top move matches the reference within 10 points of the
+   alpha-beta move's rate; the stand-in network matched 50.0% against
+   85.3%, and a match would have measured the arm's time cost, not the
+   network. `nn-ab` goes on to games regardless (it costs one round trip
+   a move).
+2. **Screening**, 400 games an arm (paired openings, 6-core PC: concurrency
+   2), at 10+0.1 with `--mcts-min-time 0` and at 60+0.6 with the engine's
+   default:
+
+       python tools/hybrid_eval.py gauntlet --model M.pth --device cuda --arms nn-ab --baseline ab \
+           --tc 10+0.1 --games 400 --concurrency 2 --out-dir nb_ab_10
+       python tools/hybrid_eval.py gauntlet --model M.pth --device cuda --arms hybrid hybrid-opt \
+           --baseline ab-2t --tc 10+0.1 --mcts-min-time 0 --games 400 --concurrency 2 --out-dir nb_2t_10
+
+   and the same two with `--tc 60+0.6` (no `--mcts-min-time`).
+3. **Confirmation**: an arm with a positive point estimate at either time
+   control plays an SPRT [0, 10] against its baseline at that control
+   (the same gauntlet command with that one arm, `--sprt 0 10` instead of
+   `--games`, and a new `--out-dir`).
+
+The verdict: neural guidance beats alpha-beta if an arm passes step 3.
+If the network passes step 1 and no arm passes step 3, the architecture
+does not pay for itself at this strength. A network trained at scale that
+still fails step 1 is evidence of the same kind, about the network rather
+than the search.
 
 The reduction table alone was tested first, at 5+0.05, and stopped
 undecided at +21.2 ± 21.9 after 674 games (LLR 1.29); it was then tested
