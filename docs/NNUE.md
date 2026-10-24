@@ -93,6 +93,22 @@ mirroring, activation, layout), the settings, the data's fingerprint and
 file list, the train/validation split, the loss history, the weights it
 started from and the trainer's commit and SHA-256.
 
+**A fixed evaluation set.** The validation loss is measured on the last
+1% of the records (at most 1M), which are whole games of the newest batch
+apart from the one game cut at the boundary, and changes with every round's
+data. `--eval-set FILE` (repeatable; 32-byte records that are not trained
+on) is evaluated after every epoch and reported overall, by output bucket
+(piece count) and by the side to move's king bucket, in the log and in
+`<out>.json`, so networks of different rounds and designs can be compared
+on the same positions, and a change that helps the middlegame and hurts
+the endgame shows as such. Make one once, from a seed no training batch
+uses and under a name `run_round.py` does not train on (it trains on
+`selfplay*.bin`), for example
+`nags_datagen --out data/evalset_9999.bin --seed 9999 --first-game 0 --games 3000`
+(about 250k positions); training with or without it gives the same network
+(tested). A loss is not a strength result: it can rule designs out, and
+matches decide.
+
 **Measuring the trainer.** `--profile N` times N batches by phase (batch
 preparation, forward, backward, optimiser step, reading the loss back),
 each synchronised with the GPU, and then N batches end to end reading the

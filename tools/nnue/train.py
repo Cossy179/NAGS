@@ -522,6 +522,41 @@ def tensors(feats, stm, score, result, idx, lam, buckets=1, device="cpu"):
     return white, black, s, bucket, target
 
 
+def eval_set_report(model, path, lam, device, size=65536):
+    """The loss on a fixed set of 32-byte records (--eval-set): overall, by output bucket (piece count) and
+    by the king bucket of the side to move (its king's square in the network's layout), so a change that
+    helps the middlegame and hurts the endgame shows as such."""
+    raw = np.fromfile(path, np.uint8)
+    if raw.size % RECORD_BYTES:
+        sys.exit(f"--eval-set {path}: the size is not a multiple of {RECORD_BYTES} bytes")
+    recs = raw.reshape(-1, RECORD_BYTES)
+    nb, nk = model.buckets, model.king.count
+    err_b, cnt_b = torch.zeros(nb, dtype=torch.float64), torch.zeros(nb, dtype=torch.float64)
+    err_k, cnt_k = torch.zeros(nk, dtype=torch.float64), torch.zeros(nk, dtype=torch.float64)
+    layout = model.king.layout.to(device)
+    model.eval()
+    with torch.no_grad():
+        for start in range(0, len(recs), size):
+            rec = torch.from_numpy(np.array(recs[start : start + size])).to(device)
+            feats, stm, score, result = decode(rec)
+            w, b, s, k, t = tensors(feats, stm, score, result, torch.arange(len(rec), device=device), lam,
+                                    model.buckets, device)
+            err = ((torch.sigmoid(model(w, b, s, k)) - t) ** 2).double()
+            us = torch.where(s.bool().unsqueeze(1), b, w)  # the side to move's perspective features
+            ksq = ((us - 320) * ((us >= 320) & (us < 384))).sum(dim=1)
+            kb = layout[ksq] if nk > 1 else torch.zeros_like(ksq)
+            err_b += torch.bincount(k, weights=err, minlength=nb).cpu()
+            cnt_b += torch.bincount(k, minlength=nb).double().cpu()
+            err_k += torch.bincount(kb, weights=err, minlength=nk).cpu()
+            cnt_k += torch.bincount(kb, minlength=nk).double().cpu()
+    model.train()
+    per = lambda e, c: [float(x / y) if y else None for x, y in zip(e, c)]  # noqa: E731
+    n = int(cnt_b.sum())
+    return {"positions": n, "loss": float(err_b.sum() / max(1, n)), "by_output_bucket": per(err_b, cnt_b),
+            "output_bucket_positions": [int(x) for x in cnt_b], "by_king_bucket": per(err_k, cnt_k),
+            "king_bucket_positions": [int(x) for x in cnt_k]}
+
+
 def evaluate_loss(model, data, idx, lam, size=65536, device="cpu"):
     model.eval()
     total, count = 0.0, 0
@@ -813,6 +848,9 @@ def main(argv=None):
                          "fresh optimiser and schedule; not a resume")
     ap.add_argument("--no-data-cache", action="store_true",
                     help="hash the data files again instead of reusing their <file>.sha256 caches")
+    ap.add_argument("--eval-set", action="append", default=[], metavar="FILE",
+                    help="a fixed set of 32-byte records (not trained on) evaluated after every epoch, overall, by "
+                         "output bucket and by king bucket (repeatable; recorded in <out>.json)")
     ap.add_argument("--sync-every", type=int, default=1,
                     help="read the training loss back from the GPU every N batches instead of every batch (each "
                          "read waits for the GPU); the network trained is the same, the logged loss differs in "
@@ -928,7 +966,15 @@ def main(argv=None):
         if val is not None:
             msg += f"  val {val:.6f}"
         print(f"{msg}  ({time.time() - t:.0f}s)", flush=True)
-        history.append({"epoch": epoch, "train": total / count, "val": val, "seconds": round(time.time() - t, 1)})
+        entry = {"epoch": epoch, "train": total / count, "val": val, "seconds": round(time.time() - t, 1)}
+        if args.eval_set:
+            entry["eval"] = {}
+            for path in args.eval_set:
+                rep = eval_set_report(model, path, args.lam, device)
+                entry["eval"][os.path.basename(path)] = rep
+                print(f"  eval {os.path.basename(path)}: {rep['loss']:.6f} on {rep['positions']} positions; by piece "
+                      "count " + " ".join("-" if x is None else f"{x:.5f}" for x in rep["by_output_bucket"]), flush=True)
+        history.append(entry)
         export(model, args.out)
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(),
                     "rng": rng.bit_generator.state, "epoch": epoch, "positions": n, "hidden": args.hidden,
@@ -943,6 +989,7 @@ def main(argv=None):
             "settings": {**settings, "epochs": args.epochs, "val": args.val, "seed": args.seed},
             "data": {"positions": n, "train": n - source.n_val, "validation": source.n_val, **fingerprint},
             "init_from": started_from, "epochs_done": epoch, "history": history, "code": version,
+            "eval_sets": [{"name": os.path.basename(p), "sha256": file_sha256(p, cache=False)} for p in args.eval_set],
             "torch": torch.__version__, "device": str(device),
             "written": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
         }
