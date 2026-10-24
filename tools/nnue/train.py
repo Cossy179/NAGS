@@ -717,6 +717,74 @@ def code_version():
     return {"git_commit": commit, "train_py_sha256": file_sha256(os.path.abspath(__file__), cache=False)}
 
 
+def profile(model, opt, sched, source, rng, args, device, warmup=5):
+    """--profile: where a training batch's time goes, measured (the model is trained for the batches timed,
+    and nothing is written)."""
+    sync = (lambda: torch.cuda.synchronize(device)) if device.type == "cuda" else (lambda: None)
+
+    def batch_stream():
+        while True:
+            yield from source.train_batches(rng, args.batch, args.lam, args.buckets)
+
+    stream = batch_stream()
+    phases = {"data": [], "forward": [], "backward": [], "step": [], "loss read": []}
+    for i in range(warmup + args.profile):
+        sync()
+        t0 = time.perf_counter()
+        w, b, s, k, target = next(stream)
+        sync()
+        t1 = time.perf_counter()
+        loss = ((torch.sigmoid(model(w, b, s, k)) - target) ** 2).mean()
+        sync()
+        t2 = time.perf_counter()
+        opt.zero_grad()
+        loss.backward()
+        sync()
+        t3 = time.perf_counter()
+        opt.step()
+        sched.step()
+        model.clip()
+        sync()
+        t4 = time.perf_counter()
+        loss.item()
+        t5 = time.perf_counter()
+        if i >= warmup:
+            for name, d in zip(phases, (t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4)):
+                phases[name].append(d * 1000)
+    med = {k: float(np.median(v)) for k, v in phases.items()}
+    print(f"profile: {args.profile} batches of {args.batch} on {device}, median ms per batch (each phase "
+          "synchronised): " + ", ".join(f"{k} {v:.2f}" for k, v in med.items())
+          + f"; total {sum(med.values()):.2f}", flush=True)
+
+    def end_to_end(every):
+        sync()
+        t0 = time.perf_counter()
+        pending = None
+        for i in range(args.profile):
+            w, b, s, k, target = next(stream)
+            loss = ((torch.sigmoid(model(w, b, s, k)) - target) ** 2).mean()
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            sched.step()
+            model.clip()
+            part = loss.detach() * len(target)
+            pending = part if pending is None else pending + part
+            if (i + 1) % every == 0:
+                pending.item()
+                pending = None
+        if pending is not None:
+            pending.item()
+        sync()
+        return args.profile * args.batch / (time.perf_counter() - t0)
+
+    every = args.sync_every if args.sync_every > 1 else 100
+    per_batch, deferred = end_to_end(1), end_to_end(every)
+    print(f"profile: end to end {per_batch:,.0f} positions/s reading the loss every batch, {deferred:,.0f} reading "
+          f"it every {every} ({deferred / per_batch:.2f}x)", flush=True)
+    return med, per_batch, deferred
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", nargs="+", required=True,
@@ -745,6 +813,13 @@ def main(argv=None):
                          "fresh optimiser and schedule; not a resume")
     ap.add_argument("--no-data-cache", action="store_true",
                     help="hash the data files again instead of reusing their <file>.sha256 caches")
+    ap.add_argument("--sync-every", type=int, default=1,
+                    help="read the training loss back from the GPU every N batches instead of every batch (each "
+                         "read waits for the GPU); the network trained is the same, the logged loss differs in "
+                         "rounding")
+    ap.add_argument("--profile", type=int, default=0, metavar="N",
+                    help="time N training batches by phase (data, forward, backward, step, loss read) and end to "
+                         "end with and without a loss read per batch, then stop without writing anything")
     args = ap.parse_args(argv)
 
     if args.threads:
@@ -822,11 +897,15 @@ def main(argv=None):
         history = list(ckpt.get("history", []))
         first_epoch = ckpt["epoch"] + 1
         print(f"resuming after epoch {ckpt['epoch']}", flush=True)
+    if args.profile:
+        profile(model, opt, sched, source, rng, args, device)
+        return
     last_epoch = args.epochs if not args.stop_after else min(args.epochs, first_epoch + args.stop_after - 1)
     version = code_version()
     for epoch in range(first_epoch, last_epoch + 1):
         t = time.time()
         total, count = 0.0, 0
+        pending, n_pending = None, 0  # loss sums still on the device (--sync-every)
         for w, b, s, k, target in source.train_batches(rng, args.batch, args.lam, args.buckets):
             loss = ((torch.sigmoid(model(w, b, s, k)) - target) ** 2).mean()
             opt.zero_grad()
@@ -834,8 +913,16 @@ def main(argv=None):
             opt.step()
             sched.step()
             model.clip()
-            total += loss.item() * len(target)
+            if args.sync_every <= 1:
+                total += loss.item() * len(target)  # waits for the GPU to finish this batch
+            else:
+                part = loss.detach() * len(target)
+                pending, n_pending = (part if pending is None else pending + part), n_pending + 1
+                if n_pending >= args.sync_every:
+                    total, pending, n_pending = total + pending.item(), None, 0
             count += len(target)
+        if pending is not None:
+            total += pending.item()
         msg = f"epoch {epoch:3d}  train {total / count:.6f}"
         val = source.val_loss(model, args.lam) if source.n_val else None
         if val is not None:

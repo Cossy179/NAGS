@@ -93,6 +93,20 @@ mirroring, activation, layout), the settings, the data's fingerprint and
 file list, the train/validation split, the loss history, the weights it
 started from and the trainer's commit and SHA-256.
 
+**Measuring the trainer.** `--profile N` times N batches by phase (batch
+preparation, forward, backward, optimiser step, reading the loss back),
+each synchronised with the GPU, and then N batches end to end reading the
+loss after every batch (as training does by default, which makes the CPU
+wait for the GPU each time) and after every 100 (or `--sync-every`); it
+writes nothing. `--sync-every N` reads the loss every N batches in
+training: the network trained is byte-identical (tested), only the logged
+loss's rounding differs. On the 4-core VM's CPU (no GPU; one thread, kb4
+SCReLU, batch 16384): 513 ms a batch, of which data 51, forward 147,
+backward 308, step 7, and the loss read nothing measurable (1.01x end to
+end), as expected without a GPU. Whether the per-batch read costs anything
+on the RTX 3060 is what `--profile 200` there will say; the default stays
+at 1 until it does.
+
 **Exact resume and warm starts are separate.** `--resume` continues the
 same run (data, settings, optimiser and schedule state). `--init-from NET`
 starts a *new* run from NET's weights, an exported network such as
