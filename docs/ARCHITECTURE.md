@@ -47,7 +47,13 @@ either.
 * `FastBoard` finds its magic multipliers at startup by seeded trial and error
   (deterministic, about 0.25 s) instead of trusting hard-coded constants.
 * Draws: fifty-move rule (checkmate takes precedence), repetition and
-  insufficient material. Inside the search a single earlier occurrence of the
+  insufficient material (no pawns, rooks or queens, and at most one minor
+  piece or only bishops, all on squares of one colour: python-chess's
+  dead positions). An en-passant square is part of the position only if a
+  capture there is legal (not when the capturing pawn is pinned, or both
+  pawns stand between its king and a rook or queen on the rank), as by the
+  laws and in python-chess, so a repetition through such a position is found
+  and the hash does not split it. Inside the search a single earlier occurrence of the
   position counts as a repetition (`RepetitionRule` `Twofold`, the default):
   a search heuristic, stronger in play than the laws' rule (which cost
   17.6 ± 9.9 Elo, `exp/repetition-rule-head`), but not what the game gives.

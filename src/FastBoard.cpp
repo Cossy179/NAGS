@@ -884,8 +884,9 @@ bool FastBoard::isDraw(int pliesFromRoot) const {
 bool FastBoard::isInsufficientMaterial() const {
     for (int c = 0; c < 2; ++c)
         if (pieces[c][PAWN] | pieces[c][ROOK] | pieces[c][QUEEN]) return false;
-    int minors = popcount(pieces[0][KNIGHT] | pieces[1][KNIGHT] | pieces[0][BISHOP] | pieces[1][BISHOP]);
-    return minors <= 1;
+    const Bitboard knights = pieces[0][KNIGHT] | pieces[1][KNIGHT], bishops = pieces[0][BISHOP] | pieces[1][BISHOP];
+    // At most one minor piece, or only bishops, all on squares of one colour: no mate is possible.
+    return popcount(knights | bishops) <= 1 || (!knights && ((bishops & kDarkSquares) == 0 || (bishops & ~kDarkSquares) == 0));
 }
 
 bool FastBoard::isDraw() const {

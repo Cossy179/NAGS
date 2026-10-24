@@ -613,8 +613,9 @@ bool Board::isDraw(int pliesFromRoot) const {
 
 bool Board::isInsufficientMaterial() const {
     if (pieces[WP_] | pieces[BP_] | pieces[WR_] | pieces[BR_] | pieces[WQ_] | pieces[BQ_]) return false;
-    int minors = popcount(pieces[WN_] | pieces[BN_] | pieces[WB_] | pieces[BB_]);
-    return minors <= 1;
+    const Bitboard knights = pieces[WN_] | pieces[BN_], bishops = pieces[WB_] | pieces[BB_];
+    // At most one minor piece, or only bishops, all on squares of one colour: no mate is possible.
+    return popcount(knights | bishops) <= 1 || (!knights && ((bishops & kDarkSquares) == 0 || (bishops & ~kDarkSquares) == 0));
 }
 
 bool Board::isDraw() const {
