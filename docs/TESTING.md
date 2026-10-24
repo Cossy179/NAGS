@@ -325,6 +325,29 @@ python tools/make_openings.py --engine build/nags_enhanced --pgn AJ-CORR-PGN-000
 (run `git lfs pull` first to fetch the PGN), or use an established book.
 Both EPD and PGN openings work with `--openings`.
 
+**The funnel** (`tools/funnel.py`) runs one candidate through the
+programme's usual stages, fixed before the first game. `--kind feature`
+(the default) is [0, 10] at 3+0.03 with an 8000-game cap, then, only after
+H1, [−5, 0] at 10+0.1 with a 6000-game cap. `--kind fix` is one [−5, 0] at
+3+0.03 with a 6000-game cap. `--stage NAME,LIMIT,ELO0,ELO1,GAMES` gives
+other stages.
+
+```bash
+python tools/funnel.py --name capture-history --candidate ../cand/build/nags_enhanced \
+    --base build/nags_enhanced --dir results/capture-history --concurrency 3
+```
+
+Before any game it writes `<dir>/plan.json` with the stages, both binaries
+(SHA-256 and bench node count), the openings' SHA-256 and the seed. Running
+the same command again continues: a finished stage is reused and a stopped
+one is resumed from its log. Other stages, binaries, openings or a seed in
+the same directory are refused, so a cap can't be raised after the results
+come in. A candidate with the base's bench is not played; that is a speed
+change, measured with bench. An invalid match stops the funnel without a
+result. The exit status is 0 if it passed every stage, 1 if rejected, 2 if
+undecided at a cap, 3 if invalid or refused, 4 if interrupted. It ends with
+one strength-log row per stage played, ready for the table below.
+
 **Other runners.** For very fast time controls or big matches, a dedicated
 C++ runner has lower overhead, for example
 [fastchess](https://github.com/Disservin/fastchess) (`-each tc=8+0.08 -openings

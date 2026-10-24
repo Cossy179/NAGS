@@ -374,6 +374,13 @@ def file_sha256(path: str) -> Optional[str]:
         return None
 
 
+def command_sha256(command: Sequence[str]) -> Optional[str]:
+    """SHA-256 of the files an engine command runs: the binary, or an interpreter and its script (combined)."""
+    digests = [file_sha256(c) for c in command if os.path.isfile(c)]
+    return digests[0] if len(digests) == 1 else (
+        hashlib.sha256("".join(d or "" for d in digests).encode()).hexdigest() if digests else None)
+
+
 def preflight(spec: EngineSpec, timeout: float = 60.0) -> Dict[str, Any]:
     """Starts the engine once, before any game: the UCI handshake, every option known and set without a
     complaint, isready answered, and a legal move from a one-ply search of the start position. Raises
@@ -457,10 +464,7 @@ def preflight(spec: EngineSpec, timeout: float = 60.0) -> Dict[str, Any]:
         except subprocess.TimeoutExpired:
             proc.kill()
     network = next((s[len("NNUE evaluation: "):] for s in said if s.startswith("NNUE evaluation: ")), None)
-    files = [c for c in spec.command if os.path.isfile(c)]  # the binary, or an interpreter and its script
-    digests = [file_sha256(f) for f in files]
-    digest = digests[0] if len(digests) == 1 else (
-        hashlib.sha256("".join(d or "" for d in digests).encode()).hexdigest() if digests else None)
+    digest = command_sha256(spec.command)
     eval_file = next((v for k, v in spec.options.items() if k.lower() == "evalfile"), None)
     return {"name": spec.name, "command": spec.command, "sha256": digest,
             "id": name, "options": spec.options, "said": said, "network": network, "evaluation": evaluation,
