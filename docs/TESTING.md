@@ -17,9 +17,11 @@ positions, UCI behaviour, the Python services, the training pipeline and the
 match runner's statistics.
 
 On the Windows PC (2026-10-23, `0291007`): all 49 `ctest` tests pass; in
-`pytest`, two tests fail for Windows reasons (`test_sprt.py::
-test_engine_paths_stay_whole`, `test_ladder.py::test_anchor_and_rate`) and
-the GNN tests need `torch_geometric`; see "Known issues on Windows" in
+`pytest`, two tests failed for Windows reasons (`test_sprt.py::
+test_engine_paths_stay_whole`, whose own file name had a backslash, and
+`test_ladder.py::test_anchor_and_rate`, because `tools/ladder.py` split
+engine paths with POSIX rules: both fixed since, not yet rerun on Windows)
+and the GNN tests need `torch_geometric`; see "Known issues on Windows" in
 `docs/NNUE.md`.
 
 ## 2. Fingerprint: `bench`
@@ -232,10 +234,28 @@ How the runner works:
   log-likelihood ratio uses maximum-likelihood distributions constrained to
   each hypothesis, as fishtest does.
 * Exit status: 0 = H1 accepted (the change is good), 1 = H0 accepted, 2 =
-  game limit reached without a decision.
+  game limit reached without a decision, 3 = invalid or failed (no decision).
 * An interrupted match continues with `--resume <its output>` (same engines,
   settings and `--seed`): the counts are restored from the last status line
   and play goes on with the next opening pair.
+* Before the first game each engine is started once (a preflight): the UCI
+  handshake, every option known and set without a complaint (an `EvalFile`
+  the engine cannot load fails here), `isready`, and a legal move from a
+  one-ply search. One `Fingerprint:` line then records both engines (the
+  SHA-256 of their files, their `id name`, options and the network each
+  reports loading), the openings file's SHA-256 and the settings. `--resume`
+  refuses a log whose fingerprint differs (other binaries, networks,
+  openings or limits; the game cap and concurrency may change), unless
+  `--force-resume`.
+* A failed launch is not a game. An engine that cannot be started, at the
+  preflight or when it is restarted after a crash, makes the match invalid:
+  exit status 3, `Match invalid` and no decision. (Before this, every game of
+  a Windows match whose engine path had been split wrongly was scored as a
+  crash, the pairs of crashes looked like a tie, and H0 was accepted.)
+  An engine that crashes, hangs, plays an illegal move or loses on time
+  during a game loses that game, and a `Forfeits:` line after `Endings:`
+  counts them per engine. `tools/calibrate.py` and `tools/ladder.py` run the
+  same preflight before their matches.
 
 A Monte-Carlo simulation of 1,000 SPRTs per setting (bounds [0, 20],
 α = β = 0.05) confirms the advertised error rates:

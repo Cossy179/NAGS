@@ -268,21 +268,26 @@ Practical notes from that round:
   the download times out, `pip install --timeout 120 --retries 10 ...`; pip's
   cache grew to about 20 GB (`pip cache purge`).
 
-Known issues on Windows (at `0291007`):
+Known issues on Windows (at `0291007`), and what has been done about them:
 
-* `tools/calibrate.py` still splits `--engine` with POSIX rules, which drop
-  the backslashes of a Windows path (`tools/sprt.py` was fixed): give the
-  engine path with forward slashes, e.g. `C:/.../nags_enhanced.exe`.
+* `tools/calibrate.py` and `tools/ladder.py` split `--engine` (and the
+  ladder's rung engines) with POSIX rules, which drop the backslashes of a
+  Windows path. Fixed: both use `tools/sprt.py`'s path handling (an existing
+  file is one argument as it is). Until the fix, giving the path with
+  forward slashes worked.
 * Before `sprt.py` was fixed, every game of a match failed to start
   (`FileNotFoundError`), and the runner still scored the 204 failures as a
-  tie and accepted H0. `run_round.py` now checks that a network loads before
-  a match, but a match in which every game is an engine failure still ends
-  with a decision: check the `Endings:` line of a surprising result.
-* `tests/python/test_sprt.py::test_engine_paths_stay_whole` fails on
-  Windows because the test's own file name contains a backslash, which
-  Windows reads as a directory separator (the function under test is fine);
-  `tests/python/test_ladder.py::test_anchor_and_rate` fails because the
-  recorded bench is `None`. The GNN tests need `torch_geometric`.
+  tie and accepted H0. Fixed: the runner now starts both engines before the
+  first game (and the ladder and calibration before each of their matches),
+  and an engine that cannot be started makes the match invalid (exit 3, no
+  decision) instead of losing its games; `run_round.py` reports such a
+  match as `error`.
+* `tests/python/test_sprt.py::test_engine_paths_stay_whole` failed on
+  Windows because the test's own file name contained a backslash, which
+  Windows reads as a directory separator (the function under test was fine),
+  and `tests/python/test_ladder.py::test_anchor_and_rate` because of the
+  ladder's path splitting above (its recorded bench was `None`). Both fixed,
+  not yet rerun on Windows. The GNN tests need `torch_geometric`.
 * Calibrations from different machines are not comparable: network 7
   rated 3010 ± 31 on this PC and 3111 ± 34 on the VM (`docs/TESTING.md`).
 
