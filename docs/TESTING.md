@@ -204,7 +204,11 @@ by default; its level set so that it spends the old rule's time a move)
 was SPRT-tested regardless, since offline scoring cannot see how a rule
 moves time between the moves of a game: at 3+0.03, SPRT [0, 10], `TimeModel`
 on against off in the same binary, H0 after 978 games, −12.1 ± 14.8
-(+227 =490 −261). The offline result held in play.
+(+227 =490 −261); at 10+0.1, the same SPRT: H0 after 1070 games, −5.5 ±
+11.5 (+204 =645 −221). The offline result held in play at both controls:
+the rule stays off by default on its branch, not merged. The stability
+and score-drop rule the engine has is as good a use of these signals as
+this data can find; a better allocation needs other inputs.
 
 ## 3. Strength: SPRT matches with `tools/sprt.py`
 
