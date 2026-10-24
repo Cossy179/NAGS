@@ -234,7 +234,11 @@ How the runner works:
   log-likelihood ratio uses maximum-likelihood distributions constrained to
   each hypothesis, as fishtest does.
 * Exit status: 0 = H1 accepted (the change is good), 1 = H0 accepted, 2 =
-  game limit reached without a decision, 3 = invalid or failed (no decision).
+  game limit reached without a decision, 3 = invalid or failed (no decision),
+  4 = interrupted (Ctrl-C) before a decision or the game limit. (Until
+  2026-10-25 an interrupted SPRT printed "SPRT inconclusive: maximum number
+  of games reached" and exited 2, so `run_round.py` took it for a finished
+  match and did not resume it; it now says "Match interrupted after N games".)
 * An interrupted match continues with `--resume <its output>` (same engines,
   settings and `--seed`): the counts are restored from the last status line
   and play goes on with the next opening pair.

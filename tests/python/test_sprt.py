@@ -6,6 +6,7 @@ import os
 import random
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import chess
@@ -395,3 +396,32 @@ def test_tools_keep_windows_engine_paths_whole(tmp_path):
     spec.loader.exec_module(ladder)
     rung = ladder.rung_spec({"name": "r", "engine": str(exe), "limits": {"nodes": 10}})
     assert rung.command == [str(exe)]
+
+
+@needs_engines
+def test_an_interrupted_match_is_not_reported_as_finished(tmp_path, monkeypatch, capsys):
+    # Ctrl-C used to end with "SPRT inconclusive: maximum number of games reached" (exit 2), which run_round
+    # reads as a finished match without a decision, so it never resumed it.
+    import types
+
+    calls = []
+
+    def sleep(seconds):
+        calls.append(seconds)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        time.sleep(seconds)
+
+    monkeypatch.setattr(sprt, "time", types.SimpleNamespace(monotonic=time.monotonic, sleep=sleep,
+                                                            perf_counter=time.perf_counter, time=time.time))
+    match = _sprt_match((sprt.EngineSpec("a", [_engine("nags_fast")]), sprt.EngineSpec("b", [_engine("nags_basic")])),
+                        pairs=500)
+    assert match.run(report_interval=1000) == 4
+    out = capsys.readouterr().out
+    assert "Match interrupted after" in out and "inconclusive" not in out and "accepted" not in out
+    sys.path.insert(0, str(ROOT / "tools" / "nnue"))
+    import run_round
+
+    log = tmp_path / "m.log"
+    log.write_text(out)
+    assert run_round.sprt_result(log) is None  # to be resumed, not taken as a result

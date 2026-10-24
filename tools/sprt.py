@@ -29,7 +29,8 @@ plays an illegal move or loses on time during a game loses that game, and the "F
 these per engine. --resume refuses a log whose fingerprint names other engines or settings.
 
 Exit status: 0 = H1 accepted (or the fixed-length match finished),
-1 = H0 accepted, 2 = maximum games reached without a decision, 3 = error (no decision).
+1 = H0 accepted, 2 = maximum games reached without a decision, 3 = error (no decision),
+4 = interrupted (Ctrl-C) before a decision or the end: continue it with --resume.
 """
 
 from __future__ import annotations
@@ -670,6 +671,7 @@ class Match:
         for t in threads:
             t.start()
         last = time.monotonic()
+        interrupted = False
         try:
             while any(t.is_alive() for t in threads):
                 time.sleep(0.2)
@@ -677,6 +679,7 @@ class Match:
                     print(self.status(), flush=True)
                     last = time.monotonic()
         except KeyboardInterrupt:
+            interrupted = True
             print("Interrupted; finishing games in progress...", flush=True)
             self.stop.set()
             for t in threads:
@@ -701,6 +704,10 @@ class Match:
             if self.decision == "H0":
                 print(f"H0 accepted: {self.specs[0].name} is not stronger by {self.sprt[1]:g} Elo")
                 return 1
+        if interrupted:  # not the end of the match: --resume continues it (and run_round does so by itself)
+            print(f"Match interrupted after {sum(self.wdl)} games, before its end: no result yet", flush=True)
+            return 4
+        if self.sprt:
             print("SPRT inconclusive: maximum number of games reached")
             return 2
         return 0
