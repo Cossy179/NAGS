@@ -21,6 +21,22 @@
 //   uint8  reserved[4]      0
 //
 //   nags_datagen --out data/selfplay.txt --games 10000 --threads 3 --nodes 5000
+//
+// Shards (--first-game N): the games are numbered N .. N + games - 1 and each
+// one draws its opening from its own random stream, seeded by (seed, game
+// number), so a game is the same whichever thread plays it and whatever was
+// played before (only the order games are written in depends on the
+// threads). <out>.games records every finished game:
+//
+//   # nags_datagen games seed=... nodes=... ...   (the settings)
+//   <game> <records> <bytes> <result>
+//
+// Run the same command again after a stop and it resumes: a game cut off
+// mid-write is truncated and only the games not in the list are played.
+// Several machines can share one seed with disjoint game ranges and never
+// write the same game. Without --first-game the games are played as always
+// (one random stream per thread), which keeps the output of a given command
+// unchanged.
 
 #include "FastBoard.h"
 #include "Search.h"
@@ -33,10 +49,12 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <mutex>
 #include <random>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -58,6 +76,7 @@ struct Options {
     // the search plays by) or, with "--repetition third", at the third
     // occurrence, as the laws give it (the search still plays by its own rule).
     bool thirdRepetition = false;
+    long long firstGame = -1; // >= 0: shard mode (numbered games, own random streams, resumable)
 };
 
 struct Record {
@@ -91,7 +110,8 @@ std::atomic<long long> gamesStarted{0}, gamesDone{0}, positionsWritten{0};
 
 void usage() {
     std::cerr << "usage: nags_datagen --out FILE [--games N] [--threads N] [--nodes N] [--random-plies N]\n"
-                 "                    [--max-opening-score CP] [--hash MB] [--seed N] [--repetition first|third]\n";
+                 "                    [--max-opening-score CP] [--hash MB] [--seed N] [--repetition first|third]\n"
+                 "                    [--first-game N]\n";
 }
 
 bool parseArgs(int argc, char **argv, Options &o) {
@@ -118,6 +138,7 @@ bool parseArgs(int argc, char **argv, Options &o) {
         else if (a == "--max-opening-score") o.maxOpeningScore = static_cast<int>(n);
         else if (a == "--hash") o.hashMB = static_cast<int>(std::max(1LL, n));
         else if (a == "--seed") o.seed = static_cast<uint64_t>(n);
+        else if (a == "--first-game") o.firstGame = n;
         else { usage(); return false; }
     }
     if (o.out.empty()) { usage(); return false; }
@@ -191,6 +212,108 @@ bool playGame(const Options &o, std::mt19937_64 &rng, Searcher<FastBoard> &searc
     }
 }
 
+// Shard mode: game `game`'s own random stream (std::seed_seq and mt19937_64
+// are specified exactly by the standard, so every compiler gives the same).
+std::mt19937_64 gameRng(uint64_t seed, long long game) {
+    const uint64_t g = static_cast<uint64_t>(game);
+    std::seed_seq s{static_cast<uint32_t>(seed), static_cast<uint32_t>(seed >> 32), static_cast<uint32_t>(g),
+                    static_cast<uint32_t>(g >> 32), 0x4E414753u};
+    return std::mt19937_64(s);
+}
+
+// The records of one finished game, as written to the output.
+std::string serialise(const Options &o, std::vector<Record> &records, double result) {
+    std::ostringstream buf;
+    if (o.binary) {
+        const unsigned char res = result == 1.0 ? 2 : result == 0.0 ? 0 : 1;
+        for (Record &rec : records) {
+            rec.bin[26] = res;
+            buf.write(reinterpret_cast<const char *>(rec.bin.data()), static_cast<std::streamsize>(rec.bin.size()));
+        }
+    } else {
+        const char *res = result == 1.0 ? "1.0" : result == 0.0 ? "0.0" : "0.5";
+        for (const Record &rec : records) buf << rec.fen << " | " << rec.score << " | " << res << '\n';
+    }
+    return buf.str();
+}
+
+// What a shard's games depend on besides the binary: its first line, which a
+// resume must find unchanged.
+std::string shardHeader(const Options &o) {
+    std::ostringstream h;
+    h << "# nags_datagen games seed=" << o.seed << " nodes=" << o.nodes << " random-plies=" << o.randomPlies
+      << " max-opening-score=" << o.maxOpeningScore << " hash=" << o.hashMB
+      << " repetition=" << (o.thirdRepetition ? "third" : "first") << " format=" << (o.binary ? "bin" : "text")
+      << " network=" << (nnue::network() ? nnue::networkName() : "hand-written");
+    return h.str();
+}
+
+std::vector<long long> shardTodo; // shard mode: the games still to play
+std::atomic<size_t> shardNext{0};
+
+void shardWorker(const Options &o, std::ofstream &out, std::ofstream &index) {
+    TranspositionTable tt(static_cast<size_t>(o.hashMB));
+    Searcher<FastBoard> searcher(&tt);
+    std::vector<Record> records;
+    for (size_t k; (k = shardNext.fetch_add(1)) < shardTodo.size();) {
+        const long long game = shardTodo[k];
+        std::mt19937_64 rng = gameRng(o.seed, game);
+        double result = 0.5;
+        while (!playGame(o, rng, searcher, tt, records, result)) {
+        }
+        const std::string bytes = serialise(o, records, result);
+        {
+            std::lock_guard<std::mutex> lock(outMutex);
+            out << bytes;
+            out.flush();
+            index << game << ' ' << records.size() << ' ' << bytes.size() << ' ' << result << '\n';
+            index.flush();
+        }
+        positionsWritten += static_cast<long long>(records.size());
+        ++gamesDone;
+    }
+}
+
+// Shard mode: reads <out>.games, truncates <out> to the games it lists and
+// fills shardTodo with the rest. False (with a message) if the index does not
+// belong to these settings or does not match the output.
+bool prepareShard(const Options &o, const std::string &indexPath, long long &resumedGames) {
+    namespace fs = std::filesystem;
+    std::set<long long> done;
+    uintmax_t bytes = 0;
+    std::ifstream in(indexPath);
+    if (in) {
+        std::string line;
+        if (!std::getline(in, line) || line != shardHeader(o)) {
+            std::cerr << indexPath << " was written with other settings:\n  " << line << "\nnow\n  " << shardHeader(o)
+                      << "\n(use another --out, or the same settings)\n";
+            return false;
+        }
+        long long game = 0, recs = 0;
+        uintmax_t size = 0;
+        double res = 0;
+        while (in >> game >> recs >> size >> res) {
+            done.insert(game);
+            bytes += size;
+        }
+    }
+    std::error_code ec;
+    const uintmax_t have = fs::exists(o.out, ec) ? fs::file_size(o.out, ec) : 0;
+    if (have < bytes) {
+        std::cerr << o.out << " holds " << have << " bytes, less than the " << bytes << " its index lists\n";
+        return false;
+    }
+    if (have > bytes) fs::resize_file(o.out, bytes, ec); // a game cut off before its index line: played again
+    if (ec) {
+        std::cerr << "cannot truncate " << o.out << ": " << ec.message() << "\n";
+        return false;
+    }
+    for (long long g = o.firstGame; g < o.firstGame + o.games; ++g)
+        if (!done.count(g)) shardTodo.push_back(g);
+    resumedGames = o.games - static_cast<long long>(shardTodo.size());
+    return true;
+}
+
 void worker(const Options &o, int id, std::ofstream &out) {
     std::mt19937_64 rng(o.seed * 1000003ULL + static_cast<uint64_t>(id));
     TranspositionTable tt(static_cast<size_t>(o.hashMB));
@@ -200,20 +323,10 @@ void worker(const Options &o, int id, std::ofstream &out) {
         double result = 0.5;
         while (!playGame(o, rng, searcher, tt, records, result)) {
         }
-        std::ostringstream buf;
-        if (o.binary) {
-            const unsigned char res = result == 1.0 ? 2 : result == 0.0 ? 0 : 1;
-            for (Record &rec : records) {
-                rec.bin[26] = res;
-                buf.write(reinterpret_cast<const char *>(rec.bin.data()), static_cast<std::streamsize>(rec.bin.size()));
-            }
-        } else {
-            const char *res = result == 1.0 ? "1.0" : result == 0.0 ? "0.0" : "0.5";
-            for (const Record &rec : records) buf << rec.fen << " | " << rec.score << " | " << res << '\n';
-        }
+        const std::string bytes = serialise(o, records, result);
         {
             std::lock_guard<std::mutex> lock(outMutex);
-            out << buf.str();
+            out << bytes;
             out.flush();
         }
         positionsWritten += static_cast<long long>(records.size());
@@ -226,10 +339,26 @@ void worker(const Options &o, int id, std::ofstream &out) {
 int main(int argc, char **argv) {
     Options o;
     if (!parseArgs(argc, argv, o)) return 2;
+    const bool shard = o.firstGame >= 0;
+    const std::string indexPath = o.out + ".games";
+    long long resumed = 0;
+    if (shard && !prepareShard(o, indexPath, resumed)) return 2;
     std::ofstream out(o.out, o.binary ? std::ios::app | std::ios::binary : std::ios::app);
     if (!out) {
         std::cerr << "cannot open " << o.out << "\n";
         return 1;
+    }
+    std::ofstream index;
+    if (shard) {
+        const bool fresh = !std::filesystem::exists(indexPath);
+        index.open(indexPath, std::ios::app);
+        if (!index) {
+            std::cerr << "cannot open " << indexPath << "\n";
+            return 1;
+        }
+        if (fresh) index << shardHeader(o) << '\n' << std::flush;
+        std::fprintf(stderr, "nags_datagen: games %lld-%lld, %lld already written, %zu to play\n", o.firstGame,
+                     o.firstGame + o.games - 1, resumed, shardTodo.size());
     }
     // A network that does not fit this build (another NAGS_NNUE_HIDDEN)
     // silently means the hand-written evaluation: say which one plays.
@@ -238,13 +367,16 @@ int main(int argc, char **argv) {
                                  : "hand-written (no usable NNUE network embedded)");
     auto start = std::chrono::steady_clock::now();
     std::vector<std::thread> threads;
-    for (int i = 0; i < o.threads; ++i) threads.emplace_back(worker, std::cref(o), i, std::ref(out));
+    for (int i = 0; i < o.threads; ++i) {
+        if (shard) threads.emplace_back(shardWorker, std::cref(o), std::ref(out), std::ref(index));
+        else threads.emplace_back(worker, std::cref(o), i, std::ref(out));
+    }
     std::atomic<bool> finished{false};
     std::thread progress([&] {
         while (!finished) {
             for (int i = 0; i < 100 && !finished; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
             double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-            std::fprintf(stderr, "games %lld/%lld  positions %lld  %.0f positions/s\n", gamesDone.load(), o.games,
+            std::fprintf(stderr, "games %lld/%lld  positions %lld  %.0f positions/s\n", gamesDone.load() + resumed, o.games,
                          positionsWritten.load(), s > 0 ? positionsWritten.load() / s : 0.0);
         }
     });

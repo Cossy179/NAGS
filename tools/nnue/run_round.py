@@ -97,21 +97,37 @@ def next_seed(data_dir, start):
     return max([start - 1] + used) + 1
 
 
+def unfinished_batch(data_dir, games):
+    """The seed of a resumable batch (nags_datagen --first-game) whose index lists fewer than `games` games."""
+    for idx in sorted(data_dir.glob("selfplay_*.bin.games")):
+        m = re.match(r"selfplay_(\d+)\.bin\.games$", idx.name)
+        if m and len(idx.read_text().splitlines()) - 1 < games:
+            return int(m.group(1))
+    return None
+
+
 def generate(args, data_dir):
     datagen = find_binary("nags_datagen")
 
     def batch(seed):
         out = data_dir / f"selfplay_{seed}.bin"
-        if run([datagen, "--out", out, "--games", args.games, "--threads", args.threads, "--nodes", args.nodes,
-                "--seed", seed]) != 0:
+        cmd = [datagen, "--out", out, "--games", args.games, "--threads", args.threads, "--nodes", args.nodes,
+               "--seed", seed]
+        if args.resumable_batches:  # numbered games: a stopped batch is finished, not replaced by a new seed
+            cmd += ["--first-game", "0"]
+        if run(cmd) != 0:
             sys.exit("data generation failed")
+
+    def next_batch():
+        unfinished = unfinished_batch(data_dir, args.games) if args.resumable_batches else None
+        return unfinished if unfinished is not None else next_seed(data_dir, args.seed or 1)
 
     if args.target_positions:
         while (have := count_positions(data_files(data_dir))) < args.target_positions:
             print(f"\n{have:,} of {args.target_positions:,} positions", flush=True)
-            batch(next_seed(data_dir, args.seed or 1))
+            batch(next_batch())
     else:
-        batch(next_seed(data_dir, args.seed or 1))
+        batch(next_batch())
 
 
 def sprt_result(log):
@@ -204,6 +220,9 @@ def main(argv=None):
     ap.add_argument("--threads", type=int, default=4, help="CPU threads for data generation and testing")
     ap.add_argument("--nodes", type=int, default=5000, help="search nodes per move in self-play")
     ap.add_argument("--seed", type=int, help="first self-play seed (default: after the highest one in use)")
+    ap.add_argument("--resumable-batches", action="store_true",
+                    help="numbered games (nags_datagen --first-game 0): a batch stopped part-way is finished with "
+                         "its own seed when the round is run again, instead of starting a new one")
     ap.add_argument("--designs", nargs="+", default=["current", "kb4"], choices=sorted(DESIGNS),
                     help="network designs to train and test (default: current kb4)")
     ap.add_argument("--epochs", type=int, default=20)
