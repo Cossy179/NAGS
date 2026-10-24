@@ -66,13 +66,22 @@ layouts, model parameter names and shapes, target (λσ(score/400) + (1 −
 λ)·result, MSE of σ(output)), optimizer and per-batch cosine schedule. New
 options must default to today's behaviour. Checkpoints (`<out>.ckpt`) keep
 their keys; new keys may be added, and a newer trainer accepts checkpoints
-without them exactly as before.
+without them exactly as before. Added since `bb1e03c`: `data_sha256` (a
+resume with other content is refused; checkpoints without it resume as
+before), `init_from` and `history`; the options `--init-from` (a new run
+from existing weights, off by default) and `--no-data-cache`. The trainer
+writes `<out>.json` and `<file>.sha256` caches next to the data; neither
+changes what is trained.
 
 ### `tools/nnue/run_round.py` and `tools/sprt.py`
 
 The design names and their arguments (`current`, `kb4`, `kb8`, `kb16`), the
 data/network/log file names, the resume rules, and the `sprt.py` status
-and decision lines that `--resume` and `run_round` parse.
+and decision lines that `--resume` and `run_round` parse. The explicit
+names `crelu-b8`, `kb4-screlu-b8`, `kb8-screlu-b8` and `kb16-screlu-b8` (the
+default since 2026-10-24) are aliases that train and resume the files of
+the historical names; `--warm-start` (default `none`) writes its own `_warm`
+files.
 
 ### GNN side (`chess_graph.py`, `gnn_evaluator.py`, `rpc_server.py`)
 

@@ -82,6 +82,28 @@ described at the top of `train.py`, and the training state is saved to
 `<out>.ckpt`, so an interrupted run continues with `--resume` (same data and
 settings).
 
+**Provenance.** The data is fingerprinted by content (the SHA-256 of each
+file, cached next to it as `<file>.sha256` by size and modification time, so
+200M positions are hashed once, about a minute from a hard disk), and the
+checkpoint keeps the fingerprint: `--resume` refuses data with the same
+number of positions but other content (before, the count was all it
+compared). After every epoch `<out>.json` records what the network is: its
+architecture (format version, hidden size, output and king buckets,
+mirroring, activation, layout), the settings, the data's fingerprint and
+file list, the train/validation split, the loss history, the weights it
+started from and the trainer's commit and SHA-256.
+
+**Exact resume and warm starts are separate.** `--resume` continues the
+same run (data, settings, optimiser and schedule state). `--init-from NET`
+starts a *new* run from NET's weights, an exported network such as
+`nets/nags.nnue` or a training `.ckpt`, with a fresh Adam state and a fresh
+cosine schedule over this run's epochs; NET must have the run's
+architecture (hidden size, output buckets, king buckets and layout,
+activation), or the trainer stops. An exported network is read back
+exactly: exporting before any training writes the same file (tested for
+every design and for network 8). A resumed warm start keeps the weights it
+started from (recorded in the checkpoint).
+
 ## 3. Inference in the engine
 
 `src/Nnue.h` / `src/Nnue.cpp`. FastBoard keeps a stack of accumulators:
@@ -203,9 +225,16 @@ python tools\nnue\run_round.py --target-positions 200000000 --threads 11
    `--target-positions` positions; older `selfplay*.txt` files are converted
    to `.bin` once and count too;
 2. trains each network design in `--designs` on all of it (on the GPU,
-   `--device auto`): by default `current` (the built-in network's design)
-   and `kb4` (4 king buckets with SCReLU, which needs this much data to pay
-   off); `kb8` and `kb16` are also available;
+   `--device auto`): by default `crelu-b8` (768 → 256 clipped ReLU, the design
+   of networks 1–7) and `kb4-screlu-b8` (4 king buckets with SCReLU, network
+   8's design); `kb8-screlu-b8` and `kb16-screlu-b8` are also available. The
+   historical names `current`, `kb4`, `kb8` and `kb16` still work and name the
+   files (`net_current_...`, `net_kb4_...`), so a round started with them
+   resumes either way. `current` never meant network 8's design; the run
+   prints the built-in network's design (`built-in network: kb4-screlu-b8`).
+   With `--warm-start builtin` a design with the built-in network's
+   architecture starts from its weights (`train.py --init-from`, a new run in
+   files ending `_warm`), the others from scratch;
 3. plays each new network against the built-in one (SPRT [0, 10] at
    3+0.03); if several win, the best two play each other; the winner is
    copied to `nets\nags.nnue`.

@@ -51,15 +51,32 @@ Usage:
 
     python tools/nnue/train.py --data data/selfplay.txt --epochs 30 --out nets/nags.nnue
     python tools/nnue/train.py --data "data/*.bin" --epochs 30 --out nets/nags.nnue
+
+Provenance: the training data is fingerprinted (SHA-256 of each file's content, cached next to the file
+as <file>.sha256 by size and modification time), the fingerprint is kept in the checkpoint, and --resume
+refuses data with the same number of positions but other content. After every epoch <out>.json records
+what the network is: its architecture, the settings, the data fingerprint, the loss history, the weights
+it started from and the code that trained it.
+
+Two ways to start from an existing network, kept apart:
+
+    --resume            continue this run exactly (the same data, settings, optimiser and schedule state)
+    --init-from NET     a new run that starts from NET's weights (an exported .nnue such as nets/nags.nnue,
+                        or a training .ckpt) with a fresh optimiser and learning-rate schedule; NET must have
+                        this run's architecture (hidden size, output buckets, king buckets, activation)
 """
 
 import argparse
 import concurrent.futures
+import datetime
 import glob
+import hashlib
+import json
 import math
 import multiprocessing as mp
 import os
 import struct
+import subprocess
 import sys
 import time
 
@@ -606,6 +623,100 @@ def quantized_eval(net, fen):
     return _trunc_div(total * SCALE, QA * QB)
 
 
+def file_sha256(path, cache=True):
+    """SHA-256 of a file's content. With `cache`, kept in <path>.sha256 with the file's size and modification
+    time and reused while both are unchanged (hashing 200M positions takes about a minute from a hard disk)."""
+    st = os.stat(path)
+    side = path + ".sha256"
+    if cache:
+        try:
+            with open(side) as fh:
+                size, mtime, digest = fh.read().split()
+            if int(size) == st.st_size and int(mtime) == st.st_mtime_ns and len(digest) == 64:
+                return digest
+        except (OSError, ValueError):
+            pass
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(8 << 20), b""):
+            h.update(block)
+    digest = h.hexdigest()
+    if cache:
+        try:
+            with open(side, "w") as fh:
+                fh.write(f"{st.st_size} {st.st_mtime_ns} {digest}\n")
+        except OSError:
+            pass  # a read-only data directory: hash again next time
+    return digest
+
+
+def data_fingerprint(paths, cache=True):
+    """What the training data is, by content: each file's name, size and SHA-256 in training order, and a
+    digest of that list (the record count alone cannot tell two data sets apart)."""
+    files = [{"name": os.path.basename(p), "size": os.path.getsize(p), "sha256": file_sha256(p, cache)}
+             for p in paths]
+    combined = hashlib.sha256(json.dumps([[f["size"], f["sha256"]] for f in files]).encode()).hexdigest()
+    return {"sha256": combined, "files": files}
+
+
+def architecture(model):
+    """The exported network's design, as the engine reads it."""
+    k = model.king
+    version = 3 if (not k.plain or model.screlu) else 1 if model.buckets == 1 else 2
+    return {"format_version": version, "hidden": model.hidden, "buckets": model.buckets,
+            "king_buckets": k.count, "king_layout_name": k.name, "mirror": bool(k.mirror),
+            "activation": "screlu" if model.screlu else "crelu",
+            "layout": [int(x) for x in k.layout.tolist()]}
+
+
+def init_from(model, path):
+    """Loads `path`'s weights into `model` (an exported .nnue or a training .ckpt of the same design).
+    An exported network is read back exactly: its integer weights over the export scales, folded into the
+    king-bucket rows with the factor rows at zero, so exporting before any training writes the same file."""
+    want = architecture(model)
+    if path.endswith(".ckpt"):
+        ckpt = torch.load(path, weights_only=False, map_location="cpu")
+        have = {"hidden": ckpt.get("hidden"), "buckets": ckpt.get("buckets", 1),
+                "king_buckets": ckpt.get("king_buckets", "none"), "activation": ckpt.get("activation", "crelu")}
+        need = {"hidden": model.hidden, "buckets": model.buckets, "king_buckets": model.king.name,
+                "activation": want["activation"]}
+        if have != need:
+            sys.exit(f"--init-from {path}: a {have} network, not this run's {need}")
+        model.load_state_dict(ckpt["model"])
+        return
+    try:
+        ft_w, ft_b, out_w, out_b, info = read_net(path)
+    except (AssertionError, OSError, ValueError, struct.error) as e:
+        sys.exit(f"--init-from {path}: not a network train.py can read ({e})")
+    have = {"hidden": ft_b.shape[0], "buckets": out_b.shape[0], "king_buckets": info["king_buckets"],
+            "mirror": info["mirror"], "activation": "screlu" if info["screlu"] else "crelu",
+            "layout": [int(x) for x in info["layout"].tolist()] if info["king_buckets"] > 1 or info["mirror"]
+            else want["layout"]}
+    need = {k: want[k] for k in have}
+    if have != need:
+        diff = ", ".join(f"{k} {have[k]} (this run: {need[k]})" for k in have if have[k] != need[k])
+        sys.exit(f"--init-from {path}: another architecture: {diff}")
+    k = model.king
+    with torch.no_grad():
+        w = model.ft.weight
+        w.zero_()
+        w[: k.count * FEATURES] = torch.from_numpy(ft_w.astype(np.float32) / QA).to(w.device)
+        model.ft_bias.copy_(torch.from_numpy(ft_b.astype(np.float32) / QA))
+        model.out.weight.copy_(torch.from_numpy(out_w.astype(np.float32) / QB))
+        model.out.bias.copy_(torch.from_numpy(out_b.astype(np.float64) / (QA * QB)).float())
+
+
+def code_version():
+    """The commit the trainer ran from (None outside a git checkout) and the trainer file's SHA-256."""
+    commit = None
+    try:
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=os.path.dirname(os.path.abspath(__file__)),
+                                capture_output=True, text=True, timeout=10).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return {"git_commit": commit, "train_py_sha256": file_sha256(os.path.abspath(__file__), cache=False)}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", nargs="+", required=True,
@@ -629,6 +740,11 @@ def main(argv=None):
                     help="continue from <out>.ckpt (saved after every epoch) with the same data and settings")
     ap.add_argument("--stop-after", type=int, default=0,
                     help="stop after this many epochs in this run (continue later with --resume)")
+    ap.add_argument("--init-from", metavar="NET",
+                    help="start a new run from NET's weights (.nnue or .ckpt of the same architecture) with a "
+                         "fresh optimiser and schedule; not a resume")
+    ap.add_argument("--no-data-cache", action="store_true",
+                    help="hash the data files again instead of reusing their <file>.sha256 caches")
     args = ap.parse_args(argv)
 
     if args.threads:
@@ -642,6 +758,11 @@ def main(argv=None):
     rng = np.random.default_rng(args.seed)
 
     paths = expand_paths(args.data)
+    t0 = time.time()
+    fingerprint = data_fingerprint([p for p in paths if not p.endswith(".npz")] or paths,
+                                   cache=not args.no_data_cache)
+    print(f"data: {len(paths)} files, content sha256 {fingerprint['sha256'][:16]} ({time.time() - t0:.0f}s)",
+          flush=True)
     binary = [p.endswith(".bin") for p in paths]
     if any(binary) and not all(binary):
         sys.exit("--data: .bin files cannot be mixed with other inputs (convert those with tools/nnue/pack.py)")
@@ -662,6 +783,10 @@ def main(argv=None):
     except ValueError as e:
         sys.exit(f"--king-buckets: {e}")
     model = Nnue(args.hidden, args.buckets, args.king_buckets, args.activation == "screlu").to(device)
+    started_from = None
+    if args.init_from:
+        init_from(model, args.init_from)
+        started_from = {"path": args.init_from, "sha256": file_sha256(args.init_from, cache=False)}
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     steps = args.epochs * source.steps(args.batch)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, steps), eta_min=args.lr * 0.01)
@@ -671,6 +796,7 @@ def main(argv=None):
     settings = {"batch": args.batch, "lr": args.lr, "lam": args.lam, "val": args.val, "seed": args.seed,
                 "king_layout": [int(x) for x in king_config(args.king_buckets)[2]]}
     first_epoch = 1
+    history = []
     if args.resume and os.path.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, weights_only=False, map_location=device)
         if (ckpt["positions"] != n or ckpt["hidden"] != args.hidden or ckpt["epochs"] != args.epochs
@@ -680,13 +806,24 @@ def main(argv=None):
         changed = [k for k, v in settings.items() if k in ckpt and ckpt[k] != v]
         if changed:
             sys.exit(f"{ckpt_path} was made with different settings: {', '.join(changed)}")
+        # Checkpoints written before the data was fingerprinted resume as before.
+        if "data_sha256" in ckpt and ckpt["data_sha256"] != fingerprint["sha256"]:
+            sys.exit(f"{ckpt_path} was made with other data: the same number of positions, other content "
+                     f"(sha256 {ckpt['data_sha256'][:16]}, now {fingerprint['sha256'][:16]})")
+        # A resumed run keeps the weights it started from; naming other ones is a contradiction.
+        if args.init_from and (ckpt.get("init_from") or {}).get("sha256") != started_from["sha256"]:
+            sys.exit(f"{ckpt_path} started from {(ckpt.get('init_from') or {}).get('path')!r}, not from "
+                     f"{args.init_from!r}")
+        started_from = ckpt.get("init_from", started_from)
         model.load_state_dict(ckpt["model"])
         opt.load_state_dict(ckpt["opt"])
         sched.load_state_dict(ckpt["sched"])
         rng.bit_generator.state = ckpt["rng"]
+        history = list(ckpt.get("history", []))
         first_epoch = ckpt["epoch"] + 1
         print(f"resuming after epoch {ckpt['epoch']}", flush=True)
     last_epoch = args.epochs if not args.stop_after else min(args.epochs, first_epoch + args.stop_after - 1)
+    version = code_version()
     for epoch in range(first_epoch, last_epoch + 1):
         t = time.time()
         total, count = 0.0, 0
@@ -700,16 +837,31 @@ def main(argv=None):
             total += loss.item() * len(target)
             count += len(target)
         msg = f"epoch {epoch:3d}  train {total / count:.6f}"
-        if source.n_val:
-            msg += f"  val {source.val_loss(model, args.lam):.6f}"
+        val = source.val_loss(model, args.lam) if source.n_val else None
+        if val is not None:
+            msg += f"  val {val:.6f}"
         print(f"{msg}  ({time.time() - t:.0f}s)", flush=True)
+        history.append({"epoch": epoch, "train": total / count, "val": val, "seconds": round(time.time() - t, 1)})
         export(model, args.out)
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(),
                     "rng": rng.bit_generator.state, "epoch": epoch, "positions": n, "hidden": args.hidden,
                     "epochs": args.epochs, "buckets": args.buckets, "king_buckets": args.king_buckets,
-                    "activation": args.activation, **settings},
+                    "activation": args.activation, **settings,
+                    "data_sha256": fingerprint["sha256"], "init_from": started_from, "history": history},
                    ckpt_path + ".tmp")
         os.replace(ckpt_path + ".tmp", ckpt_path)
+        manifest = {
+            "format": "nags-nnue-training-1", "network": os.path.basename(args.out),
+            "network_sha256": file_sha256(args.out, cache=False), "architecture": architecture(model),
+            "settings": {**settings, "epochs": args.epochs, "val": args.val, "seed": args.seed},
+            "data": {"positions": n, "train": n - source.n_val, "validation": source.n_val, **fingerprint},
+            "init_from": started_from, "epochs_done": epoch, "history": history, "code": version,
+            "torch": torch.__version__, "device": str(device),
+            "written": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        }
+        with open(args.out + ".json.tmp", "w") as fh:
+            json.dump(manifest, fh, indent=1)
+        os.replace(args.out + ".json.tmp", args.out + ".json")
     print(f"wrote {args.out}" + (f" (stopped after epoch {last_epoch} of {args.epochs})" if last_epoch < args.epochs else ""))
 
 
