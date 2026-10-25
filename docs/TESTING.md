@@ -591,6 +591,19 @@ only gains of about 2% or more with the interval above 1 would count. The
 Windows PC builds with MSVC and its own AVX2 kernels, so these results say
 nothing about MSVC's link-time code generation or PGO there.
 
+**Threads (Lazy SMP), strength rather than speed** (`b4baff0`, network 8,
+4-core VM, 3+0.03, 1000 games each, `nags_balanced.epd`, no forfeits):
+Threads=2 against Threads=1 (one game at a time) scored +107.5 ± 14.0
+(+402 =496 -102). For reference, twice the time on one thread (6+0.06
+against 3+0.03, three games at a time) scored +165.4 ± 14.9 (+502 =439
+-59). The second thread searches about 2.0× the nodes per second (2.0-2.1×
+in three positions, `go movetime 4000`), but its result equals about
+2^(107.5 / 165.4) ≈ 1.57× the time: roughly 65% (about 52-81% within the
+errors) of what a doubling of the time gives. The rest is the overlap of
+the threads' searches. An SMP change (the depth vote above was rejected)
+should be judged by this ratio at its thread count, not by nodes per
+second.
+
 ## Strength log
 
 Every change that affects playing strength is listed with the test that
