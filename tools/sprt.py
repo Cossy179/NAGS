@@ -297,6 +297,9 @@ def engine_command(text: str) -> List[str]:
     return shlex.split(text)
 
 
+_STATUS_LINE = re.compile(r"Games (\d+): \+(\d+) =(\d+) -(\d+) \| penta \[([\d, ]+)\]")
+
+
 class InfrastructureError(RuntimeError):
     """An engine could not be started or set up. The match is invalid: this is not a game result."""
 
@@ -658,7 +661,7 @@ class Match:
     def resume(self, status_line: str) -> None:
         """Continues an interrupted match from its last status line: the counts
         are restored and play goes on with the next opening pair."""
-        m = re.search(r"Games (\d+): \+(\d+) =(\d+) -(\d+) \| penta \[([\d, ]+)\]", status_line)
+        m = _STATUS_LINE.search(status_line)
         if not m:
             raise ValueError("no status line ('Games N: +W =D -L | penta [...]') to resume from")
         self.wdl = [int(m.group(2)), int(m.group(3)), int(m.group(4))]
@@ -843,7 +846,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         try:
             with open(args.resume) as f:
                 log = f.readlines()
-            lines = [l for l in log if l.startswith("Games ")]
+            # The last complete status line: a runner killed while writing one leaves it cut off.
+            lines = [l for l in log if l.startswith("Games ") and _STATUS_LINE.search(l)]
             match.resume(lines[-1] if lines else "")
         except (ValueError, OSError) as e:
             print(f"ERROR: --resume: {e}", file=sys.stderr)

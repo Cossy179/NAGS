@@ -425,3 +425,14 @@ def test_an_interrupted_match_is_not_reported_as_finished(tmp_path, monkeypatch,
     log = tmp_path / "m.log"
     log.write_text(out)
     assert run_round.sprt_result(log) is None  # to be resumed, not taken as a result
+
+
+@needs_engines
+def test_resume_skips_a_status_line_cut_off_by_a_kill(tmp_path, capsys):
+    common = ["--engine", _engine("nags_fast"), "--engine", _engine("nags_basic"), "--depth", "1", "--concurrency",
+              "1", "--openings", str(ROOT / "tools/openings/nags_balanced.epd"), "--report", "1000"]
+    assert sprt.main(common + ["--games", "2"]) == 0
+    log = tmp_path / "m.log"
+    log.write_text(capsys.readouterr().out + "Games 4: +2 =1 -1 | penta [0, 1")  # killed while writing
+    assert sprt.main(common + ["--games", "4", "--resume", str(log)]) == 0
+    assert "Resuming after 2 games" in capsys.readouterr().out
