@@ -342,11 +342,18 @@ Before any game it writes `<dir>/plan.json` with the stages, both binaries
 the same command again continues: a finished stage is reused and a stopped
 one is resumed from its log. Other stages, binaries, openings or a seed in
 the same directory are refused, so a cap can't be raised after the results
-come in. A candidate with the base's bench is not played; that is a speed
-change, measured with bench. An invalid match stops the funnel without a
-result. The exit status is 0 if it passed every stage, 1 if rejected, 2 if
-undecided at a cap, 3 if invalid or refused, 4 if interrupted. It ends with
-one strength-log row per stage played, ready for the table below.
+come in. The same binary as the base is refused. A candidate with the base's
+bench is still played: bench searches to a fixed depth, so time management
+changes and fixes for positions bench doesn't reach leave it unchanged (a
+pure speed change needs no games). Each stage's decision is read from its
+log, never from the exit status alone; a match that stops without one
+(Ctrl-C, a crash, a kill, even in the middle of writing a status line) is
+resumed by the next run. An invalid match stops the funnel without a result.
+The exit status is 0 if it passed every stage, 1 if rejected, 2 if undecided
+at a cap, 3 if invalid or refused, 4 if stopped before a decision.
+`result.json` keeps each stage's counts and its `Forfeits:` line (time
+losses, crashes, illegal moves). It ends with one strength-log row per stage
+played, ready for the table below.
 
 **Other runners.** For very fast time controls or big matches, a dedicated
 C++ runner has lower overhead, for example

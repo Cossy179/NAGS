@@ -15,13 +15,16 @@ a finished stage is reused and a stopped one resumed from its log. Another plan 
 stages, binaries, openings or seed) is refused, so the stages and caps cannot be changed after the results
 start coming in. The concurrency may change.
 
-A candidate whose bench equals the base's is not played: a change that does not alter the search is a speed
-change, measured with bench rather than games (--allow-same-bench to play it anyway). An invalid match (an
-engine that cannot start) stops the funnel with no result.
+Both benches are recorded. A candidate whose bench equals the base's is still played: bench searches to a
+fixed depth, so time management changes and fixes for positions bench does not reach leave it unchanged (a
+pure speed change needs no games: measure it with bench). The same binary as the base is refused. An
+invalid match (an engine that cannot start) stops the funnel with no result; a match that stops without a
+decision (Ctrl-C, a crash, a kill) is continued from its log by the next run. The losses on time, crashes
+and illegal moves of each stage (the runner's "Forfeits:" line) are kept in result.json.
 
 Exit status: 0 = passed every stage, 1 = rejected (H0) at a stage, 2 = undecided at a stage's game cap,
-3 = invalid or refused, 4 = interrupted (run the same command again to continue). The last lines are one
-row per stage for the strength log in docs/TESTING.md.
+3 = invalid or refused, 4 = stopped before a decision (run the same command again to continue). The last
+lines are one row per stage for the strength log in docs/TESTING.md.
 """
 
 from __future__ import annotations
@@ -93,8 +96,9 @@ def stage_status(log: Path) -> Optional[Dict[str, Any]]:
     games, w, d, l, elo, err = found[-1]
     decision = ("H1" if "H1 accepted" in text else "H0" if "H0 accepted" in text
                 else "cap" if "SPRT inconclusive" in text else None)
+    forfeits = [line[len("Forfeits: "):] for line in text.splitlines() if line.startswith("Forfeits: ")]
     return {"games": int(games), "wdl": [int(w), int(d), int(l)], "elo": float(elo), "error": float(err),
-            "decision": decision}
+            "decision": decision, "forfeits": forfeits[-1] if forfeits else None}
 
 
 def engine_record(text: str) -> Dict[str, Any]:
@@ -103,16 +107,18 @@ def engine_record(text: str) -> Dict[str, Any]:
 
 
 def plan_differences(old: Dict[str, Any], new: Dict[str, Any]) -> List[str]:
+    if old.get("format") != new["format"]:
+        return [f"plan format {old.get('format')}"]
     out = []
-    if old["stages"] != new["stages"]:
-        out.append(f"stages {old['stages']} -> {new['stages']}")
+    if old.get("stages") != new["stages"]:
+        out.append(f"stages {old.get('stages')} -> {new['stages']}")
     for side in ("candidate", "base"):
-        if old[side]["sha256"] != new[side]["sha256"]:
-            out.append(f"{side} binary {old[side]['sha256']} -> {new[side]['sha256']}")
-    if old["openings"]["sha256"] != new["openings"]["sha256"]:
+        if (old.get(side) or {}).get("sha256") != new[side]["sha256"]:
+            out.append(f"{side} binary {(old.get(side) or {}).get('sha256')} -> {new[side]['sha256']}")
+    if (old.get("openings") or {}).get("sha256") != new["openings"]["sha256"]:
         out.append("openings")
-    if old["seed"] != new["seed"]:
-        out.append(f"seed {old['seed']} -> {new['seed']}")
+    if old.get("seed") != new["seed"]:
+        out.append(f"seed {old.get('seed')} -> {new['seed']}")
     return out
 
 
@@ -150,11 +156,13 @@ def run_stage(stage: Dict[str, Any], plan: Dict[str, Any], args: argparse.Namesp
         shutil.copyfile(log, part)
         cmd += ["--resume", str(part)]
     code = run_logged(cmd, log)
-    if code == 3:
-        return {"decision": "invalid"}
-    if code == 4:
-        return {"decision": "interrupted", **(stage_status(log) or {})}
-    return stage_status(log) or {"decision": "invalid"}
+    st = stage_status(log) or {}
+    if code == 3:  # an engine that cannot start: the games played (if any) are not a result
+        return {**st, "decision": "invalid", "exit_code": code}
+    if st.get("decision") in ("H1", "H0", "cap"):  # decided by the log, not the exit status
+        return st
+    # No decision: interrupted (exit 4), or the runner ended otherwise (a crash, a kill). Its log is resumed.
+    return {**st, "decision": "interrupted" if code == 4 else "stopped", "exit_code": code}
 
 
 def strength_row(name: str, stage: Dict[str, Any], st: Dict[str, Any], plan: Dict[str, Any], concurrency: int) -> str:
@@ -179,7 +187,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--openings", default=str(DEFAULT_OPENINGS))
     ap.add_argument("--seed", type=int, default=1, help="seed for the opening order")
     ap.add_argument("--concurrency", type=int, default=max(1, (os.cpu_count() or 2) - 1))
-    ap.add_argument("--allow-same-bench", action="store_true", help="play a candidate whose bench equals the base's")
     ap.add_argument("--report", type=float, default=60.0, help="seconds between status lines")
     args = ap.parse_args(argv)
 
@@ -195,6 +202,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             "seed": args.seed}
     if plan["candidate"]["sha256"] is None or plan["base"]["sha256"] is None:
         print("Refused: the candidate or the base is not a file (or a command naming one)", file=sys.stderr)
+        return 3
+    if plan["candidate"]["sha256"] == plan["base"]["sha256"]:
+        print("Refused: the candidate is the same binary as the base", file=sys.stderr)
         return 3
     if plan["openings"]["sha256"] is None:
         print(f"Refused: no openings file {args.openings}", file=sys.stderr)
@@ -215,11 +225,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             if plan[side]["bench"] is None:
                 print(f"Refused: the {side} did not run its bench", file=sys.stderr)
                 return 3
-        if plan["candidate"]["bench"] == plan["base"]["bench"] and not args.allow_same_bench:
-            print(f"Refused: the candidate's bench equals the base's ({plan['base']['bench']} nodes): the search "
-                  "is unchanged, so measure its speed instead (--allow-same-bench to play it anyway)",
-                  file=sys.stderr)
-            return 3
+        plan["same_bench"] = plan["candidate"]["bench"] == plan["base"]["bench"]
+        if plan["same_bench"]:
+            print(f"Note: the candidate's bench equals the base's ({plan['base']['bench']} nodes): its change does "
+                  "not show at bench's fixed depth (time management, rare positions); played as a functional change",
+                  flush=True)
         plan["created"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
         plan_file.write_text(json.dumps(plan, indent=1) + "\n")
     print(f"{plan['name']}: bench {plan['candidate']['bench']} against {plan['base']['bench']}; stages "
@@ -232,12 +242,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         results.append({"stage": stage["name"], **st})
         if st["decision"] == "H1":
             continue
-        code = {"H0": 1, "cap": 2, "invalid": 3, "interrupted": 4}[st["decision"]]
+        code = {"H0": 1, "cap": 2, "invalid": 3, "interrupted": 4, "stopped": 4}[st["decision"]]
         break
-    verdict = {0: "passed every stage", 1: f"rejected at {results[-1]['stage']}",
-               2: f"undecided at the cap of {results[-1]['stage']} (not adopted)",
-               3: f"invalid match at {results[-1]['stage']}: no result",
-               4: f"interrupted at {results[-1]['stage']}: run the same command again to continue"}[code]
+    last = results[-1] if results else {}
+    verdict = {0: "passed every stage", 1: f"rejected at {last.get('stage')}",
+               2: f"undecided at the cap of {last.get('stage')} (not adopted)",
+               3: f"invalid match at {last.get('stage')}: no result",
+               4: f"stopped at {last.get('stage')} before a decision ("
+                  + ("interrupted" if last.get("decision") == "interrupted"
+                     else f"the runner ended with exit status {last.get('exit_code')}; see its log")
+                  + "): run the same command again to continue"}[code]
     (out / "result.json").write_text(json.dumps({"name": plan["name"], "verdict": verdict, "stages": results},
                                                 indent=1) + "\n")
     print(f"\n{plan['name']}: {verdict}")
