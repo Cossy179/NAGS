@@ -23,8 +23,12 @@ jobs:
         run: ctest --test-dir build --build-config Release --output-on-failure
 
   python:
-    name: Python
-    runs-on: ubuntu-latest
+    name: Python (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,13 +39,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt -r requirements-onnx.txt
-      - name: Build the engines (used by the self-play and NNUE tests)
+      # Every engine a Python test runs: without one its tests skip, which CI would not show as a failure.
+      - name: Build the engines (used by the match, self-play, data and NNUE tests)
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DNAGS_BUILD_TESTS=OFF
-          cmake --build build --parallel --target nags nags_enhanced rpc_client relgraph_dump
+          cmake --build build --config Release --parallel --target nags nags_basic nags_fast nags_enhanced nags_datagen rpc_client relgraph_dump
       - name: Unit tests
-        run: python -m pytest -q
+        run: python -m pytest -q -rs
       - name: RPC round trip (rpc_server.py + rpc_client)
+        if: runner.os == 'Linux'
         run: |
           python rpc_server.py --port 5555 --hidden-dim 32 &
           ./build/rpc_client 127.0.0.1 5555
