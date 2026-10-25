@@ -51,20 +51,40 @@ Usage:
 
     python tools/nnue/train.py --data data/selfplay.txt --epochs 30 --out nets/nags.nnue
     python tools/nnue/train.py --data "data/*.bin" --epochs 30 --out nets/nags.nnue
+
+Provenance: the training data is fingerprinted (SHA-256 of each file's content, cached next to the file
+as <file>.sha256 by size and modification time), the fingerprint is kept in the checkpoint, and --resume
+refuses data with the same number of positions but other content. After every epoch <out>.json records
+what the network is: its architecture, the settings, the data fingerprint, the loss history, the weights
+it started from and the code that trained it.
+
+Two ways to start from an existing network, kept apart:
+
+    --resume            continue this run exactly (the same data, settings, optimiser and schedule state)
+    --init-from NET     a new run that starts from NET's weights (an exported .nnue such as nets/nags.nnue,
+                        or a training .ckpt) with a fresh optimiser and learning-rate schedule; NET must have
+                        this run's architecture (hidden size, output buckets, king buckets, activation)
 """
 
 import argparse
 import concurrent.futures
+import datetime
 import glob
+import hashlib
+import json
 import math
 import multiprocessing as mp
 import os
 import struct
+import subprocess
 import sys
 import time
 
 import numpy as np
 import torch
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import shards  # noqa: E402
 
 FEATURES = 768
 PAD = FEATURES  # index of the all-zero padding row
@@ -322,6 +342,8 @@ class ArrayData:
         n_val = max(1, int(self.n * val)) if self.n > 100 else 0
         self.val_idx, self.train_idx = perm[:n_val], perm[n_val:]
         self.n_val = n_val
+        self.n_train = self.n - n_val
+        self.split = "random positions"  # text data has no game index: a game's positions fall on both sides
 
     def steps(self, batch):
         return math.ceil(len(self.train_idx) / batch)
@@ -332,6 +354,102 @@ class ArrayData:
 
     def val_loss(self, model, lam):
         return evaluate_loss(model, self.data, self.val_idx, lam, device=self.device)
+
+
+def game_boundary(paths, counts, target):
+    """(n_train, split): the validation boundary moved from record `target` to the nearest start of a game in
+    the file it falls in, using that file's nags_datagen shard index (<file>.games), so that no game has
+    positions on both sides ("games"). Without a usable index the boundary stays and one game may be split
+    ("records")."""
+    offset = 0
+    for path, count in zip(paths, counts):
+        if offset + count <= target:
+            offset += count
+            continue
+        local = target - offset
+        if local == 0:
+            return target, "games"  # at a file boundary: games never span files
+        try:
+            _, games = shards.read_index(path)
+        except (OSError, ValueError):
+            games = None
+        if not games or sum(g.bytes for g in games) != count * RECORD_BYTES:
+            print(f"validation: {os.path.basename(path)} has no complete game index, so the boundary may cut one "
+                  "game (nags_datagen --first-game writes one)", flush=True)
+            return target, "records"
+        starts = [g.offset // RECORD_BYTES for g in games] + [count]
+        best = min(starts, key=lambda s: (abs(s - local), s))
+        if offset + best >= sum(counts):  # keep some validation
+            best = max(s for s in starts if offset + s < sum(counts))
+        return offset + best, "games"
+    return target, "games"
+
+
+def record_hashes(recs):
+    """64-bit hashes of 32-byte records (uint8 [N, 32]), to find records two files share."""
+    w = np.ascontiguousarray(recs).view("<u8").reshape(-1, 4)
+    with np.errstate(over="ignore"):
+        h = w[:, 0] * np.uint64(0x9E3779B97F4A7C15)
+        for k, c in ((1, 0xC2B2AE3D27D4EB4F), (2, 0x165667B19E3779F9), (3, 0xD6E8FEB86659FD93)):
+            h = (h ^ (h >> np.uint64(29))) * np.uint64(0xBF58476D1CE4E5B9) + w[:, k] * np.uint64(c)
+    return h
+
+
+def eval_overlap(eval_path, paths, data_sha, cache=True):
+    """How an --eval-set file overlaps the training data: the same file, games of the same seed and number in
+    both (from their nags_datagen indexes), and records that occur in both (one pass over the data, kept in
+    <eval>.overlap.json for this data and eval file)."""
+    eval_sha = file_sha256(eval_path, cache=False)
+    side = eval_path + ".overlap.json"
+    if cache and os.path.exists(side):
+        try:
+            with open(side) as fh:
+                kept = json.load(fh)
+            if kept.get("eval_sha256") == eval_sha and kept.get("data_sha256") == data_sha:
+                return kept
+        except (OSError, ValueError):
+            pass
+    same_file = [p for p in paths if os.path.realpath(p) == os.path.realpath(eval_path)
+                 or file_sha256(p, cache=True) == eval_sha]
+    shared_games = 0
+    try:
+        eh, eg = shards.read_index(eval_path)
+        mine = {(shards.header_fields(eh).get("seed"), g.number) for g in eg}
+        for p in paths:
+            try:
+                th, tg = shards.read_index(p)
+            except (OSError, ValueError):
+                continue
+            seed = shards.header_fields(th).get("seed")
+            shared_games += sum((seed, g.number) in mine for g in tg)
+    except (OSError, ValueError):
+        pass
+    raw = np.fromfile(eval_path, np.uint8)
+    if raw.size % RECORD_BYTES:
+        sys.exit(f"--eval-set {eval_path}: the size is not a multiple of {RECORD_BYTES} bytes")
+    eval_h = record_hashes(raw.reshape(-1, RECORD_BYTES))
+    unique = np.unique(eval_h)
+    found = np.zeros(len(unique), bool)
+    for p in paths:
+        size = os.path.getsize(p)
+        if not size or size % RECORD_BYTES:
+            continue
+        m = np.memmap(p, np.uint8, "r", shape=(size // RECORD_BYTES, RECORD_BYTES))
+        for start in range(0, len(m), 1 << 20):
+            h = record_hashes(np.array(m[start : start + (1 << 20)]))
+            idx = np.minimum(np.searchsorted(unique, h), len(unique) - 1)
+            found[idx[unique[idx] == h]] = True
+    shared = int(np.isin(eval_h, unique[found]).sum())
+    result = {"eval_sha256": eval_sha, "data_sha256": data_sha, "records": int(len(eval_h)),
+              "records_in_training_data": shared, "same_file_as": [os.path.basename(p) for p in same_file],
+              "games_in_training_data": shared_games}
+    if cache:
+        try:
+            with open(side, "w") as fh:
+                json.dump(result, fh, indent=1)
+        except OSError:
+            pass
+    return result
 
 
 class BinData:
@@ -346,16 +464,20 @@ class BinData:
 
     def __init__(self, paths, val, device):
         self.device = device
-        self.maps = []
+        self.maps, self.paths = [], []
         for p in paths:
             size = os.path.getsize(p)
             if size % RECORD_BYTES:
                 sys.exit(f"{p}: the size is not a multiple of {RECORD_BYTES} bytes")
             if size:
                 self.maps.append(np.memmap(p, np.uint8, "r", shape=(size // RECORD_BYTES, RECORD_BYTES)))
+                self.paths.append(p)
         self.n = sum(len(m) for m in self.maps)
         self.n_val = min(max(1, int(self.n * val)), 1 << 20) if self.n > 100 else 0
-        self.n_train = self.n - self.n_val
+        self.n_train, self.split = self.n - self.n_val, "records"
+        if self.n_val:
+            self.n_train, self.split = game_boundary(self.paths, [len(m) for m in self.maps], self.n_train)
+            self.n_val = self.n - self.n_train
         # Training and validation ranges as (file, start, end) pieces.
         self.chunks, self.val_parts = [], []
         offset = 0
@@ -505,6 +627,41 @@ def tensors(feats, stm, score, result, idx, lam, buckets=1, device="cpu"):
     return white, black, s, bucket, target
 
 
+def eval_set_report(model, path, lam, device, size=65536):
+    """The loss on a fixed set of 32-byte records (--eval-set): overall, by output bucket (piece count) and
+    by the king bucket of the side to move (its king's square in the network's layout), so a change that
+    helps the middlegame and hurts the endgame shows as such."""
+    raw = np.fromfile(path, np.uint8)
+    if raw.size % RECORD_BYTES:
+        sys.exit(f"--eval-set {path}: the size is not a multiple of {RECORD_BYTES} bytes")
+    recs = raw.reshape(-1, RECORD_BYTES)
+    nb, nk = model.buckets, model.king.count
+    err_b, cnt_b = torch.zeros(nb, dtype=torch.float64), torch.zeros(nb, dtype=torch.float64)
+    err_k, cnt_k = torch.zeros(nk, dtype=torch.float64), torch.zeros(nk, dtype=torch.float64)
+    layout = model.king.layout.to(device)
+    model.eval()
+    with torch.no_grad():
+        for start in range(0, len(recs), size):
+            rec = torch.from_numpy(np.array(recs[start : start + size])).to(device)
+            feats, stm, score, result = decode(rec)
+            w, b, s, k, t = tensors(feats, stm, score, result, torch.arange(len(rec), device=device), lam,
+                                    model.buckets, device)
+            err = ((torch.sigmoid(model(w, b, s, k)) - t) ** 2).double()
+            us = torch.where(s.bool().unsqueeze(1), b, w)  # the side to move's perspective features
+            ksq = ((us - 320) * ((us >= 320) & (us < 384))).sum(dim=1)
+            kb = layout[ksq] if nk > 1 else torch.zeros_like(ksq)
+            err_b += torch.bincount(k, weights=err, minlength=nb).cpu()
+            cnt_b += torch.bincount(k, minlength=nb).double().cpu()
+            err_k += torch.bincount(kb, weights=err, minlength=nk).cpu()
+            cnt_k += torch.bincount(kb, minlength=nk).double().cpu()
+    model.train()
+    per = lambda e, c: [float(x / y) if y else None for x, y in zip(e, c)]  # noqa: E731
+    n = int(cnt_b.sum())
+    return {"positions": n, "loss": float(err_b.sum() / max(1, n)), "by_output_bucket": per(err_b, cnt_b),
+            "output_bucket_positions": [int(x) for x in cnt_b], "by_king_bucket": per(err_k, cnt_k),
+            "king_bucket_positions": [int(x) for x in cnt_k]}
+
+
 def evaluate_loss(model, data, idx, lam, size=65536, device="cpu"):
     model.eval()
     total, count = 0.0, 0
@@ -606,6 +763,168 @@ def quantized_eval(net, fen):
     return _trunc_div(total * SCALE, QA * QB)
 
 
+def file_sha256(path, cache=True):
+    """SHA-256 of a file's content. With `cache`, kept in <path>.sha256 with the file's size and modification
+    time and reused while both are unchanged (hashing 200M positions takes about a minute from a hard disk)."""
+    st = os.stat(path)
+    side = path + ".sha256"
+    if cache:
+        try:
+            with open(side) as fh:
+                size, mtime, digest = fh.read().split()
+            if int(size) == st.st_size and int(mtime) == st.st_mtime_ns and len(digest) == 64:
+                return digest
+        except (OSError, ValueError):
+            pass
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(8 << 20), b""):
+            h.update(block)
+    digest = h.hexdigest()
+    if cache:
+        try:
+            with open(side, "w") as fh:
+                fh.write(f"{st.st_size} {st.st_mtime_ns} {digest}\n")
+        except OSError:
+            pass  # a read-only data directory: hash again next time
+    return digest
+
+
+def data_fingerprint(paths, cache=True):
+    """What the training data is, by content: each file's name, size and SHA-256 in training order, and a
+    digest of that list (the record count alone cannot tell two data sets apart)."""
+    files = [{"name": os.path.basename(p), "size": os.path.getsize(p), "sha256": file_sha256(p, cache)}
+             for p in paths]
+    combined = hashlib.sha256(json.dumps([[f["size"], f["sha256"]] for f in files]).encode()).hexdigest()
+    return {"sha256": combined, "files": files}
+
+
+def architecture(model):
+    """The exported network's design, as the engine reads it."""
+    k = model.king
+    version = 3 if (not k.plain or model.screlu) else 1 if model.buckets == 1 else 2
+    return {"format_version": version, "hidden": model.hidden, "buckets": model.buckets,
+            "king_buckets": k.count, "king_layout_name": k.name, "mirror": bool(k.mirror),
+            "activation": "screlu" if model.screlu else "crelu",
+            "layout": [int(x) for x in k.layout.tolist()]}
+
+
+def init_from(model, path):
+    """Loads `path`'s weights into `model` (an exported .nnue or a training .ckpt of the same design).
+    An exported network is read back exactly: its integer weights over the export scales, folded into the
+    king-bucket rows with the factor rows at zero, so exporting before any training writes the same file."""
+    want = architecture(model)
+    if path.endswith(".ckpt"):
+        ckpt = torch.load(path, weights_only=False, map_location="cpu")
+        have = {"hidden": ckpt.get("hidden"), "buckets": ckpt.get("buckets", 1),
+                "king_buckets": ckpt.get("king_buckets", "none"), "activation": ckpt.get("activation", "crelu")}
+        need = {"hidden": model.hidden, "buckets": model.buckets, "king_buckets": model.king.name,
+                "activation": want["activation"]}
+        if have != need:
+            sys.exit(f"--init-from {path}: a {have} network, not this run's {need}")
+        model.load_state_dict(ckpt["model"])
+        return
+    try:
+        ft_w, ft_b, out_w, out_b, info = read_net(path)
+    except (AssertionError, OSError, ValueError, struct.error) as e:
+        sys.exit(f"--init-from {path}: not a network train.py can read ({e})")
+    have = {"hidden": ft_b.shape[0], "buckets": out_b.shape[0], "king_buckets": info["king_buckets"],
+            "mirror": info["mirror"], "activation": "screlu" if info["screlu"] else "crelu",
+            "layout": [int(x) for x in info["layout"].tolist()] if info["king_buckets"] > 1 or info["mirror"]
+            else want["layout"]}
+    need = {k: want[k] for k in have}
+    if have != need:
+        diff = ", ".join(f"{k} {have[k]} (this run: {need[k]})" for k in have if have[k] != need[k])
+        sys.exit(f"--init-from {path}: another architecture: {diff}")
+    k = model.king
+    with torch.no_grad():
+        w = model.ft.weight
+        w.zero_()
+        w[: k.count * FEATURES] = torch.from_numpy(ft_w.astype(np.float32) / QA).to(w.device)
+        model.ft_bias.copy_(torch.from_numpy(ft_b.astype(np.float32) / QA))
+        model.out.weight.copy_(torch.from_numpy(out_w.astype(np.float32) / QB))
+        model.out.bias.copy_(torch.from_numpy(out_b.astype(np.float64) / (QA * QB)).float())
+
+
+def code_version():
+    """The commit the trainer ran from (None outside a git checkout) and the trainer file's SHA-256."""
+    commit = None
+    try:
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=os.path.dirname(os.path.abspath(__file__)),
+                                capture_output=True, text=True, timeout=10).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return {"git_commit": commit, "train_py_sha256": file_sha256(os.path.abspath(__file__), cache=False)}
+
+
+def profile(model, opt, sched, source, rng, args, device, warmup=5):
+    """--profile: where a training batch's time goes, measured (the model is trained for the batches timed,
+    and nothing is written)."""
+    sync = (lambda: torch.cuda.synchronize(device)) if device.type == "cuda" else (lambda: None)
+
+    def batch_stream():
+        while True:
+            yield from source.train_batches(rng, args.batch, args.lam, args.buckets)
+
+    stream = batch_stream()
+    phases = {"data": [], "forward": [], "backward": [], "step": [], "loss read": []}
+    for i in range(warmup + args.profile):
+        sync()
+        t0 = time.perf_counter()
+        w, b, s, k, target = next(stream)
+        sync()
+        t1 = time.perf_counter()
+        loss = ((torch.sigmoid(model(w, b, s, k)) - target) ** 2).mean()
+        sync()
+        t2 = time.perf_counter()
+        opt.zero_grad()
+        loss.backward()
+        sync()
+        t3 = time.perf_counter()
+        opt.step()
+        sched.step()
+        model.clip()
+        sync()
+        t4 = time.perf_counter()
+        loss.item()
+        t5 = time.perf_counter()
+        if i >= warmup:
+            for name, d in zip(phases, (t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4)):
+                phases[name].append(d * 1000)
+    med = {k: float(np.median(v)) for k, v in phases.items()}
+    print(f"profile: {args.profile} batches of {args.batch} on {device}, median ms per batch (each phase "
+          "synchronised): " + ", ".join(f"{k} {v:.2f}" for k, v in med.items())
+          + f"; total {sum(med.values()):.2f}", flush=True)
+
+    def end_to_end(every):
+        sync()
+        t0 = time.perf_counter()
+        pending = None
+        for i in range(args.profile):
+            w, b, s, k, target = next(stream)
+            loss = ((torch.sigmoid(model(w, b, s, k)) - target) ** 2).mean()
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            sched.step()
+            model.clip()
+            part = loss.detach() * len(target)
+            pending = part if pending is None else pending + part
+            if (i + 1) % every == 0:
+                pending.item()
+                pending = None
+        if pending is not None:
+            pending.item()
+        sync()
+        return args.profile * args.batch / (time.perf_counter() - t0)
+
+    every = args.sync_every if args.sync_every > 1 else 100
+    per_batch, deferred = end_to_end(1), end_to_end(every)
+    print(f"profile: end to end {per_batch:,.0f} positions/s reading the loss every batch, {deferred:,.0f} reading "
+          f"it every {every} ({deferred / per_batch:.2f}x)", flush=True)
+    return med, per_batch, deferred
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", nargs="+", required=True,
@@ -629,6 +948,25 @@ def main(argv=None):
                     help="continue from <out>.ckpt (saved after every epoch) with the same data and settings")
     ap.add_argument("--stop-after", type=int, default=0,
                     help="stop after this many epochs in this run (continue later with --resume)")
+    ap.add_argument("--init-from", metavar="NET",
+                    help="start a new run from NET's weights (.nnue or .ckpt of the same architecture) with a "
+                         "fresh optimiser and schedule; not a resume")
+    ap.add_argument("--no-data-cache", action="store_true",
+                    help="hash the data files again instead of reusing their <file>.sha256 caches")
+    ap.add_argument("--eval-set", action="append", default=[], metavar="FILE",
+                    help="a fixed set of 32-byte records (not trained on) evaluated after every epoch, overall, by "
+                         "output bucket and by king bucket (repeatable; recorded in <out>.json)")
+    ap.add_argument("--eval-overlap-limit", type=float, default=0.01, metavar="FRACTION",
+                    help="refuse an --eval-set more than this fraction of whose records also occur in the training "
+                         "data (default 0.01; independent self-play shares about 0.01%%); the same file, or a game "
+                         "(seed and number) in both, is always refused")
+    ap.add_argument("--sync-every", type=int, default=1,
+                    help="read the training loss back from the GPU every N batches instead of every batch (each "
+                         "read waits for the GPU); the network trained is the same, the logged loss differs in "
+                         "rounding")
+    ap.add_argument("--profile", type=int, default=0, metavar="N",
+                    help="time N training batches by phase (data, forward, backward, step, loss read) and end to "
+                         "end with and without a loss read per batch, then stop without writing anything")
     args = ap.parse_args(argv)
 
     if args.threads:
@@ -642,6 +980,11 @@ def main(argv=None):
     rng = np.random.default_rng(args.seed)
 
     paths = expand_paths(args.data)
+    t0 = time.time()
+    fingerprint = data_fingerprint([p for p in paths if not p.endswith(".npz")] or paths,
+                                   cache=not args.no_data_cache)
+    print(f"data: {len(paths)} files, content sha256 {fingerprint['sha256'][:16]} ({time.time() - t0:.0f}s)",
+          flush=True)
     binary = [p.endswith(".bin") for p in paths]
     if any(binary) and not all(binary):
         sys.exit("--data: .bin files cannot be mixed with other inputs (convert those with tools/nnue/pack.py)")
@@ -651,9 +994,26 @@ def main(argv=None):
     else:
         source = ArrayData(load(paths, args.cache), args.val, rng, device)
     n = source.n
-    print(f"{n} positions loaded in {time.time() - t0:.0f}s", flush=True)
+    print(f"{n} positions loaded in {time.time() - t0:.0f}s; validation {source.n_val} (split by {source.split})",
+          flush=True)
     if n == 0:
         sys.exit("no positions")
+    overlaps = {}
+    for path in args.eval_set:  # an evaluation set must be independent of what is trained on
+        ov = eval_overlap(path, [p for p in paths if p.endswith(".bin")], fingerprint["sha256"],
+                          cache=not args.no_data_cache)
+        frac = ov["records_in_training_data"] / max(1, ov["records"])
+        if ov["same_file_as"]:
+            sys.exit(f"--eval-set {path} is training data ({', '.join(ov['same_file_as'])})")
+        if ov["games_in_training_data"]:
+            sys.exit(f"--eval-set {path}: {ov['games_in_training_data']} of its games (seed and number) are in "
+                     "the training data")
+        if frac > args.eval_overlap_limit:
+            sys.exit(f"--eval-set {path}: {ov['records_in_training_data']} of its {ov['records']} records "
+                     f"({frac:.2%}) also occur in the training data (limit {args.eval_overlap_limit:.2%})")
+        print(f"eval set {os.path.basename(path)}: {ov['records']} records, {ov['records_in_training_data']} "
+              f"({frac:.3%}) also in the training data", flush=True)
+        overlaps[path] = ov
 
     if not 1 <= args.buckets <= MAX_BUCKETS:
         sys.exit(f"--buckets must be 1-{MAX_BUCKETS}")
@@ -662,6 +1022,10 @@ def main(argv=None):
     except ValueError as e:
         sys.exit(f"--king-buckets: {e}")
     model = Nnue(args.hidden, args.buckets, args.king_buckets, args.activation == "screlu").to(device)
+    started_from = None
+    if args.init_from:
+        init_from(model, args.init_from)
+        started_from = {"path": args.init_from, "sha256": file_sha256(args.init_from, cache=False)}
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     steps = args.epochs * source.steps(args.batch)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, steps), eta_min=args.lr * 0.01)
@@ -671,6 +1035,7 @@ def main(argv=None):
     settings = {"batch": args.batch, "lr": args.lr, "lam": args.lam, "val": args.val, "seed": args.seed,
                 "king_layout": [int(x) for x in king_config(args.king_buckets)[2]]}
     first_epoch = 1
+    history = []
     if args.resume and os.path.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, weights_only=False, map_location=device)
         if (ckpt["positions"] != n or ckpt["hidden"] != args.hidden or ckpt["epochs"] != args.epochs
@@ -680,16 +1045,34 @@ def main(argv=None):
         changed = [k for k, v in settings.items() if k in ckpt and ckpt[k] != v]
         if changed:
             sys.exit(f"{ckpt_path} was made with different settings: {', '.join(changed)}")
+        # Checkpoints written before the data was fingerprinted resume as before.
+        if "data_sha256" in ckpt and ckpt["data_sha256"] != fingerprint["sha256"]:
+            sys.exit(f"{ckpt_path} was made with other data: the same number of positions, other content "
+                     f"(sha256 {ckpt['data_sha256'][:16]}, now {fingerprint['sha256'][:16]})")
+        if "n_train" in ckpt and ckpt["n_train"] != source.n_train:
+            sys.exit(f"{ckpt_path} was made with another training/validation split ({ckpt['n_train']} training "
+                     f"positions, now {source.n_train})")
+        # A resumed run keeps the weights it started from; naming other ones is a contradiction.
+        if args.init_from and (ckpt.get("init_from") or {}).get("sha256") != started_from["sha256"]:
+            sys.exit(f"{ckpt_path} started from {(ckpt.get('init_from') or {}).get('path')!r}, not from "
+                     f"{args.init_from!r}")
+        started_from = ckpt.get("init_from", started_from)
         model.load_state_dict(ckpt["model"])
         opt.load_state_dict(ckpt["opt"])
         sched.load_state_dict(ckpt["sched"])
         rng.bit_generator.state = ckpt["rng"]
+        history = list(ckpt.get("history", []))
         first_epoch = ckpt["epoch"] + 1
         print(f"resuming after epoch {ckpt['epoch']}", flush=True)
+    if args.profile:
+        profile(model, opt, sched, source, rng, args, device)
+        return
     last_epoch = args.epochs if not args.stop_after else min(args.epochs, first_epoch + args.stop_after - 1)
+    version = code_version()
     for epoch in range(first_epoch, last_epoch + 1):
         t = time.time()
         total, count = 0.0, 0
+        pending, n_pending = None, 0  # loss sums still on the device (--sync-every)
         for w, b, s, k, target in source.train_batches(rng, args.batch, args.lam, args.buckets):
             loss = ((torch.sigmoid(model(w, b, s, k)) - target) ** 2).mean()
             opt.zero_grad()
@@ -697,19 +1080,56 @@ def main(argv=None):
             opt.step()
             sched.step()
             model.clip()
-            total += loss.item() * len(target)
+            if args.sync_every <= 1:
+                total += loss.item() * len(target)  # waits for the GPU to finish this batch
+            else:
+                part = loss.detach() * len(target)
+                pending, n_pending = (part if pending is None else pending + part), n_pending + 1
+                if n_pending >= args.sync_every:
+                    total, pending, n_pending = total + pending.item(), None, 0
             count += len(target)
+        if pending is not None:
+            total += pending.item()
         msg = f"epoch {epoch:3d}  train {total / count:.6f}"
-        if source.n_val:
-            msg += f"  val {source.val_loss(model, args.lam):.6f}"
+        val = source.val_loss(model, args.lam) if source.n_val else None
+        if val is not None:
+            msg += f"  val {val:.6f}"
         print(f"{msg}  ({time.time() - t:.0f}s)", flush=True)
+        entry = {"epoch": epoch, "train": total / count, "val": val, "seconds": round(time.time() - t, 1)}
+        if args.eval_set:
+            entry["eval"] = {}
+            for path in args.eval_set:
+                rep = eval_set_report(model, path, args.lam, device)
+                entry["eval"][os.path.basename(path)] = rep
+                print(f"  eval {os.path.basename(path)}: {rep['loss']:.6f} on {rep['positions']} positions; by piece "
+                      "count " + " ".join("-" if x is None else f"{x:.5f}" for x in rep["by_output_bucket"]), flush=True)
+        history.append(entry)
         export(model, args.out)
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(),
                     "rng": rng.bit_generator.state, "epoch": epoch, "positions": n, "hidden": args.hidden,
                     "epochs": args.epochs, "buckets": args.buckets, "king_buckets": args.king_buckets,
-                    "activation": args.activation, **settings},
+                    "activation": args.activation, **settings,
+                    "data_sha256": fingerprint["sha256"], "n_train": source.n_train, "split": source.split,
+                    "init_from": started_from, "history": history},
                    ckpt_path + ".tmp")
         os.replace(ckpt_path + ".tmp", ckpt_path)
+        manifest = {
+            "format": "nags-nnue-training-1", "network": os.path.basename(args.out),
+            "network_sha256": file_sha256(args.out, cache=False), "architecture": architecture(model),
+            "settings": {**settings, "epochs": args.epochs, "val": args.val, "seed": args.seed},
+            "data": {"positions": n, "train": n - source.n_val, "validation": source.n_val, "split": source.split,
+                     **fingerprint},
+            "init_from": started_from, "epochs_done": epoch, "history": history, "code": version,
+            "eval_sets": [{"name": os.path.basename(p), "sha256": file_sha256(p, cache=False),
+                           "records": overlaps[p]["records"],
+                           "records_in_training_data": overlaps[p]["records_in_training_data"]}
+                          for p in args.eval_set],
+            "torch": torch.__version__, "device": str(device),
+            "written": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        }
+        with open(args.out + ".json.tmp", "w") as fh:
+            json.dump(manifest, fh, indent=1)
+        os.replace(args.out + ".json.tmp", args.out + ".json")
     print(f"wrote {args.out}" + (f" (stopped after epoch {last_epoch} of {args.epochs})" if last_epoch < args.epochs else ""))
 
 

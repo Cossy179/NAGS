@@ -28,6 +28,48 @@ with the search score in centipawns and the result (1.0 / 0.5 / 0.0), both
 from White's point of view. Output is appended, so several runs (use a
 different `--seed`) can go into one file.
 
+**Shards** (`--first-game N`, opt-in): the games are numbered N to N +
+`--games` − 1 and each one draws its random opening from its own stream,
+seeded by the seed and its number, so a game is the same whichever thread
+plays it (only the order in the file depends on the threads; with
+`--threads 1` the file is in game order). `<out>.games` is the shard's index.
+Its first line records the settings, the network (FNV-1a 64 of its bytes)
+and the search (the `nags_enhanced bench` node count, computed at start).
+Then there is one line per finished game: number, records, bytes, result and
+the FNV-1a 64 checksum of its bytes, each written after the game's bytes.
+
+Run the same command again after a stop and it resumes:
+
+* an index line cut off as it was written is dropped;
+* the last 64 games are checked against their checksums, and those that
+  don't match, or that the output is too short for, are played again (they
+  are the same games);
+* the output is cut back to the games kept, and only the missing numbers
+  are played.
+
+Other settings, another network or another search are refused, as is a
+damaged index line further up. An output file that holds data but has no
+index (an ordinary run, or a deleted index) is never truncated or extended:
+nags_datagen stops with an error. Several machines can share one seed with
+disjoint ranges (`--first-game 0 --games 100000`, `--first-game 100000
+--games 100000`, ...) and never write the same game.
+`python tools/nnue/shards.py check data/*.bin` verifies a set of shards
+before training: each one's size, the checksums (`--checksums all` for every
+game), the same settings, network and search in all of them apart from the
+seed, and no game of a seed twice. The index gives the game boundaries (for
+a validation split by game). Without `--first-game` the output of a command
+is exactly what it was.
+
+Where the time goes (callgrind, network 8, 5000 nodes, one thread): the
+search is 99% of the instructions; openings, filtering, packing and output
+together about 1%. Of the positions searched (36,122 in 300 games), 73.7%
+are kept, 8.5% are in check, 17.3% have a capture or promotion as the best
+move and 0.5% a mate or tablebase score; 16% of the random openings are
+rejected (each costs a depth-6 search). So data generation gets faster with
+the search itself, and at most about 6% from searching the in-check
+positions with a smaller budget (which would change the games). One thread
+here: 353 kept positions per second.
+
 With an output name ending in `.bin` each position is a 32-byte binary
 record instead (occupancy, 4-bit piece codes, score, result, side to move;
 the layout is at the top of `src/datagen_main.cpp`). That is about half the
@@ -81,6 +123,80 @@ epoch, quantized (feature weights × 255, output weights × 64), in the format
 described at the top of `train.py`, and the training state is saved to
 `<out>.ckpt`, so an interrupted run continues with `--resume` (same data and
 settings).
+
+**Provenance.** The data is fingerprinted by content (the SHA-256 of each
+file, cached next to it as `<file>.sha256` by size and modification time, so
+200M positions are hashed once, about a minute from a hard disk), and the
+checkpoint keeps the fingerprint: `--resume` refuses data with the same
+number of positions but other content (before, the count was all it
+compared). After every epoch `<out>.json` records what the network is: its
+architecture (format version, hidden size, output and king buckets,
+mirroring, activation, layout), the settings, the data's fingerprint and
+file list, the train/validation split, the loss history, the weights it
+started from and the trainer's commit and SHA-256.
+
+**Validation by complete games.** The validation loss is measured on the
+last 1% of the records (at most 1M). When the file that boundary falls in
+is a shard with a complete index (`nags_datagen --first-game`, its
+`.games` file), the boundary moves to the nearest start of a game in it,
+so no game has positions on both sides. Without an index it stays where it
+is: one game may be split, and the log says so. `<out>.json` and the
+checkpoint record the split ("games" or "records"), and `--resume` refuses
+another split. Text data is still split by random positions, as before,
+so a game's positions fall on both sides; train on `.bin` shards for a
+clean validation loss.
+
+**A fixed evaluation set.** The validation loss changes with every round's
+data. `--eval-set FILE` (repeatable; 32-byte records that are not trained
+on) is evaluated after every epoch and reported overall, by output bucket
+(piece count) and by the side to move's king bucket, in the log and in
+`<out>.json`, so networks of different rounds and designs can be compared
+on the same positions, and a change that helps the middlegame and hurts
+the endgame shows as such. Make one once, from a seed no training batch
+uses and under a name `run_round.py` does not train on (it trains on
+`selfplay*.bin`), for example
+`nags_datagen --out data/evalset_9999.bin --seed 9999 --first-game 0 --games 3000`
+(about 250k positions); training with or without it gives the same network
+(tested). A loss is not a strength result: it can rule designs out, and
+matches decide.
+
+An evaluation set must be independent of the training data. Before
+training, each `--eval-set` is compared with the data, and the run is
+refused if the set is one of the training files (or a copy of one), if
+both have shard indexes and share a game (the same seed and number), or
+if more than `--eval-overlap-limit` of its records (default 1%) occur in
+the training data too. That last check catches pasted training data
+without an index; it takes one pass over the data, and the result is kept
+in `<eval>.overlap.json`. The overlap found is recorded in `<out>.json`.
+Independent self-play shares very few records: 0 of 38,944 between two
+400-game shards of different seeds, and 3 of 26,406 (0.011%) against 73k
+records of two others. Identical positions with other scores or results
+are more common (0.04-0.09%) but don't count.
+
+**Measuring the trainer.** `--profile N` times N batches by phase (batch
+preparation, forward, backward, optimiser step, reading the loss back),
+each synchronised with the GPU, and then N batches end to end reading the
+loss after every batch (as training does by default, which makes the CPU
+wait for the GPU each time) and after every 100 (or `--sync-every`); it
+writes nothing. `--sync-every N` reads the loss every N batches in
+training: the network trained is byte-identical (tested), only the logged
+loss's rounding differs. On the 4-core VM's CPU (no GPU; one thread, kb4
+SCReLU, batch 16384): 513 ms a batch, of which data 51, forward 147,
+backward 308, step 7, and the loss read nothing measurable (1.01x end to
+end), as expected without a GPU. Whether the per-batch read costs anything
+on the RTX 3060 is what `--profile 200` there will say; the default stays
+at 1 until it does.
+
+**Exact resume and warm starts are separate.** `--resume` continues the
+same run (data, settings, optimiser and schedule state). `--init-from NET`
+starts a *new* run from NET's weights, an exported network such as
+`nets/nags.nnue` or a training `.ckpt`, with a fresh Adam state and a fresh
+cosine schedule over this run's epochs; NET must have the run's
+architecture (hidden size, output buckets, king buckets and layout,
+activation), or the trainer stops. An exported network is read back
+exactly: exporting before any training writes the same file (tested for
+every design and for network 8). A resumed warm start keeps the weights it
+started from (recorded in the checkpoint).
 
 ## 3. Inference in the engine
 
@@ -203,9 +319,16 @@ python tools\nnue\run_round.py --target-positions 200000000 --threads 11
    `--target-positions` positions; older `selfplay*.txt` files are converted
    to `.bin` once and count too;
 2. trains each network design in `--designs` on all of it (on the GPU,
-   `--device auto`): by default `current` (the built-in network's design)
-   and `kb4` (4 king buckets with SCReLU, which needs this much data to pay
-   off); `kb8` and `kb16` are also available;
+   `--device auto`): by default `crelu-b8` (768 → 256 clipped ReLU, the design
+   of networks 1–7) and `kb4-screlu-b8` (4 king buckets with SCReLU, network
+   8's design); `kb8-screlu-b8` and `kb16-screlu-b8` are also available. The
+   historical names `current`, `kb4`, `kb8` and `kb16` still work and name the
+   files (`net_current_...`, `net_kb4_...`), so a round started with them
+   resumes either way. `current` never meant network 8's design; the run
+   prints the built-in network's design (`built-in network: kb4-screlu-b8`).
+   With `--warm-start builtin` a design with the built-in network's
+   architecture starts from its weights (`train.py --init-from`, a new run in
+   files ending `_warm`), the others from scratch;
 3. plays each new network against the built-in one (SPRT [0, 10] at
    3+0.03); if several win, the best two play each other; the winner is
    copied to `nets\nags.nnue`.
@@ -255,7 +378,8 @@ Practical notes from that round:
 * **Resuming starts a new batch.** After a stop, the next batch gets a new
   seed and `nags_datagen`'s counter starts at zero; the running total is
   the `<positions> of <target> positions` line `run_round.py` prints before
-  each batch.
+  each batch. With `--resumable-batches` (numbered games, `nags_datagen
+  --first-game 0`) the stopped batch is finished under its own seed instead.
 * **Start long runs from your own console** (Explorer, the Start menu, a
   `.cmd` file), not as a child of another application: a run started from
   inside an app that then updated itself (a packaged Store app) was ended
