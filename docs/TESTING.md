@@ -579,6 +579,18 @@ from that PC (medians of three runs; `nags_enhanced` 0.57M to 1.48M
 nodes/second); before it, MSVC builds used the portable NNUE code and ran
 about 2.6× slower than they could.
 
+**Build options tried and not adopted** (`b4baff0`, GCC 13.3 on the 4-core VM,
+idle, `nags_enhanced bench` pinned to one core, rounds in random order;
+median of the per-round ratios with a bootstrap 95% interval; bench
+1509779 for all three builds). Link-time optimisation (`-flto=auto`):
+1.007× (0.958–1.026) over 30 rounds and 1.022× (0.975–1.080) over 40, so
+no gain that this VM can show. Profile-guided optimisation
+(`-fprofile-generate` on bench, then `-fprofile-use`): 0.951× (0.925–0.996)
+and 0.937× (0.911–0.979), slower. Single runs vary by ±15% on this VM, so
+only gains of about 2% or more with the interval above 1 would count. The
+Windows PC builds with MSVC and its own AVX2 kernels, so these results say
+nothing about MSVC's link-time code generation or PGO there.
+
 ## Strength log
 
 Every change that affects playing strength is listed with the test that
