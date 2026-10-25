@@ -579,6 +579,31 @@ from that PC (medians of three runs; `nags_enhanced` 0.57M to 1.48M
 nodes/second); before it, MSVC builds used the portable NNUE code and ran
 about 2.6× slower than they could.
 
+**Build options tried and not adopted** (`b4baff0`, GCC 13.3 on the 4-core VM,
+idle, `nags_enhanced bench` pinned to one core, rounds in random order;
+median of the per-round ratios with a bootstrap 95% interval; bench
+1509779 for all three builds). Link-time optimisation (`-flto=auto`):
+1.007× (0.958–1.026) over 30 rounds and 1.022× (0.975–1.080) over 40, so
+no gain that this VM can show. Profile-guided optimisation
+(`-fprofile-generate` on bench, then `-fprofile-use`): 0.951× (0.925–0.996)
+and 0.937× (0.911–0.979), slower. Single runs vary by ±15% on this VM, so
+only gains of about 2% or more with the interval above 1 would count. The
+Windows PC builds with MSVC and its own AVX2 kernels, so these results say
+nothing about MSVC's link-time code generation or PGO there.
+
+**Threads (Lazy SMP), strength rather than speed** (`b4baff0`, network 8,
+4-core VM, 3+0.03, 1000 games each, `nags_balanced.epd`, no forfeits):
+Threads=2 against Threads=1 (one game at a time) scored +107.5 ± 14.0
+(+402 =496 -102). For reference, twice the time on one thread (6+0.06
+against 3+0.03, three games at a time) scored +165.4 ± 14.9 (+502 =439
+-59). The second thread searches about 2.0× the nodes per second (2.0-2.1×
+in three positions, `go movetime 4000`), but its result equals about
+2^(107.5 / 165.4) ≈ 1.57× the time: roughly 65% (about 52-81% within the
+errors) of what a doubling of the time gives. The rest is the overlap of
+the threads' searches. An SMP change (the depth vote above was rejected)
+should be judged by this ratio at its thread count, not by nodes per
+second.
+
 ## Strength log
 
 Every change that affects playing strength is listed with the test that
@@ -643,6 +668,12 @@ speed log), openings from `nags_balanced.epd` and resign adjudication
 | Network 8 vs the clipped-ReLU network above (same data and epochs) | SPRT [−5, 5], 3+0.03, 5 at a time on the Windows PC | H1 after 410 games (+147 =173 -90; 3 losses on time by network 8, 1 by the other) | +48.6 ± 25.0 | – |
 | Time management: default moves to go 20 instead of 30 when the GUI sends no `movestogo` (target time / 20 + 3/4 inc; the hard limit rises from about 10% to 15% of the clock); on `309976d` (network 8), against it | SPRT [−5, 0] (non-regression), 10+0.1, 3 at a time on the 4-core VM | H1 after 2680 games (+561 =1604 -515) | +6.0 ± 7.4 | 1509779 (bench is depth-limited; unchanged) |
 | The same change on the programme branch with network 7 (`24dc875` against `8708040`) | SPRT [−5, 0] (non-regression), 10+0.1, 3 at a time on the 4-core VM (paused once for another test, resumed) | H1 after 1218 games (+314 =662 -242) | +20.6 ± 12.1 | 1466858 |
+| Cut-node flag (Stockfish's `cutNode`) and two more plies of late-move reduction at expected cut nodes; on `2365d84` (`claude/engine-programme`, network 7), against it | SPRT [0, 10], 3+0.03, 3 at a time on the 4-core VM | H0 after 1338 games (+328 =653 -357) | −7.5 ± 12.7 | – (not adopted) |
+| One more ply of late-move reduction for quiet moves when the TT move is a capture (or en passant); on `2365d84` (`claude/engine-programme`, network 7), against it | SPRT [0, 10], 3+0.03, 3 at a time on the 4-core VM | H0 after 1668 games (+425 =800 -443) | −3.7 ± 10.7 | – (not adopted) |
+| Lazy SMP: the threads vote on the move to play (weighted by depth and score) instead of taking the main thread's; the shortest proven mate wins; on `2365d84` (`claude/engine-programme`, network 7), against it | SPRT [0, 10], 3+0.03, `Threads=3`, one game at a time on the 4-core VM | H0 after 1016 games (+236 =522 -258) | −7.5 ± 12.6 | – (not adopted) |
+| Capture history: a table by moving piece, target square and captured piece type, updated like the quiet history (bonus to the capture that cuts off, malus to captures searched before it); an eighth of it is added to the MVV/LVA score of captures; on `2365d84` (`claude/engine-programme`, network 7), against it | SPRT [0, 10], 3+0.03, 3 at a time on the 4-core VM | H1 after 2956 games (+799 =1445 -712) | +10.2 ± 8.2 | 1439225 |
+| The same capture history on `main` with network 8 (`exp/capture-history-on-main-n8`, `bcdda99`, the change cherry-picked onto `b4baff0`), against `b4baff0` | SPRT [0, 10], 3+0.03, 3 at a time on the 4-core VM | no decision at the 8000-game cap (+1960 =4185 -1855; 1 loss on time by the candidate), LLR −0.76 | +4.6 ± 4.7 | – (not adopted: undecided at the cap; bench 1461117) |
+| Draws by the rules (`fix/rules-draws`, `a87fb54`): an en-passant right only when the capture is legal (not with a pinned capturer), so the hash and repetitions no longer split such positions; positions with only bishops, all on one colour, are dead draws; on `b4baff0`, against it, run with `tools/funnel.py --kind fix` | SPRT [−5, 0] (non-regression), 3+0.03, 3 at a time on the 4-core VM | no decision at the 6000-game cap (+1412 =3122 -1466), LLR −0.42 | −3.1 ± 5.4 | – (not adopted: undecided at the cap; bench 1509779, unchanged) |
 
 ### Experiment record
 
@@ -687,6 +718,13 @@ is, leaning towards reverting); it ended at +0.1 ± 5.6 after 6000 games
 | Losing captures last (`exp/losing-captures-last`) | Losing captures seldom refute and are never reduced; searched before the quiet moves they delay cutoffs and add one to every later quiet move's reduction move number | 1408160 → 1450268 on `bf54628` | SPRT [0, 10] on `bf54628`: H1, +15.0 ± 11.4 (1646 games); reviewed before the test (no defects). Besides the order, the change also moves which moves pass the `i > 0` pruning gates (a quiet move searched first can now be the one that opens them) and gives quiet evasions before losing captures in check, so the gain is not the reorder alone | accepted (`8a16c2f`; the merged binary is byte-identical to the tested one, so no port check) | changes future datagen games, not their format |
 | Continuation history four plies back (`exp/cont-history-4`, tested as `exp/cont-history-4-on-lcl`) | The side to move's own move two turns ago (plans, manoeuvres) predicts which quiet move refutes now, a signal plies 1 and 2 carry only partly | 1450268 → 1466858 on `36d2108` | SPRT [0, 10] on `36d2108`: H1, +7.2 ± 5.3 (7064 games) | accepted (`20ba51f`; merged binary byte-identical to the tested one, so no port check) | changes future datagen games, not their format |
 | Capture history (`exp/capture-history`) | History of captures orders them better than MVV/LVA alone | 1595609 → 1561627 (on `10d3d5a`) | SPRT [0, 10]: +4.9 ± 5.5 after 7566 games, LLR −0.16; paused (true effect near the middle of the bounds); superseded by a retest on the current head (`exp/capture-history-on-lcl`), since an effect measured on `10d3d5a` overstates what it adds now | superseded | changes future datagen games, not their format |
+| Capture history on the head (`exp/capture-history-head`, recorded on `exp/experiment-log`) | As `exp/capture-history`, measured on the head of 2026-10-19 (`105f7c3`, network 7) | 1399785 → 1346220 | SPRT [0, 10]: H0, −27.2 ± 19.6 (422 games; an early stop, so the estimate is biased towards the bound) | rejected then; retested twice since (rows above and below) | none (not merged) |
+| Cut-node reductions (`exp/cutnode-lmr`, tested as `exp/cutnode-lmr-on-mtg`) | An expected cut node that has not cut off after its first moves is usually an all-node, so its late quiet moves can be reduced harder | 1466858 → 1546049 on `2365d84` | SPRT [0, 10] on `2365d84`: H0, −7.5 ± 12.7 (1338 games); reviewed before the test (no defects; the hybrid's null-window MCTS verification would have searched ply 1 as a cut node). An earlier run against the head before moves-to-go 20 was stopped at 190 games when that head changed and is not counted | rejected; a one-ply variant (`exp/cutnode-lmr1-on-mtg`) is queued, as planned before the test | none (not merged) |
+| TT-capture reduction (`exp/ttcapture-lmr-head`, tested as `exp/ttcapture-lmr-on-mtg`) | When the best move found earlier is a capture, the quiet alternatives are less likely to matter and can be reduced one ply more | 1466858 → 1410151 on `2365d84` | SPRT [0, 10] on `2365d84`: H0, −3.7 ± 10.7 (1668 games); review fix (en-passant TT moves) in the tested binary | rejected | none (not merged) |
+| SMP vote (`exp/smp-vote`, tested as `exp/smp-vote-on-mtg`) | With several threads, the move most of them settle on at depth is more reliable than the main thread's alone | no single-thread bench change | SPRT [0, 10] on `2365d84` with 3 threads: H0, −7.5 ± 12.6 (1016 games); two review rounds before the test | rejected | none (not merged; datagen is single-threaded) |
+| Capture history on the head (`exp/capture-history`, tested as `exp/capture-history-on-mtg`) | History of captures orders them better than MVV/LVA alone (the test on `10d3d5a` stalled at +4.9 ± 5.5 and is recorded as superseded) | 1466858 → 1439225 on `2365d84` | SPRT [0, 10] on `2365d84`: H1, +10.2 ± 8.2 (2956 games) | accepted (`d5cb01d`; merged binary byte-identical to the tested one, so no port check) | changes future datagen games, not their format |
+| Capture history on `main` with network 8 (`exp/capture-history-on-main-n8`) | The change accepted on the network-7 line helps `main` with network 8 too (its three earlier results disagreed) | 1509779 → 1461117 on `b4baff0` | SPRT [0, 10] on `b4baff0`: undecided at the 8000-game cap, +4.6 ± 4.7 (LLR −0.76) | not adopted (the cap rule); with the earlier results (+4.9 ± 5.5 stalled, −27.2 ± 19.6 H0 after 422 games, +10.2 ± 8.2 H1 on network 7) a gain of a few Elo is possible but not shown; a retest needs its own hypothesis and bounds set before it (e.g. [0, 5] for a small gain) | none (not merged) |
+| Draws by the rules (`fix/rules-draws`) | Two rule defects found against python-chess (en passant with a pinned capturer kept in the hash; dead same-colour-bishop endings not recognised) can be fixed without costing strength | 1509779 unchanged (no bench position is affected; a 20-game datagen sample byte-identical) | SPRT [−5, 0] on `b4baff0`: undecided at the 6000-game cap, −3.1 ± 5.4 (LLR −0.42). The fix rarely acts: in the 6000 games, 5 positions (5 games) had an en-passant capture that was pseudo-legal but illegal, and 7 games ended in a dead position with two or more bishops (inside the search it acts more often, unmeasured) | not adopted (the cap rule); the measured effect is indistinguishable from zero, and adopting it for correctness instead of strength is a separate decision | none (not merged) |
 | v3 GNN training objectives (`tools/gnn_compare.py`) | Distilling the search's MultiPV scores gives a better move prior and value than training on the moves played | no engine change | 456 held-out positions (30 games), same data for every arm: v3 doubles v2's top-1 (22.8% vs 10.1%); with `rest_mass_scale` 0.5 distillation = played moves for the policy, better for the value (MSE vs results 0.379 vs 0.434); with 0.02 it is ahead on both (top-1 24.8%, NLL 2.45 vs 2.47; value 0.387); docs/ARCHITECTURE.md | supported at this scale (small policy margins); default `rest_mass_scale` 0.5 → 0.02; no strength claim | none (v3 is a separate format) |
 | NNUE format version 4 (`exp/nnue-v4`) | A hidden stack (pairwise inputs, 16-32) after the accumulators evaluates better per position than one output layer | v1-3 bench identical; with a v4 network evaluate 33 → 117 ns, -21% nodes/s | exact engine = trainer reference on all platforms; strength needs a trained v4 and a v3 network on the same data, then an SPRT | merged as an opt-in format, not used by default | none: `train.py` and formats 1-3 untouched |
 | Repetition rule as an option (`RepetitionRule`, from `exp/integration` `176da6c`, ported to `main` without the upcoming-repetition code) | Scores shown as evaluations should not be draws the laws would not give; the twofold heuristic stays the default for play (the laws' rule cost 17.6 ± 9.9 Elo, `exp/repetition-rule-head`) | default path: bench identical for `nags_enhanced`, `nags` (1466858), `nags_basic` (1417097) and `nags_fast` (1116474); `nags_datagen --threads 1` output byte-identical (40 games, text and binary); +0.08% instructions executed over the bench (valgrind) | board tests: the laws' rule against a direct count of earlier occurrences at distances 0-9 from the root and beyond the game, over 300 random games steered into repetitions and with null moves (a planted off-by-one fails it 1406 times, a window that ignores null moves 40 times), the knight shuffle; UCI tests of both rules on all four engines. An independent review found no defect; its two `Laws`-only findings were fixed before the merge (the batched MCTS evaluation cache skips repetitions for networks that read histories; changing the rule clears the transposition table) and `bench` always uses `Twofold`. No SPRT: the default searches exactly as before, and `Laws` is for analysis (`cp -36` at depth 12 on the example where `Twofold` says `cp 0`) | adopted as an opt-in option | none by default; `nags_datagen --repetition third` (opt-in) keeps the data format but ends some games later, so a data set made with it differs |
@@ -704,6 +742,22 @@ Bench values before the singular-extension row are at the old default depth
 (`nags_enhanced` 7); from that row on they are at depth 10. With the network
 embedded, `nags_fast`, `nags_enhanced` and `nags` bench with NNUE;
 `nags_basic` (ray-based Board) keeps the hand-written evaluation.
+
+### Branch map (2026-10-24, against `main` at `b4baff0`)
+
+Where every branch's work is, so that nothing accepted is left behind and
+nothing rejected is retried without a new hypothesis. "In `main`" means its
+content is there (merged, ported or cherry-picked), whatever the branch's
+own history.
+
+| Status | Branches |
+|---|---|
+| In `main` | `exp/lazy-picker`, `exp/faillow-ttmove`, `exp/node-tm`, `exp/correction-history`, `exp/singular-extensions`, `exp/search-correctness(-head)`, `exp/ep-hash(-head)`, `exp/losing-captures-last`, `exp/cont-history-4(-on-lcl)`, `exp/skip-quiets`, `exp/movestogo-20` (as `exp/movestogo-20-on-main-n8`), `exp/repetition-option` (as `integ/repetition-option`, without the upcoming-repetition code), `exp/cpp-graph`, `exp/phase1-inference`, `exp/phase2-hybrid`, `exp/gnn-v3`, `exp/gnn-history`, `exp/nnue-v4(-simd)`, `exp/phase6-decisions`, `exp/phase8-ladder`, `exp/e2e-bench`, `exp/tooling`, `fix/suite-tests-net-scale`, `claude/repository-audit-*` |
+| Accepted elsewhere, not in `main` | capture history (`exp/capture-history-on-mtg`, accepted on `claude/engine-programme` with network 7); ported as `exp/capture-history-on-main-n8` and tested against `main` with network 8: undecided at the cap (next row) |
+| Rejected (keep as records) | `exp/probcut(-head)`, `exp/ttcapture-lmr(-head, -on-*)`, `exp/cutnode-lmr(-on-*)`, `exp/smp-vote(-head, -on-*)`, `exp/tt-eval-pruning`, `exp/qsearch-underpromotions(-head)`, `exp/singular-check-ext(-head)`, `exp/repetition-rule(-head)` (the laws' rule as default; the option is in `main`), `exp/rule50-scaling`, `exp/time-model` (both time controls) |
+| Undecided, not adopted | `exp/capture-history-on-main-n8` (cap reached against `b4baff0`, +4.6 ± 4.7), `fix/rules-draws` (non-regression cap reached against `b4baff0`, −3.1 ± 5.4; a correctness fix that acts in about 12 of 6000 games), `exp/lmp-depth8` (cap reached, +4.0 ± 4.9), `exp/upcoming-repetition(-head)` (no decision after 5100 games against `989184c`) |
+| Untested | `exp/cutnode-lmr1-on-mtg`, `exp/cutnode-lmr1-on-x2` (a one-ply cut-node variant, planned before the two-ply one was rejected; it needs its own hypothesis before a test) |
+| Superseded or diverged | `claude/engine-programme` (the network-7 development line: its moves to go 20 and capture history are covered above, the rest is in `main`); `exp/integration` and `exp/experiment-log` (their tooling and records reached `main` by other branches; the records of the capture-history, ProbCut and TT-capture tests on the head are copied above); `exp/movestogo-20-ltc` (its result is in the table above) |
 
 ### The NAGS hybrid
 
