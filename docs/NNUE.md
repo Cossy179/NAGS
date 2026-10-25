@@ -32,15 +32,33 @@ different `--seed`) can go into one file.
 `--games` − 1 and each one draws its random opening from its own stream,
 seeded by the seed and its number, so a game is the same whichever thread
 plays it (only the order in the file depends on the threads; with
-`--threads 1` the file is in game order). `<out>.games` lists the settings
-and every finished game (number, records, bytes, result). Run the same
-command again after a stop and it resumes: a game cut off mid-write is
-truncated and only the missing numbers are played; other settings are
-refused. Several machines can share one seed with disjoint ranges
-(`--first-game 0 --games 100000`, `--first-game 100000 --games 100000`, ...)
-and never write the same game, and the index gives the game boundaries
-(for a validation split by game). Without `--first-game` the output of a
-command is exactly what it was.
+`--threads 1` the file is in game order). `<out>.games` is the shard's index.
+Its first line records the settings, the network (FNV-1a 64 of its bytes)
+and the search (the `nags_enhanced bench` node count, computed at start).
+Then there is one line per finished game: number, records, bytes, result and
+the FNV-1a 64 checksum of its bytes, each written after the game's bytes.
+
+Run the same command again after a stop and it resumes:
+
+* an index line cut off as it was written is dropped;
+* the last 64 games are checked against their checksums, and those that
+  don't match, or that the output is too short for, are played again (they
+  are the same games);
+* the output is cut back to the games kept, and only the missing numbers
+  are played.
+
+Other settings, another network or another search are refused, as is a
+damaged index line further up. An output file that holds data but has no
+index (an ordinary run, or a deleted index) is never truncated or extended:
+nags_datagen stops with an error. Several machines can share one seed with
+disjoint ranges (`--first-game 0 --games 100000`, `--first-game 100000
+--games 100000`, ...) and never write the same game.
+`python tools/nnue/shards.py check data/*.bin` verifies a set of shards
+before training: each one's size, the checksums (`--checksums all` for every
+game), the same settings, network and search in all of them apart from the
+seed, and no game of a seed twice. The index gives the game boundaries (for
+a validation split by game). Without `--first-game` the output of a command
+is exactly what it was.
 
 Where the time goes (callgrind, network 8, 5000 nodes, one thread): the
 search is 99% of the instructions; openings, filtering, packing and output

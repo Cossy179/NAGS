@@ -101,7 +101,7 @@ def unfinished_batch(data_dir, games):
     """The seed of a resumable batch (nags_datagen --first-game) whose index lists fewer than `games` games."""
     for idx in sorted(data_dir.glob("selfplay_*.bin.games")):
         m = re.match(r"selfplay_(\d+)\.bin\.games$", idx.name)
-        if m and len(idx.read_text().splitlines()) - 1 < games:
+        if m and idx.read_bytes().count(b"\n") - 1 < games:  # complete lines only: the header and one per game
             return int(m.group(1))
     return None
 
