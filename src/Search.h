@@ -58,7 +58,7 @@ struct SearchStats {
     uint64_t rfp = 0, nmpTries = 0, nmpCutoffs = 0, lmp = 0, futility = 0, historyPrunes = 0, seePrunes = 0;
     uint64_t lmrSearches = 0, lmrResearches = 0, pvsResearches = 0;
     uint64_t singularTries = 0, singularExtensions = 0, multiCuts = 0;
-    uint64_t qStandPat = 0, qDelta = 0, qSee = 0, qCutoffs = 0;
+    uint64_t qStandPat = 0, qDelta = 0, qSee = 0, qCutoffs = 0, qStalemates = 0;
 
     void add(const SearchStats &o) {
         const uint64_t *src = reinterpret_cast<const uint64_t *>(&o);
@@ -94,7 +94,7 @@ struct SearchStats {
             "stats reductions lmr " + n(lmrSearches) + " researched " + pct(lmrResearches, lmrSearches) + " pvs re-searches " +
                 n(pvsResearches) + " | singular " + n(singularExtensions) + "/" + n(singularTries) + " multicut " + n(multiCuts),
             "stats qsearch stand-pat cutoffs " + n(qStandPat) + " delta " + n(qDelta) + " see skips " + n(qSee) +
-                " beta cutoffs " + n(qCutoffs),
+                " beta cutoffs " + n(qCutoffs) + " stalemates " + n(qStalemates),
         };
     }
 };
@@ -1157,6 +1157,13 @@ private:
         }
 
         bool inCheck = board.inCheck();
+        // Stalemate: outside check, quiescence would stand pat on the
+        // evaluation of a drawn position. It happens to a side with only its
+        // king and pawns; only then are the legal moves generated.
+        if (!inCheck && !hasNonPawnMaterial(board.sideToMove()) && board.generateLegalMoves().empty()) {
+            NAGS_STAT(++stats.qStalemates);
+            return 0;
+        }
         int best = -INF_SCORE;
         int stand = 0;
         const int originalAlpha = alpha;
