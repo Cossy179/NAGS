@@ -83,6 +83,9 @@ import time
 import numpy as np
 import torch
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import shards  # noqa: E402
+
 FEATURES = 768
 PAD = FEATURES  # index of the all-zero padding row
 MAX_PIECES = 32
@@ -339,6 +342,8 @@ class ArrayData:
         n_val = max(1, int(self.n * val)) if self.n > 100 else 0
         self.val_idx, self.train_idx = perm[:n_val], perm[n_val:]
         self.n_val = n_val
+        self.n_train = self.n - n_val
+        self.split = "random positions"  # text data has no game index: a game's positions fall on both sides
 
     def steps(self, batch):
         return math.ceil(len(self.train_idx) / batch)
@@ -349,6 +354,102 @@ class ArrayData:
 
     def val_loss(self, model, lam):
         return evaluate_loss(model, self.data, self.val_idx, lam, device=self.device)
+
+
+def game_boundary(paths, counts, target):
+    """(n_train, split): the validation boundary moved from record `target` to the nearest start of a game in
+    the file it falls in, using that file's nags_datagen shard index (<file>.games), so that no game has
+    positions on both sides ("games"). Without a usable index the boundary stays and one game may be split
+    ("records")."""
+    offset = 0
+    for path, count in zip(paths, counts):
+        if offset + count <= target:
+            offset += count
+            continue
+        local = target - offset
+        if local == 0:
+            return target, "games"  # at a file boundary: games never span files
+        try:
+            _, games = shards.read_index(path)
+        except (OSError, ValueError):
+            games = None
+        if not games or sum(g.bytes for g in games) != count * RECORD_BYTES:
+            print(f"validation: {os.path.basename(path)} has no complete game index, so the boundary may cut one "
+                  "game (nags_datagen --first-game writes one)", flush=True)
+            return target, "records"
+        starts = [g.offset // RECORD_BYTES for g in games] + [count]
+        best = min(starts, key=lambda s: (abs(s - local), s))
+        if offset + best >= sum(counts):  # keep some validation
+            best = max(s for s in starts if offset + s < sum(counts))
+        return offset + best, "games"
+    return target, "games"
+
+
+def record_hashes(recs):
+    """64-bit hashes of 32-byte records (uint8 [N, 32]), to find records two files share."""
+    w = np.ascontiguousarray(recs).view("<u8").reshape(-1, 4)
+    with np.errstate(over="ignore"):
+        h = w[:, 0] * np.uint64(0x9E3779B97F4A7C15)
+        for k, c in ((1, 0xC2B2AE3D27D4EB4F), (2, 0x165667B19E3779F9), (3, 0xD6E8FEB86659FD93)):
+            h = (h ^ (h >> np.uint64(29))) * np.uint64(0xBF58476D1CE4E5B9) + w[:, k] * np.uint64(c)
+    return h
+
+
+def eval_overlap(eval_path, paths, data_sha, cache=True):
+    """How an --eval-set file overlaps the training data: the same file, games of the same seed and number in
+    both (from their nags_datagen indexes), and records that occur in both (one pass over the data, kept in
+    <eval>.overlap.json for this data and eval file)."""
+    eval_sha = file_sha256(eval_path, cache=False)
+    side = eval_path + ".overlap.json"
+    if cache and os.path.exists(side):
+        try:
+            with open(side) as fh:
+                kept = json.load(fh)
+            if kept.get("eval_sha256") == eval_sha and kept.get("data_sha256") == data_sha:
+                return kept
+        except (OSError, ValueError):
+            pass
+    same_file = [p for p in paths if os.path.realpath(p) == os.path.realpath(eval_path)
+                 or file_sha256(p, cache=True) == eval_sha]
+    shared_games = 0
+    try:
+        eh, eg = shards.read_index(eval_path)
+        mine = {(shards.header_fields(eh).get("seed"), g.number) for g in eg}
+        for p in paths:
+            try:
+                th, tg = shards.read_index(p)
+            except (OSError, ValueError):
+                continue
+            seed = shards.header_fields(th).get("seed")
+            shared_games += sum((seed, g.number) in mine for g in tg)
+    except (OSError, ValueError):
+        pass
+    raw = np.fromfile(eval_path, np.uint8)
+    if raw.size % RECORD_BYTES:
+        sys.exit(f"--eval-set {eval_path}: the size is not a multiple of {RECORD_BYTES} bytes")
+    eval_h = record_hashes(raw.reshape(-1, RECORD_BYTES))
+    unique = np.unique(eval_h)
+    found = np.zeros(len(unique), bool)
+    for p in paths:
+        size = os.path.getsize(p)
+        if not size or size % RECORD_BYTES:
+            continue
+        m = np.memmap(p, np.uint8, "r", shape=(size // RECORD_BYTES, RECORD_BYTES))
+        for start in range(0, len(m), 1 << 20):
+            h = record_hashes(np.array(m[start : start + (1 << 20)]))
+            idx = np.minimum(np.searchsorted(unique, h), len(unique) - 1)
+            found[idx[unique[idx] == h]] = True
+    shared = int(np.isin(eval_h, unique[found]).sum())
+    result = {"eval_sha256": eval_sha, "data_sha256": data_sha, "records": int(len(eval_h)),
+              "records_in_training_data": shared, "same_file_as": [os.path.basename(p) for p in same_file],
+              "games_in_training_data": shared_games}
+    if cache:
+        try:
+            with open(side, "w") as fh:
+                json.dump(result, fh, indent=1)
+        except OSError:
+            pass
+    return result
 
 
 class BinData:
@@ -363,16 +464,20 @@ class BinData:
 
     def __init__(self, paths, val, device):
         self.device = device
-        self.maps = []
+        self.maps, self.paths = [], []
         for p in paths:
             size = os.path.getsize(p)
             if size % RECORD_BYTES:
                 sys.exit(f"{p}: the size is not a multiple of {RECORD_BYTES} bytes")
             if size:
                 self.maps.append(np.memmap(p, np.uint8, "r", shape=(size // RECORD_BYTES, RECORD_BYTES)))
+                self.paths.append(p)
         self.n = sum(len(m) for m in self.maps)
         self.n_val = min(max(1, int(self.n * val)), 1 << 20) if self.n > 100 else 0
-        self.n_train = self.n - self.n_val
+        self.n_train, self.split = self.n - self.n_val, "records"
+        if self.n_val:
+            self.n_train, self.split = game_boundary(self.paths, [len(m) for m in self.maps], self.n_train)
+            self.n_val = self.n - self.n_train
         # Training and validation ranges as (file, start, end) pieces.
         self.chunks, self.val_parts = [], []
         offset = 0
@@ -851,6 +956,10 @@ def main(argv=None):
     ap.add_argument("--eval-set", action="append", default=[], metavar="FILE",
                     help="a fixed set of 32-byte records (not trained on) evaluated after every epoch, overall, by "
                          "output bucket and by king bucket (repeatable; recorded in <out>.json)")
+    ap.add_argument("--eval-overlap-limit", type=float, default=0.01, metavar="FRACTION",
+                    help="refuse an --eval-set more than this fraction of whose records also occur in the training "
+                         "data (default 0.01; independent self-play shares about 0.01%%); the same file, or a game "
+                         "(seed and number) in both, is always refused")
     ap.add_argument("--sync-every", type=int, default=1,
                     help="read the training loss back from the GPU every N batches instead of every batch (each "
                          "read waits for the GPU); the network trained is the same, the logged loss differs in "
@@ -885,9 +994,26 @@ def main(argv=None):
     else:
         source = ArrayData(load(paths, args.cache), args.val, rng, device)
     n = source.n
-    print(f"{n} positions loaded in {time.time() - t0:.0f}s", flush=True)
+    print(f"{n} positions loaded in {time.time() - t0:.0f}s; validation {source.n_val} (split by {source.split})",
+          flush=True)
     if n == 0:
         sys.exit("no positions")
+    overlaps = {}
+    for path in args.eval_set:  # an evaluation set must be independent of what is trained on
+        ov = eval_overlap(path, [p for p in paths if p.endswith(".bin")], fingerprint["sha256"],
+                          cache=not args.no_data_cache)
+        frac = ov["records_in_training_data"] / max(1, ov["records"])
+        if ov["same_file_as"]:
+            sys.exit(f"--eval-set {path} is training data ({', '.join(ov['same_file_as'])})")
+        if ov["games_in_training_data"]:
+            sys.exit(f"--eval-set {path}: {ov['games_in_training_data']} of its games (seed and number) are in "
+                     "the training data")
+        if frac > args.eval_overlap_limit:
+            sys.exit(f"--eval-set {path}: {ov['records_in_training_data']} of its {ov['records']} records "
+                     f"({frac:.2%}) also occur in the training data (limit {args.eval_overlap_limit:.2%})")
+        print(f"eval set {os.path.basename(path)}: {ov['records']} records, {ov['records_in_training_data']} "
+              f"({frac:.3%}) also in the training data", flush=True)
+        overlaps[path] = ov
 
     if not 1 <= args.buckets <= MAX_BUCKETS:
         sys.exit(f"--buckets must be 1-{MAX_BUCKETS}")
@@ -923,6 +1049,9 @@ def main(argv=None):
         if "data_sha256" in ckpt and ckpt["data_sha256"] != fingerprint["sha256"]:
             sys.exit(f"{ckpt_path} was made with other data: the same number of positions, other content "
                      f"(sha256 {ckpt['data_sha256'][:16]}, now {fingerprint['sha256'][:16]})")
+        if "n_train" in ckpt and ckpt["n_train"] != source.n_train:
+            sys.exit(f"{ckpt_path} was made with another training/validation split ({ckpt['n_train']} training "
+                     f"positions, now {source.n_train})")
         # A resumed run keeps the weights it started from; naming other ones is a contradiction.
         if args.init_from and (ckpt.get("init_from") or {}).get("sha256") != started_from["sha256"]:
             sys.exit(f"{ckpt_path} started from {(ckpt.get('init_from') or {}).get('path')!r}, not from "
@@ -980,16 +1109,21 @@ def main(argv=None):
                     "rng": rng.bit_generator.state, "epoch": epoch, "positions": n, "hidden": args.hidden,
                     "epochs": args.epochs, "buckets": args.buckets, "king_buckets": args.king_buckets,
                     "activation": args.activation, **settings,
-                    "data_sha256": fingerprint["sha256"], "init_from": started_from, "history": history},
+                    "data_sha256": fingerprint["sha256"], "n_train": source.n_train, "split": source.split,
+                    "init_from": started_from, "history": history},
                    ckpt_path + ".tmp")
         os.replace(ckpt_path + ".tmp", ckpt_path)
         manifest = {
             "format": "nags-nnue-training-1", "network": os.path.basename(args.out),
             "network_sha256": file_sha256(args.out, cache=False), "architecture": architecture(model),
             "settings": {**settings, "epochs": args.epochs, "val": args.val, "seed": args.seed},
-            "data": {"positions": n, "train": n - source.n_val, "validation": source.n_val, **fingerprint},
+            "data": {"positions": n, "train": n - source.n_val, "validation": source.n_val, "split": source.split,
+                     **fingerprint},
             "init_from": started_from, "epochs_done": epoch, "history": history, "code": version,
-            "eval_sets": [{"name": os.path.basename(p), "sha256": file_sha256(p, cache=False)} for p in args.eval_set],
+            "eval_sets": [{"name": os.path.basename(p), "sha256": file_sha256(p, cache=False),
+                           "records": overlaps[p]["records"],
+                           "records_in_training_data": overlaps[p]["records_in_training_data"]}
+                          for p in args.eval_set],
             "torch": torch.__version__, "device": str(device),
             "written": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
         }

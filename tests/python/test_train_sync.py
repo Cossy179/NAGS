@@ -44,7 +44,9 @@ def test_eval_set_reports_by_bucket_and_changes_nothing(tmp_path):
     pack.main([str(tmp_path / "d.txt"), str(tmp_path / "e.txt")])
     data, ev = str(tmp_path / "d.bin"), str(tmp_path / "e.bin")
     train.main(["--data", data, "--out", str(tmp_path / "plain.nnue")] + COMMON)
-    train.main(["--data", data, "--out", str(tmp_path / "eval.nnue"), "--eval-set", ev] + COMMON)
+    # The synthetic sets are built from the same five positions, so they share records: allowed here.
+    train.main(["--data", data, "--out", str(tmp_path / "eval.nnue"), "--eval-set", ev, "--eval-overlap-limit", "1"]
+               + COMMON)
     assert (tmp_path / "plain.nnue").read_bytes() == (tmp_path / "eval.nnue").read_bytes()  # training unchanged
     m = json.loads((tmp_path / "eval.nnue.json").read_text())
     rep = m["history"][-1]["eval"]["e.bin"]

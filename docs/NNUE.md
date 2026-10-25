@@ -135,9 +135,18 @@ mirroring, activation, layout), the settings, the data's fingerprint and
 file list, the train/validation split, the loss history, the weights it
 started from and the trainer's commit and SHA-256.
 
-**A fixed evaluation set.** The validation loss is measured on the last
-1% of the records (at most 1M), which are whole games of the newest batch
-apart from the one game cut at the boundary, and changes with every round's
+**Validation by complete games.** The validation loss is measured on the
+last 1% of the records (at most 1M). When the file that boundary falls in
+is a shard with a complete index (`nags_datagen --first-game`, its
+`.games` file), the boundary moves to the nearest start of a game in it,
+so no game has positions on both sides. Without an index it stays where it
+is: one game may be split, and the log says so. `<out>.json` and the
+checkpoint record the split ("games" or "records"), and `--resume` refuses
+another split. Text data is still split by random positions, as before,
+so a game's positions fall on both sides; train on `.bin` shards for a
+clean validation loss.
+
+**A fixed evaluation set.** The validation loss changes with every round's
 data. `--eval-set FILE` (repeatable; 32-byte records that are not trained
 on) is evaluated after every epoch and reported overall, by output bucket
 (piece count) and by the side to move's king bucket, in the log and in
@@ -150,6 +159,19 @@ uses and under a name `run_round.py` does not train on (it trains on
 (about 250k positions); training with or without it gives the same network
 (tested). A loss is not a strength result: it can rule designs out, and
 matches decide.
+
+An evaluation set must be independent of the training data. Before
+training, each `--eval-set` is compared with the data, and the run is
+refused if the set is one of the training files (or a copy of one), if
+both have shard indexes and share a game (the same seed and number), or
+if more than `--eval-overlap-limit` of its records (default 1%) occur in
+the training data too. That last check catches pasted training data
+without an index; it takes one pass over the data, and the result is kept
+in `<eval>.overlap.json`. The overlap found is recorded in `<out>.json`.
+Independent self-play shares very few records: 0 of 38,944 between two
+400-game shards of different seeds, and 3 of 26,406 (0.011%) against 73k
+records of two others. Identical positions with other scores or results
+are more common (0.04-0.09%) but don't count.
 
 **Measuring the trainer.** `--profile N` times N batches by phase (batch
 preparation, forward, backward, optimiser step, reading the loss back),
