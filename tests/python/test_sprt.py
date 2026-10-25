@@ -2,9 +2,11 @@
 
 import importlib.util
 import math
+import os
 import random
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import chess
@@ -218,7 +220,9 @@ def test_engine_paths_stay_whole(tmp_path):
     # run_round passes native paths: on Windows with backslashes, which POSIX
     # command-line splitting dropped (every match then failed to start), and
     # possibly with spaces.
-    exe = tmp_path / "dir with space" / "eng\\ine.exe"
+    # A literal backslash in a file name only exists off Windows (on Windows it separates directories, and the
+    # native path has backslashes anyway).
+    exe = tmp_path / "dir with space" / ("engine.exe" if os.name == "nt" else "eng\\ine.exe")
     exe.parent.mkdir()
     exe.write_text("")
     assert sprt.engine_command(str(exe)) == [str(exe)]
@@ -281,3 +285,154 @@ def test_time_odds_match_end_to_end(tmp_path, capsys):
         sprt.main(["--engine", "a", "--engine", "b", "--games", "2"])
     with pytest.raises(SystemExit):  # one engine without a limit
         sprt.main(["--engine", "a", "--engine", "b", "--nodes1", "10", "--games", "2"])
+
+
+# Infrastructure failures make a match invalid; genuine forfeits stay losses and are reported.
+
+_FAKE = """\
+import sys
+moves = 0
+for line in sys.stdin:
+    cmd = line.split()
+    if not cmd:
+        continue
+    if cmd[0] == "uci":
+        print("id name Fake"); print("option name Mode type string default x"); print("uciok", flush=True)
+    elif cmd[0] == "setoption" and len(cmd) > 4 and cmd[4] == "complain":
+        print("info string Mode: cannot open 'complain'", flush=True)
+    elif cmd[0] == "isready":
+        print("readyok", flush=True)
+    elif cmd[0] == "go":
+        moves += 1
+        if moves > 1:  # the preflight's search works; the first move of a game crashes
+            sys.exit(1)
+        print("bestmove e2e4", flush=True)
+    elif cmd[0] == "quit":
+        break
+"""
+
+
+def _fake(tmp_path):
+    path = tmp_path / "fake_engine.py"
+    path.write_text(_FAKE)
+    return [sys.executable, str(path)]
+
+
+def _sprt_match(specs, pairs=4):
+    return sprt.Match(specs, [sprt.Opening(chess.STARTING_FEN, [])], sprt.Limits(depth=1), sprt.Adjudication(),
+                      max_pairs=pairs, concurrency=1, sprt=(0, 10), alpha=0.05, beta=0.05, pgnout=None, seed=1,
+                      shuffle=False)
+
+
+def test_engines_that_cannot_start_give_no_decision(tmp_path, capsys):
+    # The Windows failure of 2026-10-23: every launch failed, every game was scored as a crash, and pairs of
+    # crashes looked like a tie until H0 was accepted. Now the first failed launch ends the match, undecided.
+    missing = [str(tmp_path / "no_such_engine")]
+    match = _sprt_match((sprt.EngineSpec("a", missing), sprt.EngineSpec("b", missing)), pairs=500)
+    assert match.run(report_interval=1000) == 3
+    assert match.decision is None and match.wdl == [0, 0, 0]
+    out = capsys.readouterr().out
+    assert "Match invalid" in out and "accepted" not in out
+    code = sprt.main(["--engine", missing[0], "--engine", missing[0], "--depth", "1", "--sprt", "0", "10",
+                      "--report", "1000"])
+    out = capsys.readouterr()
+    assert code == 3 and "preflight" in out.err and "accepted" not in out.out
+
+
+def test_preflight_checks_options_and_records_a_fingerprint(tmp_path):
+    fake = _fake(tmp_path)
+    fp = sprt.preflight(sprt.EngineSpec("fake", fake, {"Mode": "fine"}))
+    assert fp["id"] == "Fake" and fp["options"] == {"Mode": "fine"} and fp["sha256"] is not None  # the interpreter
+    with pytest.raises(sprt.InfrastructureError, match="did not take its options"):
+        sprt.preflight(sprt.EngineSpec("fake", fake, {"Mode": "complain"}))
+    with pytest.raises(sprt.InfrastructureError, match="unknown UCI option"):
+        sprt.preflight(sprt.EngineSpec("fake", fake, {"Threads": "2"}))
+
+
+def test_a_crash_during_a_game_is_a_loss_and_reported(tmp_path, capsys):
+    if _engine("nags_basic") is None:
+        pytest.skip("engines not built")
+    match = _sprt_match((sprt.EngineSpec("nags", [_engine("nags_basic")]), sprt.EngineSpec("fake", _fake(tmp_path))),
+                        pairs=2)
+    assert match.run(report_interval=1000) in (1, 2)  # games were played: a decision or the cap, never invalid
+    assert match.wdl == [4, 0, 0] and match.forfeits == {("fake", "crash"): 4}
+    assert "Forfeits: fake: 4 crashed or hung" in capsys.readouterr().out
+
+
+@needs_engines
+def test_preflight_rejects_a_network_that_does_not_load(tmp_path, capsys):
+    code = sprt.main(["--engine", _engine("nags_fast"), "--engine", _engine("nags_basic"), "--depth", "1",
+                      "--option1", f"EvalFile={tmp_path / 'missing.nnue'}", "--games", "2", "--report", "1000"])
+    out = capsys.readouterr()
+    assert code == 3 and "EvalFile" in out.err and "Games 2" not in out.out
+    fp = sprt.preflight(sprt.EngineSpec("fast", [_engine("nags_fast")], {"EvalFile": "<embedded>"}))
+    assert fp["sha256"] == sprt.file_sha256(_engine("nags_fast")) and fp["id"]
+    assert fp["network"] or any("hand-written" in s or "classical" in s for s in fp["said"])
+
+
+@needs_engines
+def test_resume_refuses_other_engines(tmp_path, capsys):
+    common = ["--depth", "1", "--concurrency", "1", "--openings", str(ROOT / "tools/openings/nags_balanced.epd"),
+              "--report", "1000"]
+    pair = ["--engine", _engine("nags_fast"), "--engine", _engine("nags_basic")]
+    assert sprt.main(pair + common + ["--games", "2"]) == 0
+    log = tmp_path / "m.log"
+    log.write_text(capsys.readouterr().out)
+    assert "Fingerprint: " in log.read_text()
+    swapped = ["--engine", _engine("nags_basic"), "--engine", _engine("nags_fast")]
+    assert sprt.main(swapped + common + ["--games", "4", "--resume", str(log)]) == 3
+    assert "other engines or settings" in capsys.readouterr().err
+    assert sprt.main(swapped + common + ["--games", "4", "--resume", str(log), "--force-resume"]) == 0
+    assert "WARNING: resuming although engine 1 sha256" in capsys.readouterr().out
+    assert sprt.main(pair + common + ["--games", "4", "--resume", str(log)]) == 0  # the same engines resume
+
+
+def test_tools_keep_windows_engine_paths_whole(tmp_path):
+    exe = tmp_path / "dir with space" / ("engine.exe" if os.name == "nt" else "eng\\ine.exe")
+    exe.parent.mkdir()
+    exe.write_text("")
+    spec = importlib.util.spec_from_file_location("ladder", ROOT / "tools" / "ladder.py")
+    ladder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ladder)
+    rung = ladder.rung_spec({"name": "r", "engine": str(exe), "limits": {"nodes": 10}})
+    assert rung.command == [str(exe)]
+
+
+@needs_engines
+def test_an_interrupted_match_is_not_reported_as_finished(tmp_path, monkeypatch, capsys):
+    # Ctrl-C used to end with "SPRT inconclusive: maximum number of games reached" (exit 2), which run_round
+    # reads as a finished match without a decision, so it never resumed it.
+    import types
+
+    calls = []
+
+    def sleep(seconds):
+        calls.append(seconds)
+        if len(calls) == 1:
+            raise KeyboardInterrupt
+        time.sleep(seconds)
+
+    monkeypatch.setattr(sprt, "time", types.SimpleNamespace(monotonic=time.monotonic, sleep=sleep,
+                                                            perf_counter=time.perf_counter, time=time.time))
+    match = _sprt_match((sprt.EngineSpec("a", [_engine("nags_fast")]), sprt.EngineSpec("b", [_engine("nags_basic")])),
+                        pairs=500)
+    assert match.run(report_interval=1000) == 4
+    out = capsys.readouterr().out
+    assert "Match interrupted after" in out and "inconclusive" not in out and "accepted" not in out
+    sys.path.insert(0, str(ROOT / "tools" / "nnue"))
+    import run_round
+
+    log = tmp_path / "m.log"
+    log.write_text(out)
+    assert run_round.sprt_result(log) is None  # to be resumed, not taken as a result
+
+
+@needs_engines
+def test_resume_skips_a_status_line_cut_off_by_a_kill(tmp_path, capsys):
+    common = ["--engine", _engine("nags_fast"), "--engine", _engine("nags_basic"), "--depth", "1", "--concurrency",
+              "1", "--openings", str(ROOT / "tools/openings/nags_balanced.epd"), "--report", "1000"]
+    assert sprt.main(common + ["--games", "2"]) == 0
+    log = tmp_path / "m.log"
+    log.write_text(capsys.readouterr().out + "Games 4: +2 =1 -1 | penta [0, 1")  # killed while writing
+    assert sprt.main(common + ["--games", "4", "--resume", str(log)]) == 0
+    assert "Resuming after 2 games" in capsys.readouterr().out

@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import math
 import os
-import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -58,13 +58,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 3
     base, inc = sprt.parse_tc(args.tc)
     openings = sprt.load_openings(args.openings)
-    name = os.path.basename(shlex.split(args.engine)[0])
+    command = sprt.engine_command(args.engine)  # a Windows path keeps its backslashes
+    name = os.path.basename(command[0])
     rows: List[Tuple[int, sprt.Match]] = []
     for level in args.levels:
-        specs = (sprt.EngineSpec(name, shlex.split(args.engine), sprt.parse_options(args.option)),
-                 sprt.EngineSpec(f"stockfish-{level}", [args.stockfish],
+        specs = (sprt.EngineSpec(name, command, sprt.parse_options(args.option)),
+                 sprt.EngineSpec(f"stockfish-{level}", sprt.engine_command(args.stockfish),
                                  {"UCI_LimitStrength": "true", "UCI_Elo": str(level)}))
         print(f"== {name} vs Stockfish UCI_Elo {level}: {args.games} games at {args.tc}", flush=True)
+        try:  # an engine that cannot start would otherwise lose every game and make up a rating
+            engines = [sprt.preflight(s) for s in specs]
+        except sprt.InfrastructureError as e:
+            print(f"ERROR: preflight: {e}", file=sys.stderr)
+            return 3
+        print("Fingerprint: " + json.dumps({"engines": engines, "level": level, "tc": args.tc,
+                                            "openings": args.openings,
+                                            "openings_sha256": sprt.file_sha256(args.openings)}, sort_keys=True),
+              flush=True)
         match = sprt.Match(specs, openings, sprt.Limits(base=base, inc=inc), sprt.Adjudication(),
                            max_pairs=(args.games + 1) // 2, concurrency=args.concurrency, sprt=None, alpha=0.05,
                            beta=0.05, pgnout=f"{args.pgnout}_{level}.pgn" if args.pgnout else None, seed=level,

@@ -21,23 +21,35 @@ Example (candidate vs baseline, 8+0.08 s per game, 4 games in parallel):
         --tc 8+0.08 --openings tools/openings/nags_balanced.epd \\
         --concurrency 4 --sprt 0 5 --pgnout match.pgn
 
+Before the first game each engine is started once (UCI handshake, every option set and accepted, ready,
+a legal move from a one-ply search), and the engines, the network each one reports, the openings and the
+settings are written as one "Fingerprint:" line. An engine that cannot be started, then or later, makes
+the match invalid (exit 3, no decision): a failed launch is not a game. An engine that crashes, hangs,
+plays an illegal move or loses on time during a game loses that game, and the "Forfeits:" line counts
+these per engine. --resume refuses a log whose fingerprint names other engines or settings.
+
 Exit status: 0 = H1 accepted (or the fixed-length match finished),
-1 = H0 accepted, 2 = maximum games reached without a decision, 3 = error.
+1 = H0 accepted, 2 = maximum games reached without a decision, 3 = error (no decision),
+4 = interrupted (Ctrl-C) before a decision or the end: continue it with --resume.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import math
 import os
+import queue
 import random
 import re
 import shlex
+import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import chess
 import chess.engine
@@ -285,6 +297,13 @@ def engine_command(text: str) -> List[str]:
     return shlex.split(text)
 
 
+_STATUS_LINE = re.compile(r"Games (\d+): \+(\d+) =(\d+) -(\d+) \| penta \[([\d, ]+)\]")
+
+
+class InfrastructureError(RuntimeError):
+    """An engine could not be started or set up. The match is invalid: this is not a game result."""
+
+
 class Player:
     """One engine process; restarted after a crash or hang."""
 
@@ -293,14 +312,25 @@ class Player:
         self.engine: Optional[chess.engine.SimpleEngine] = None
 
     def ensure(self) -> chess.engine.SimpleEngine:
+        """The running engine, started (or restarted after a crash) if need be. Raises InfrastructureError
+        if it cannot be started or configured: before the fix of 2026-10-23 a Windows path the runner had
+        split wrongly made every launch fail, every game was scored as a crash and the match was decided."""
         if self.engine is None:
-            engine = chess.engine.SimpleEngine.popen_uci(self.spec.command, timeout=30)
+            try:
+                engine = chess.engine.SimpleEngine.popen_uci(self.spec.command, timeout=30)
+            except (OSError, chess.engine.EngineError, chess.engine.EngineTerminatedError, TimeoutError) as e:
+                raise InfrastructureError(f"{self.spec.name}: cannot start {self.spec.command} "
+                                          f"({type(e).__name__}: {e})") from e
             unknown = [k for k in self.spec.options if k not in engine.options]
             if unknown:
                 engine.quit()
-                raise ValueError(f"{self.spec.name}: unknown UCI option(s) {unknown}")
-            if self.spec.options:
-                engine.configure({k: v for k, v in self.spec.options.items()})
+                raise InfrastructureError(f"{self.spec.name}: unknown UCI option(s) {unknown}")
+            try:
+                if self.spec.options:
+                    engine.configure({k: v for k, v in self.spec.options.items()})
+            except (chess.engine.EngineError, chess.engine.EngineTerminatedError, TimeoutError, OSError) as e:
+                engine.close()
+                raise InfrastructureError(f"{self.spec.name}: cannot set its options ({type(e).__name__}: {e})") from e
             self.engine = engine
         return self.engine
 
@@ -326,6 +356,123 @@ class GameResult:
     result: str
     reason: str
     game: chess.pgn.Game
+    forfeit: Optional[Tuple[str, str]] = None  # (engine name, "crash" | "time" | "illegal") when one lost so
+
+
+# What the engine said while its options were set that means it did not take them (NAGS: "EvalFile: cannot
+# open ...", "unknown option ..."; other engines' wording varies). A network actually loaded is reported by
+# NAGS as "NNUE evaluation: <name>".
+_OPTION_FAILURE = re.compile(r"\b(error|cannot|can't|could not|unknown option|invalid|failed|not found|no such)\b",
+                             re.IGNORECASE)
+
+
+def file_sha256(path: str) -> Optional[str]:
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def command_sha256(command: Sequence[str]) -> Optional[str]:
+    """SHA-256 of the files an engine command runs: the binary, or an interpreter and its script (combined)."""
+    digests = [file_sha256(c) for c in command if os.path.isfile(c)]
+    return digests[0] if len(digests) == 1 else (
+        hashlib.sha256("".join(d or "" for d in digests).encode()).hexdigest() if digests else None)
+
+
+def preflight(spec: EngineSpec, timeout: float = 60.0) -> Dict[str, Any]:
+    """Starts the engine once, before any game: the UCI handshake, every option known and set without a
+    complaint, isready answered, and a legal move from a one-ply search of the start position. Raises
+    InfrastructureError otherwise. Returns the engine's fingerprint: its command, the SHA-256 of the files it
+    names (the binary, or an interpreter and its script), its id name, the options set, what it said while
+    they were set (for NAGS the network it loaded), the network file's SHA-256 when an EvalFile is given,
+    and its static evaluation of the start position (NAGS names the evaluation in use: an embedded network,
+    a file or the hand-written one; the embedded network itself is pinned by the binary's SHA-256)."""
+    try:
+        proc = subprocess.Popen(spec.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, bufsize=1)
+    except OSError as e:
+        raise InfrastructureError(f"{spec.name}: cannot start {spec.command} ({type(e).__name__}: {e})") from e
+    lines: "queue.Queue[Optional[str]]" = queue.Queue()
+
+    def read() -> None:
+        for line in proc.stdout:
+            lines.put(line.rstrip("\r\n"))
+        lines.put(None)
+
+    threading.Thread(target=read, daemon=True).start()
+
+    def send(cmd: str) -> None:
+        try:
+            proc.stdin.write(cmd + "\n")
+            proc.stdin.flush()
+        except OSError as e:
+            raise InfrastructureError(f"{spec.name}: exited during the preflight (writing {cmd!r})") from e
+
+    def until(token: str, what: str) -> List[str]:
+        got: List[str] = []
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                line = lines.get(timeout=max(0.01, deadline - time.monotonic()))
+            except queue.Empty:
+                raise InfrastructureError(f"{spec.name}: no {token!r} within {timeout:.0f} s ({what})") from None
+            if line is None:
+                raise InfrastructureError(f"{spec.name}: exited during the preflight ({what}); it said: "
+                                          + " | ".join(got[-5:]))
+            got.append(line)
+            if line == token or line.startswith(token + " "):
+                return got
+
+    try:
+        send("uci")
+        hello = until("uciok", "UCI handshake")
+        name = next((l[len("id name "):] for l in hello if l.startswith("id name ")), None)
+        known = {m.group(1).strip().lower() for l in hello
+                 if (m := re.match(r"option name (.+?) type ", l))}
+        unknown = [k for k in spec.options if k.lower() not in known]
+        if unknown:
+            raise InfrastructureError(f"{spec.name}: unknown UCI option(s) {unknown}")
+        for k, v in spec.options.items():
+            send(f"setoption name {k} value {v}" if v != "" else f"setoption name {k}")
+        send("isready")
+        said = [l[len("info string "):] for l in until("readyok", "setting options")[:-1]
+                if l.startswith("info string ")]
+        complaints = [s for s in said if _OPTION_FAILURE.search(s) and not s.startswith("NNUE evaluation:")]
+        if complaints:
+            raise InfrastructureError(f"{spec.name}: did not take its options: " + " | ".join(complaints))
+        send("ucinewgame")
+        send("position startpos")
+        send("eval")  # NAGS: "info string eval <cp> (side to move, <which evaluation>)"; others ignore it or trace
+        send("isready")
+        evaluation = next((l[len("info string "):] for l in until("readyok", "new game")
+                           if l.startswith("info string eval ")), None)
+        send("go depth 1")
+        best = until("bestmove", "a one-ply search")[-1].split()
+        try:
+            legal = len(best) > 1 and chess.Move.from_uci(best[1]) in chess.Board().legal_moves
+        except ValueError:
+            legal = False
+        if not legal:
+            raise InfrastructureError(f"{spec.name}: a one-ply search from the start position returned "
+                                      f"{' '.join(best)!r}, not a legal move")
+        send("quit")
+    finally:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    network = next((s[len("NNUE evaluation: "):] for s in said if s.startswith("NNUE evaluation: ")), None)
+    digest = command_sha256(spec.command)
+    eval_file = next((v for k, v in spec.options.items() if k.lower() == "evalfile"), None)
+    return {"name": spec.name, "command": spec.command, "sha256": digest,
+            "id": name, "options": spec.options, "said": said, "network": network, "evaluation": evaluation,
+            "eval_file_sha256": file_sha256(eval_file) if eval_file and os.path.isfile(eval_file) else None,
+            "limits": spec.limits.describe() if spec.limits else None}
 
 
 def play_game(white: Player, black: Player, opening: Opening, limits: Limits, adj: Adjudication,
@@ -339,6 +486,7 @@ def play_game(white: Player, black: Player, opening: Opening, limits: Limits, ad
     white_scores: List[Optional[int]] = []
     played: List[chess.Move] = []
     result, reason = "*", ""
+    forfeit: Optional[Tuple[str, str]] = None
     game_key = object()  # a new key makes python-chess send ucinewgame to both engines
 
     while True:
@@ -363,26 +511,29 @@ def play_game(white: Player, black: Player, opening: Opening, limits: Limits, ad
             limit = chess.engine.Limit(white_clock=wc, black_clock=bc, white_inc=wi, black_inc=bi)
         else:
             limit = chess.engine.Limit(nodes=lim.nodes, depth=lim.depth, time=lim.movetime)
+        engine = player.ensure()  # a launch that fails is an InfrastructureError: the match is invalid
         try:
-            engine = player.ensure()
             start = time.monotonic()
             play = engine.play(board, limit, info=chess.engine.INFO_SCORE, game=game_key)
             elapsed = time.monotonic() - start
         except (chess.engine.EngineError, chess.engine.EngineTerminatedError, TimeoutError, OSError) as e:
             player.kill()
             result, reason = loss, f"{player.spec.name} crashed or hung ({type(e).__name__})"
+            forfeit = (player.spec.name, "crash")
             break
 
         if lim.base is not None:
             clocks[mover] -= elapsed
             if clocks[mover] < -lim.margin:
                 result, reason = loss, f"{player.spec.name} lost on time"
+                forfeit = (player.spec.name, "time")
                 break
             clocks[mover] += lim.inc
 
         move = play.move
         if move is None or move not in board.legal_moves:
             result, reason = loss, f"{player.spec.name} played an illegal move ({move})"
+            forfeit = (player.spec.name, "illegal")
             break
 
         score = play.info.get("score")
@@ -404,7 +555,7 @@ def play_game(white: Player, black: Player, opening: Opening, limits: Limits, ad
                          "Black": black.spec.name, "Result": result, "Termination": reason,
                          "TimeControl": describe_limits(side_limits[chess.WHITE], side_limits[chess.BLACK]),
                          "PlyCount": str(len(opening.moves) + len(played))})
-    return GameResult(result, reason, game)
+    return GameResult(result, reason, game, forfeit)
 
 
 def points_for(result: str, as_white: bool) -> float:
@@ -437,6 +588,7 @@ class Match:
         self.penta = Pentanomial()
         self.wdl = [0, 0, 0]  # engine 1 wins, draws, losses
         self.reasons: Dict[str, int] = {}
+        self.forfeits: Dict[Tuple[str, str], int] = {}  # (engine, kind) -> games lost so
         self.decision: Optional[str] = None
         self.errors: List[str] = []
 
@@ -458,6 +610,8 @@ class Match:
                 pair_points += p
                 self.wdl[0 if p == 1.0 else 1 if p == 0.5 else 2] += 1
                 self.reasons[res.reason] = self.reasons.get(res.reason, 0) + 1
+                if res.forfeit:
+                    self.forfeits[res.forfeit] = self.forfeits.get(res.forfeit, 0) + 1
             self.penta.add(pair_points)
             if self.pgnout:
                 with open(self.pgnout, "a") as f:
@@ -485,7 +639,7 @@ class Match:
                     break  # decided while this pair was in progress: discard the half pair
                 g2 = play_game(p2, p1, opening, self.limits, self.adj, f"{idx + 1}.2")
                 self._record(idx, [g1, g2], [True, False])
-        except Exception as e:  # configuration errors etc.: stop the whole match
+        except Exception as e:  # an engine that cannot be started, configuration errors: stop the whole match
             with self.lock:
                 self.errors.append(f"{type(e).__name__}: {e}")
             self.stop.set()
@@ -507,7 +661,7 @@ class Match:
     def resume(self, status_line: str) -> None:
         """Continues an interrupted match from its last status line: the counts
         are restored and play goes on with the next opening pair."""
-        m = re.search(r"Games (\d+): \+(\d+) =(\d+) -(\d+) \| penta \[([\d, ]+)\]", status_line)
+        m = _STATUS_LINE.search(status_line)
         if not m:
             raise ValueError("no status line ('Games N: +W =D -L | penta [...]') to resume from")
         self.wdl = [int(m.group(2)), int(m.group(3)), int(m.group(4))]
@@ -524,6 +678,7 @@ class Match:
         for t in threads:
             t.start()
         last = time.monotonic()
+        interrupted = False
         try:
             while any(t.is_alive() for t in threads):
                 time.sleep(0.2)
@@ -531,6 +686,7 @@ class Match:
                     print(self.status(), flush=True)
                     last = time.monotonic()
         except KeyboardInterrupt:
+            interrupted = True
             print("Interrupted; finishing games in progress...", flush=True)
             self.stop.set()
             for t in threads:
@@ -538,8 +694,15 @@ class Match:
         print(self.status(), flush=True)
         if self.reasons:
             print("Endings: " + ", ".join(f"{k} {v}" for k, v in sorted(self.reasons.items(), key=lambda kv: -kv[1])))
+        if self.forfeits:
+            kinds = {"crash": "crashed or hung", "time": "lost on time", "illegal": "illegal move"}
+            print("Forfeits: " + "; ".join(
+                f"{spec.name}: " + ", ".join(f"{self.forfeits[(spec.name, k)]} {kinds[k]}" for k in kinds
+                                             if (spec.name, k) in self.forfeits)
+                for spec in self.specs if any(n == spec.name for n, _ in self.forfeits)), flush=True)
         if self.errors:
             print("ERROR: " + "; ".join(self.errors), file=sys.stderr)
+            print("Match invalid: an engine could not be started or set up; no decision", flush=True)
             return 3
         if self.sprt:
             if self.decision == "H1":
@@ -548,6 +711,10 @@ class Match:
             if self.decision == "H0":
                 print(f"H0 accepted: {self.specs[0].name} is not stronger by {self.sprt[1]:g} Elo")
                 return 1
+        if interrupted:  # not the end of the match: --resume continues it (and run_round does so by itself)
+            print(f"Match interrupted after {sum(self.wdl)} games, before its end: no result yet", flush=True)
+            return 4
+        if self.sprt:
             print("SPRT inconclusive: maximum number of games reached")
             return 2
         return 0
@@ -555,6 +722,23 @@ class Match:
 
 # ----------------------------------------------------------------------------
 # Command line
+
+
+def fingerprint_differences(old: Dict[str, Any], new: Dict[str, Any]) -> List[str]:
+    """What makes games under `new` not the same experiment as those under `old` (the game cap and the
+    concurrency may change on a resume; what an engine printed besides its network name is not compared)."""
+    out = []
+    for i, (a, b) in enumerate(zip(old.get("engines", []), new.get("engines", [])), 1):
+        for key in ("sha256", "id", "options", "network", "eval_file_sha256", "evaluation", "limits"):
+            if a.get(key) != b.get(key):
+                out.append(f"engine {i} {key} was {a.get(key)!r}, now {b.get(key)!r}")
+    for key in ("sha256", "plies"):
+        if old.get("openings", {}).get(key) != new.get("openings", {}).get(key):
+            out.append(f"openings {key} was {old['openings'].get(key)!r}, now {new['openings'].get(key)!r}")
+    for key, value in new.get("settings", {}).items():
+        if key not in ("games", "concurrency") and old.get("settings", {}).get(key) != value:
+            out.append(f"{key} was {old.get('settings', {}).get(key)!r}, now {value!r}")
+    return out
 
 
 def parse_options(pairs: Sequence[str]) -> Dict[str, str]:
@@ -605,6 +789,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--resume", metavar="LOG",
                     help="continue an interrupted match from the last status line in its output (same engines, "
                          "settings and --seed); games are appended to --pgnout")
+    ap.add_argument("--force-resume", action="store_true",
+                    help="resume even if the log's fingerprint names other engines or settings (the games of "
+                         "both are then mixed in one result)")
     args = ap.parse_args(argv)
 
     if len(args.engine) != 2:
@@ -638,16 +825,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     match = Match(specs, openings, limits, adj, max_pairs=(args.games + 1) // 2, concurrency=args.concurrency,
                   sprt=tuple(args.sprt) if args.sprt else None, alpha=args.alpha, beta=args.beta,
                   pgnout=args.pgnout, seed=args.seed, shuffle=not args.no_shuffle)
+    shown = describe_limits(specs[0].limits or limits, specs[1].limits or limits)
+    try:
+        engines = [preflight(s) for s in specs]
+    except InfrastructureError as e:
+        print(f"ERROR: preflight: {e}", file=sys.stderr)
+        print("Match invalid: an engine could not be started or set up; no decision", flush=True)
+        return 3
+    fingerprint = {
+        "engines": engines,
+        "openings": {"path": args.openings, "sha256": file_sha256(args.openings) if args.openings else None,
+                     "count": len(openings), "plies": args.plies},
+        "settings": {"limits": shown, "sprt": args.sprt, "alpha": args.alpha, "beta": args.beta, "seed": args.seed,
+                     "shuffle": not args.no_shuffle, "max_plies": args.max_plies, "timemargin": args.timemargin,
+                     "draw_adjudication": args.draw_adjudication, "resign_adjudication": args.resign_adjudication,
+                     "games": args.games, "concurrency": args.concurrency},
+        "runner_sha256": file_sha256(__file__), "python_chess": chess.__version__,
+    }
     if args.resume:
         try:
             with open(args.resume) as f:
-                lines = [l for l in f if l.startswith("Games ")]
+                log = f.readlines()
+            # The last complete status line: a runner killed while writing one leaves it cut off.
+            lines = [l for l in log if l.startswith("Games ") and _STATUS_LINE.search(l)]
             match.resume(lines[-1] if lines else "")
         except (ValueError, OSError) as e:
             print(f"ERROR: --resume: {e}", file=sys.stderr)
             return 3
+        earlier = [l for l in log if l.startswith("Fingerprint: ")]
+        if not earlier:
+            print("Note: the log has no fingerprint (an older runner): its engines and settings are not checked")
+        else:
+            differences = fingerprint_differences(json.loads(earlier[-1][len("Fingerprint: "):]), fingerprint)
+            if differences and not args.force_resume:
+                print("ERROR: --resume: the log was written with other engines or settings: " + "; ".join(differences)
+                      + " (--force-resume mixes both in one result)", file=sys.stderr)
+                return 3
+            for d in differences:
+                print(f"WARNING: resuming although {d}", flush=True)
         print(f"Resuming after {sum(match.wdl)} games", flush=True)
-    shown = describe_limits(specs[0].limits or limits, specs[1].limits or limits)
+    print("Fingerprint: " + json.dumps(fingerprint, sort_keys=True), flush=True)
     print(f"{specs[0].name} vs {specs[1].name}: {shown}, {len(openings)} openings, "
           f"concurrency {match.concurrency}" + (f", SPRT [{args.sprt[0]:g}, {args.sprt[1]:g}]" if args.sprt else ""),
           flush=True)

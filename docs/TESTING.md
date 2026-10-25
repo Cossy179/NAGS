@@ -17,9 +17,11 @@ positions, UCI behaviour, the Python services, the training pipeline and the
 match runner's statistics.
 
 On the Windows PC (2026-10-23, `0291007`): all 49 `ctest` tests pass; in
-`pytest`, two tests fail for Windows reasons (`test_sprt.py::
-test_engine_paths_stay_whole`, `test_ladder.py::test_anchor_and_rate`) and
-the GNN tests need `torch_geometric`; see "Known issues on Windows" in
+`pytest`, two tests failed for Windows reasons (`test_sprt.py::
+test_engine_paths_stay_whole`, whose own file name had a backslash, and
+`test_ladder.py::test_anchor_and_rate`, because `tools/ladder.py` split
+engine paths with POSIX rules: both fixed since, not yet rerun on Windows)
+and the GNN tests need `torch_geometric`; see "Known issues on Windows" in
 `docs/NNUE.md`.
 
 ## 2. Fingerprint: `bench`
@@ -232,10 +234,32 @@ How the runner works:
   log-likelihood ratio uses maximum-likelihood distributions constrained to
   each hypothesis, as fishtest does.
 * Exit status: 0 = H1 accepted (the change is good), 1 = H0 accepted, 2 =
-  game limit reached without a decision.
+  game limit reached without a decision, 3 = invalid or failed (no decision),
+  4 = interrupted (Ctrl-C) before a decision or the game limit. (Before
+  2026-10-24 23:40 UTC an interrupted SPRT printed "SPRT inconclusive: maximum number
+  of games reached" and exited 2, so `run_round.py` took it for a finished
+  match and did not resume it; it now says "Match interrupted after N games".)
 * An interrupted match continues with `--resume <its output>` (same engines,
   settings and `--seed`): the counts are restored from the last status line
   and play goes on with the next opening pair.
+* Before the first game each engine is started once (a preflight): the UCI
+  handshake, every option known and set without a complaint (an `EvalFile`
+  the engine cannot load fails here), `isready`, and a legal move from a
+  one-ply search. One `Fingerprint:` line then records both engines (the
+  SHA-256 of their files, their `id name`, options and the network each
+  reports loading), the openings file's SHA-256 and the settings. `--resume`
+  refuses a log whose fingerprint differs (other binaries, networks,
+  openings or limits; the game cap and concurrency may change), unless
+  `--force-resume`.
+* A failed launch is not a game. An engine that cannot be started, at the
+  preflight or when it is restarted after a crash, makes the match invalid:
+  exit status 3, `Match invalid` and no decision. (Before this, every game of
+  a Windows match whose engine path had been split wrongly was scored as a
+  crash, the pairs of crashes looked like a tie, and H0 was accepted.)
+  An engine that crashes, hangs, plays an illegal move or loses on time
+  during a game loses that game, and a `Forfeits:` line after `Endings:`
+  counts them per engine. `tools/calibrate.py` and `tools/ladder.py` run the
+  same preflight before their matches.
 
 A Monte-Carlo simulation of 1,000 SPRTs per setting (bounds [0, 20],
 α = β = 0.05) confirms the advertised error rates:
@@ -300,6 +324,36 @@ python tools/make_openings.py --engine build/nags_enhanced --pgn AJ-CORR-PGN-000
 
 (run `git lfs pull` first to fetch the PGN), or use an established book.
 Both EPD and PGN openings work with `--openings`.
+
+**The funnel** (`tools/funnel.py`) runs one candidate through the
+programme's usual stages, fixed before the first game. `--kind feature`
+(the default) is [0, 10] at 3+0.03 with an 8000-game cap, then, only after
+H1, [−5, 0] at 10+0.1 with a 6000-game cap. `--kind fix` is one [−5, 0] at
+3+0.03 with a 6000-game cap. `--stage NAME,LIMIT,ELO0,ELO1,GAMES` gives
+other stages.
+
+```bash
+python tools/funnel.py --name capture-history --candidate ../cand/build/nags_enhanced \
+    --base build/nags_enhanced --dir results/capture-history --concurrency 3
+```
+
+Before any game it writes `<dir>/plan.json` with the stages, both binaries
+(SHA-256 and bench node count), the openings' SHA-256 and the seed. Running
+the same command again continues: a finished stage is reused and a stopped
+one is resumed from its log. Other stages, binaries, openings or a seed in
+the same directory are refused, so a cap can't be raised after the results
+come in. The same binary as the base is refused. A candidate with the base's
+bench is still played: bench searches to a fixed depth, so time management
+changes and fixes for positions bench doesn't reach leave it unchanged (a
+pure speed change needs no games). Each stage's decision is read from its
+log, never from the exit status alone; a match that stops without one
+(Ctrl-C, a crash, a kill, even in the middle of writing a status line) is
+resumed by the next run. An invalid match stops the funnel without a result.
+The exit status is 0 if it passed every stage, 1 if rejected, 2 if undecided
+at a cap, 3 if invalid or refused, 4 if stopped before a decision.
+`result.json` keeps each stage's counts and its `Forfeits:` line (time
+losses, crashes, illegal moves). It ends with one strength-log row per stage
+played, ready for the table below.
 
 **Other runners.** For very fast time controls or big matches, a dedicated
 C++ runner has lower overhead, for example

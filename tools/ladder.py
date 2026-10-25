@@ -29,7 +29,6 @@ import json
 import math
 import os
 import platform
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -57,11 +56,17 @@ def rung_spec(rung: Dict[str, Any]) -> "sprt.EngineSpec":
     limits = sprt.make_limits(lim.get("tc"), lim.get("nodes"), lim.get("depth"), lim.get("movetime"), 0.0)
     if limits is None:
         raise ValueError(f"rung {rung['name']}: no limits")
-    return sprt.EngineSpec(rung["name"], shlex.split(rung["engine"]),
+    return sprt.EngineSpec(rung["name"], sprt.engine_command(rung["engine"]),
                            {k: str(v) for k, v in (rung.get("options") or {}).items()}, limits)
 
 
 def play(specs, games: int, concurrency: int, openings, seed: int, pgnout: Optional[str]) -> "sprt.Match":
+    # An engine that cannot start would otherwise lose every game, and the rung's rating would be made up.
+    try:
+        for s in specs:
+            sprt.preflight(s)
+    except sprt.InfrastructureError as e:
+        raise RuntimeError(f"{specs[0].name} vs {specs[1].name}: preflight failed ({e})") from e
     # The shared limit is never used: both sides bring their own.
     match = sprt.Match(specs, openings, specs[0].limits, sprt.Adjudication(), max_pairs=(games + 1) // 2,
                        concurrency=concurrency, sprt=None, alpha=0.05, beta=0.05, pgnout=pgnout, seed=seed,
@@ -134,7 +139,7 @@ def rate(args: argparse.Namespace) -> int:
     if missing:
         print(f"ERROR: rungs without a rating (run 'anchor' first): {', '.join(missing)}", file=sys.stderr)
         return 3
-    command = shlex.split(args.engine)
+    command = sprt.engine_command(args.engine)  # a Windows path keeps its backslashes
     limits = sprt.make_limits(args.tc, args.nodes, None, None, args.timemargin)
     if limits is None:
         print("ERROR: give --tc or --nodes", file=sys.stderr)

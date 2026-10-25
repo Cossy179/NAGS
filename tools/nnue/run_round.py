@@ -191,7 +191,10 @@ def match(args, engine, net1, net2, log, bounds):
         cmd += ["--resume", partial]
     if not log.exists() or not key_file.exists():
         key_file.write_text(json.dumps(key) + "\n")
-    run(cmd, log)
+    if run(cmd, log) == 3:  # the runner found the match invalid (an engine that cannot start): no result
+        print(f"the match for {Path(net1).name} is invalid (see {log.name}); run again once the engines start",
+              flush=True)
+        return "error", 0.0, 0.0
     return sprt_result(log) or ("none", 0.0, 0.0)
 
 
