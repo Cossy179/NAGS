@@ -234,6 +234,24 @@ agreement between the engine's `eval` and the trainer's integer reference
 `quantized_eval`) and `tests/python/test_nnue_v4.py` (the same for format
 version 4, through castling, promotions and en passant).
 
+**Quantization error** (`tools/nnue/quant_error.py`): a training
+checkpoint's float evaluation against the exported network, computed both in
+floating point and as the engine computes it, so the error splits into weight
+rounding and integer arithmetic (overall and by output bucket). With only an
+exported network, `--simulate N` estimates the weight part by rounding its
+weights once more (uniform offsets of up to half a step). Network 8 on 26,406
+new positions (`nags_datagen` seed 777, 300 games, 5000 nodes; |eval| mean
+427 cp): the integer arithmetic costs 0.51 cp on average (at most 1.02, no
+sign changes), which is the final truncation. Simulated weight rounding (5
+trials): feature transformer 1.5–1.6 cp mean (p99 5.5–5.9), output layer
+7.0–10.3 cp mean (p99 23–37), with a shift of up to ±5 cp over all positions
+that depends on the particular rounding. So the output weights (× 64) carry
+most of the error. Whether that costs strength is untested. The real figure
+needs network 8's checkpoint (`quant_error.py --net <net>.nnue.ckpt --data
+...`). The first, format-compatible experiment would be an export that
+corrects each output bias for the rounding of its bucket's weights,
+SPRT-tested against the same checkpoint exported as now.
+
 ## 4. Experimental: format version 4 (a hidden stack)
 
 `tools/nnue/train_v4.py` trains, and the engine reads, a fourth format next
