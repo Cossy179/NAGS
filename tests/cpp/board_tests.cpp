@@ -55,9 +55,10 @@ static void testPerft() {
     for (const auto &c : kPerft) {
         TestBoard b;
         CHECK(b.setFromFEN(c.fen), "%s: FEN rejected", c.name);
+        const std::string before = b.getFEN(); // ep_pin's d6 is dropped: no legal capture there
         unsigned long long n = b.perft(c.depth);
         CHECK(n == c.nodes, "%s perft(%d) = %llu, expected %llu", c.name, c.depth, n, c.nodes);
-        CHECK(b.getFEN() == std::string(c.fen), "%s: board not restored after perft: %s", c.name, b.getFEN().c_str());
+        CHECK(b.getFEN() == before, "%s: board not restored after perft: %s", c.name, b.getFEN().c_str());
     }
 }
 
@@ -206,6 +207,76 @@ static void testDraws() {
     CHECK(b.setFromFEN("8/8/4k3/8/8/3RK3/8/8 w - - 100 80") && b.isDraw(), "fifty-move rule not detected");
     // Checkmate on the 100th half-move is still checkmate.
     CHECK(b.setFromFEN("7k/6Q1/6K1/8/8/8/8/8 b - - 100 80") && !b.isDraw(), "mate overridden by fifty-move rule");
+}
+
+// An en-passant right exists only if a capture there is legal (python-chess's
+// has_legal_en_passant, and the laws' "same position"): otherwise the square
+// is dropped, from FENs and after double pushes, and the position hashes and
+// repeats as the one without it.
+static void testEnPassantLegality() {
+    struct Case {
+        const char *withEp, *without;
+        bool legal;
+        const char *what;
+    };
+    const Case cases[] = {
+        {"4r2k/8/8/3pP3/8/8/8/4K3 w - d6 0 2", "4r2k/8/8/3pP3/8/8/8/4K3 w - - 0 2", false, "pawn pinned on its file"},
+        {"7k/8/8/K2pP2q/8/8/8/8 w - d6 0 2", "7k/8/8/K2pP2q/8/8/8/8 w - - 0 2", false, "both pawns between king and queen"},
+        {"7k/8/8/3pP3/8/8/B7/K7 w - d6 0 2", "7k/8/8/3pP3/8/8/B7/K7 w - - 0 2", true, "an ordinary capture"},
+        {"8/8/8/2kpP3/8/8/8/4K3 w - d6 0 2", "8/8/8/2kpP3/8/8/8/4K3 w - - 0 2", true, "next to the other king"},
+        {"7k/8/8/3pP3/8/1b6/8/5K2 w - d6 0 2", "7k/8/8/3pP3/8/1b6/8/5K2 w - - 0 2", true, "a bishop elsewhere"},
+        // The pushed pawn gives check and taking it en passant is the answer.
+        {"8/8/8/5k2/3pP3/8/8/7K b - e3 0 1", "8/8/8/5k2/3pP3/8/8/7K b - - 0 1", true, "taking the checking pawn"},
+        // The capturing pawn is pinned on the diagonal it captures along.
+        {"8/k7/8/8/3pP2K/8/8/6B1 b - e3 0 1", "8/k7/8/8/3pP2K/8/8/6B1 b - - 0 1", true, "pinned along the capture"},
+        {"8/8/8/8/3pP3/8/8/k2K2R1 b - e3 0 1", "8/8/8/8/3pP3/8/8/k2K2R1 b - - 0 1", true, "a rook on the other rank"},
+        {"8/8/8/8/k2pP2R/8/8/3K4 b - e3 0 1", "8/8/8/8/k2pP2R/8/8/3K4 b - - 0 1", false, "black pawns between king and rook"},
+    };
+    for (const Case &c : cases) {
+        TestBoard a, b;
+        CHECK(a.setFromFEN(c.withEp) && b.setFromFEN(c.without), "%s: FEN rejected", c.what);
+        const bool kept = a.getFEN() != b.getFEN();
+        CHECK(kept == c.legal, "%s: en-passant square %s (%s)", c.what, kept ? "kept" : "dropped", a.getFEN().c_str());
+        CHECK((a.zobrist() == b.zobrist()) == !c.legal, "%s: hash %s the position without the right", c.what,
+              c.legal ? "equals" : "differs from");
+    }
+    // Through a game: d7-d5 cannot be taken (pin), so after king moves the
+    // position is the one after d5 again.
+    TestBoard g;
+    CHECK(g.setFromFEN("4r2k/3p4/8/4P3/8/8/8/4K3 b - - 0 1") && g.applyMovesUCI({"d7d5"}) &&
+              g.getFEN() == "4r2k/8/8/3pP3/8/8/8/4K3 w - - 0 2",
+          "unusable en-passant square kept after d7-d5: %s", g.getFEN().c_str());
+    CHECK(g.applyMovesUCI({"e1d1", "h8g8", "d1e1", "g8h8"}) && g.isRepetition(), "repetition through d7-d5 missed");
+    // With a legal capture the right stays, and the later position differs.
+    CHECK(g.setFromFEN("7k/3p4/8/4P3/8/8/8/4K3 b - - 0 1") && g.applyMovesUCI({"d7d5"}) &&
+              g.getFEN() == "7k/8/8/3pP3/8/8/8/4K3 w - d6 0 2",
+          "usable en-passant square dropped: %s", g.getFEN().c_str());
+    CHECK(g.applyMovesUCI({"e1d1", "h8g8", "d1e1", "g8h8"}) && !g.isRepetition(), "false repetition with a usable right");
+}
+
+// Dead positions without pawns, rooks or queens: at most one minor piece, or
+// only bishops all on squares of one colour (python-chess agrees on all).
+static void testInsufficientMaterial() {
+    struct Case {
+        const char *fen;
+        bool dead;
+    };
+    const Case cases[] = {
+        {"8/8/4k3/8/8/3NK3/8/8 w - - 0 1", true},     // KN vs K
+        {"8/7k/8/8/B7/8/8/3bK3 w - - 0 1", true},     // KB vs KB, both on light squares
+        {"8/8/3k4/5B2/B7/8/8/K7 b - - 0 1", true},    // KBB (one colour) vs K
+        {"8/2k5/2b5/8/8/3K4/8/1B1B4 w - - 0 1", true}, // three bishops, one colour
+        {"8/7k/8/8/B7/8/8/2b1K3 w - - 0 1", false},   // KB vs KB, opposite colours: mate possible
+        {"8/8/4k3/8/8/2BNK3/8/8 w - - 0 1", false},   // KBN vs K
+        {"8/8/4k3/8/8/2NNK3/8/8 w - - 0 1", false},   // KNN vs K (a mate exists)
+        {"8/8/4k3/8/8/3BK3/8/2b5 w - - 0 1", false},  // bishops on both colours
+        {"8/8/4k3/8/8/3RK3/8/8 w - - 0 1", false},
+    };
+    for (const Case &c : cases) {
+        TestBoard b;
+        CHECK(b.setFromFEN(c.fen) && b.isInsufficientMaterial() == c.dead, "%s: %s", c.fen,
+              c.dead ? "dead position not seen" : "playable position called dead");
+    }
 }
 
 static void testApplyMoves() {
@@ -387,6 +458,8 @@ int main() {
     testHashConsistency();
     testFenValidation();
     testDraws();
+    testEnPassantLegality();
+    testInsufficientMaterial();
     testRepetitionRuleRandom();
     testApplyMoves();
     testGenerationModes();

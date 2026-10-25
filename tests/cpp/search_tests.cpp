@@ -190,6 +190,13 @@ static void testSearch(TranspositionTable *tt, const char *label) {
     CHECK(r.score == MATE_SCORE - 3, "%s: mate in 2 not found (score %d, move %s)", label, r.score, moveToUciString(r.bestMove).c_str());
     CHECK(formatScore(r.score) == "mate 2", "%s: mate in 2 formatted as '%s'", label, formatScore(r.score).c_str());
 
+    // Qxf2 stalemates Black (king and pawn, not in check, no move: python-chess
+    // agrees). At depth 1 the reply is left to quiescence, which used to stand
+    // pat on Black's (lost) evaluation and so preferred the stalemate.
+    r = searchFen<B>("4K3/8/1Q6/8/8/5p2/5r2/7k w - - 0 1", 1, tt);
+    CHECK(moveToUciString(r.bestMove) != "b6f2" && r.score > 0, "%s: quiescence missed a stalemate (%s, %d)", label,
+          moveToUciString(r.bestMove).c_str(), r.score);
+
     // Win the hanging queen.
     r = searchFen<B>("4k3/8/8/3q4/8/8/8/3QK3 w - - 0 1", 4, tt);
     CHECK(moveToUciString(r.bestMove) == "d1d5", "%s: did not capture hanging queen (%s)", label, moveToUciString(r.bestMove).c_str());

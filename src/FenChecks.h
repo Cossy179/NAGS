@@ -34,16 +34,36 @@ bool plausibleEpSquare(const BoardT &b, int sq, Color stm) {
     return !(occ & ((1ULL << sq) | (1ULL << fromSq))) && (b.pieceBB(opposite(stm), PAWN) & (1ULL << pawnSq));
 }
 
-// Whether a pawn of `stm` could capture en passant on `sq` (it stands next to
-// the pawn that has just been pushed two squares). An en-passant square no
-// pawn can use is not part of the position: FEN parsing and makeMove drop
-// it, so that it never makes two otherwise equal positions differ (for
-// repetitions, the hash and the TT).
+// Whether `stm` has a legal en-passant capture on `sq`: a pawn of `stm`
+// stands next to the pawn that has just been pushed two squares, and taking
+// it does not leave its king attacked (the pawn may be pinned, or the two
+// pawns may stand between the king and a rook on the rank). An en-passant
+// square no pawn can legally use is not part of the position (by the laws,
+// and for python-chess): FEN parsing and makeMove drop it, so that it never
+// makes two otherwise equal positions differ (for repetitions, the hash and
+// the TT).
 template <class BoardT>
 bool epCapturable(const BoardT &b, int sq, Color stm) {
     const int pawnSq = stm == Color::White ? sq - 8 : sq + 8;
     Bitboard adjacent = 0;
     if (fileOf(pawnSq) > 0) adjacent |= 1ULL << (pawnSq - 1);
     if (fileOf(pawnSq) < 7) adjacent |= 1ULL << (pawnSq + 1);
-    return (b.pieceBB(stm, PAWN) & adjacent) != 0;
+    Bitboard capturers = b.pieceBB(stm, PAWN) & adjacent;
+    const Bitboard king = b.pieceBB(stm, KING);
+    if (!capturers || !king) return capturers != 0;
+    // The occupancy from the piece sets: inside makeMove the board's own may not be updated yet.
+    Bitboard occ = 0, enemies = 0;
+    for (int t = PAWN; t <= KING; ++t) {
+        occ |= b.pieceBB(stm, t);
+        enemies |= b.pieceBB(opposite(stm), t);
+    }
+    occ |= enemies;
+    enemies &= ~(1ULL << pawnSq); // the pawn taken attacks nothing afterwards
+    while (capturers) {
+        const int from = lsb(capturers);
+        capturers &= capturers - 1;
+        const Bitboard after = (occ ^ (1ULL << from) ^ (1ULL << pawnSq)) | (1ULL << sq);
+        if (!(b.attackersTo(lsb(king), after) & enemies)) return true;
+    }
+    return false;
 }

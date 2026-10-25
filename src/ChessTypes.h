@@ -8,6 +8,9 @@
 
 using Bitboard = uint64_t;
 
+// The dark squares (a1, c1, ..., b2, ...; a1 = bit 0).
+constexpr Bitboard kDarkSquares = 0xAA55AA55AA55AA55ULL;
+
 enum class Piece : uint8_t {
     None = 0,
     WP, WN, WB, WR, WQ, WK,
