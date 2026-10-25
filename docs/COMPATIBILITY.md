@@ -52,10 +52,15 @@ K p n b r q k = 0-11, ascending squares, low nibble first), int16 score
 `nags_datagen` keeps its command line, and with `--threads 1` its output
 is a function of the binary, the embedded network and the arguments; a
 change that keeps the bench node count also keeps it byte-identical
-(checked for every non-functional commit). `--first-game N` (opt-in: numbered games with their own random
-streams and a `<out>.games` index, resumable; the records are the same
-format) leaves the default output unchanged (checked byte for byte, text
-and binary). `--repetition third` (opt-in)
+(checked for every non-functional commit). `--first-game N` (opt-in:
+numbered games with their own random streams and a `<out>.games` index,
+resumable; the records are the same format) leaves the default output
+unchanged (checked byte for byte, text and binary). The index is format v2:
+a header with the settings, the network's FNV-1a 64 and the search
+fingerprint (bench nodes), then one line per game with the FNV-1a 64 of its
+bytes. A shard mode run never truncates or extends an output that has no
+index, and refuses an index of other settings, another network or another
+search. `tools/nnue/shards.py` reads the same format. `--repetition third` (opt-in)
 ends a game at the third occurrence of a position, as the laws do, instead
 of the first repetition; the default writes the same bytes as before, and a
 data set made with `third` has the same format (some games run longer and some
@@ -72,9 +77,15 @@ their keys; new keys may be added, and a newer trainer accepts checkpoints
 without them exactly as before. Added since `bb1e03c`: `data_sha256` (a
 resume with other content is refused; checkpoints without it resume as
 before), `init_from` and `history`; the options `--init-from` (a new run
-from existing weights, off by default) and `--no-data-cache`. The trainer
-writes `<out>.json` and `<file>.sha256` caches next to the data; neither
-changes what is trained.
+from existing weights, off by default) and `--no-data-cache`; then
+`n_train` and `split` (a resume with another training/validation split is
+refused) and the options `--eval-set`, `--eval-overlap-limit`,
+`--sync-every` and `--profile` (none of them changes what is trained:
+tested byte for byte). The validation boundary moves to a game start only
+in a file with a complete shard index, which no data made before
+`--first-game` has, so existing data splits exactly as before. The
+trainer writes `<out>.json`, `<file>.sha256` and `<eval>.overlap.json`
+caches next to the data; none changes what is trained.
 
 ### `tools/nnue/run_round.py` and `tools/sprt.py`
 
@@ -84,7 +95,9 @@ and decision lines that `--resume` and `run_round` parse. The explicit
 names `crelu-b8`, `kb4-screlu-b8`, `kb8-screlu-b8` and `kb16-screlu-b8` (the
 default since 2026-10-24) are aliases that train and resume the files of
 the historical names; `--warm-start` (default `none`) writes its own `_warm`
-files.
+files. `sprt.py` exit status 4 (an interrupted match, which used to print the
+cap line and exit 2) and its `Fingerprint:` and `Forfeits:` lines are
+additions; a log without a fingerprint resumes as before.
 
 ### GNN side (`chess_graph.py`, `gnn_evaluator.py`, `rpc_server.py`)
 
