@@ -28,6 +28,48 @@ with the search score in centipawns and the result (1.0 / 0.5 / 0.0), both
 from White's point of view. Output is appended, so several runs (use a
 different `--seed`) can go into one file.
 
+**Shards** (`--first-game N`, opt-in): the games are numbered N to N +
+`--games` − 1 and each one draws its random opening from its own stream,
+seeded by the seed and its number, so a game is the same whichever thread
+plays it (only the order in the file depends on the threads; with
+`--threads 1` the file is in game order). `<out>.games` is the shard's index.
+Its first line records the settings, the network (FNV-1a 64 of its bytes)
+and the search (the `nags_enhanced bench` node count, computed at start).
+Then there is one line per finished game: number, records, bytes, result and
+the FNV-1a 64 checksum of its bytes, each written after the game's bytes.
+
+Run the same command again after a stop and it resumes:
+
+* an index line cut off as it was written is dropped;
+* the last 64 games are checked against their checksums, and those that
+  don't match, or that the output is too short for, are played again (they
+  are the same games);
+* the output is cut back to the games kept, and only the missing numbers
+  are played.
+
+Other settings, another network or another search are refused, as is a
+damaged index line further up. An output file that holds data but has no
+index (an ordinary run, or a deleted index) is never truncated or extended:
+nags_datagen stops with an error. Several machines can share one seed with
+disjoint ranges (`--first-game 0 --games 100000`, `--first-game 100000
+--games 100000`, ...) and never write the same game.
+`python tools/nnue/shards.py check data/*.bin` verifies a set of shards
+before training: each one's size, the checksums (`--checksums all` for every
+game), the same settings, network and search in all of them apart from the
+seed, and no game of a seed twice. The index gives the game boundaries (for
+a validation split by game). Without `--first-game` the output of a command
+is exactly what it was.
+
+Where the time goes (callgrind, network 8, 5000 nodes, one thread): the
+search is 99% of the instructions; openings, filtering, packing and output
+together about 1%. Of the positions searched (36,122 in 300 games), 73.7%
+are kept, 8.5% are in check, 17.3% have a capture or promotion as the best
+move and 0.5% a mate or tablebase score; 16% of the random openings are
+rejected (each costs a depth-6 search). So data generation gets faster with
+the search itself, and at most about 6% from searching the in-check
+positions with a smaller budget (which would change the games). One thread
+here: 353 kept positions per second.
+
 With an output name ending in `.bin` each position is a 32-byte binary
 record instead (occupancy, 4-bit piece codes, score, result, side to move;
 the layout is at the top of `src/datagen_main.cpp`). That is about half the
@@ -314,7 +356,8 @@ Practical notes from that round:
 * **Resuming starts a new batch.** After a stop, the next batch gets a new
   seed and `nags_datagen`'s counter starts at zero; the running total is
   the `<positions> of <target> positions` line `run_round.py` prints before
-  each batch.
+  each batch. With `--resumable-batches` (numbered games, `nags_datagen
+  --first-game 0`) the stopped batch is finished under its own seed instead.
 * **Start long runs from your own console** (Explorer, the Start menu, a
   `.cmd` file), not as a child of another application: a run started from
   inside an app that then updated itself (a packaged Store app) was ended
