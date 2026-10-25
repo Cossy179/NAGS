@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-ENGINE = ROOT / "build" / "nags_enhanced"
+ENGINE = next((c for c in (ROOT / "build" / "nags_enhanced", ROOT / "build" / "Release" / "nags_enhanced.exe")
+               if c.exists()), ROOT / "build" / "nags_enhanced")
 sys.path.insert(0, str(ROOT / "tools"))
 
 

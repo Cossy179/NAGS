@@ -11,6 +11,15 @@ import pytest
 import torch
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _built(name):
+    """build/<name>, or the MSVC build's build/Release/<name>.exe."""
+    return any(c.exists() for c in (ROOT / "build" / name, ROOT / "build" / "Release" / f"{name}.exe",
+                                    ROOT / "build" / f"{name}.exe"))
+
+
+needs_nags = pytest.mark.skipif(not _built("nags"), reason="nags not built")
 sys.path.insert(0, str(ROOT / "tools"))
 import hybrid_eval  # noqa: E402
 
@@ -109,7 +118,7 @@ def test_accuracy(tmp_path, capsys):
     assert "held-out positions" in capsys.readouterr().out
 
 
-@pytest.mark.skipif(not (ROOT / "build" / "nags").exists(), reason="nags not built")
+@needs_nags
 def test_decisions(tmp_path):
     model = tmp_path / "v3.pth"
     _tiny_checkpoint(model)
@@ -137,7 +146,7 @@ def test_gauntlet_status_and_tc(tmp_path):
     assert hybrid_eval.soft_ms("10+0.1") == pytest.approx(350.0) and hybrid_eval.soft_ms("60") == pytest.approx(1500.0)
 
 
-@pytest.mark.skipif(not (ROOT / "build" / "nags").exists(), reason="nags not built")
+@needs_nags
 def test_gauntlet(tmp_path, capsys):
     model = tmp_path / "v3.pth"
     _tiny_checkpoint(model)
