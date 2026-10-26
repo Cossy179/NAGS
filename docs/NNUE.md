@@ -60,6 +60,36 @@ seed, and no game of a seed twice. The index gives the game boundaries (for
 a validation split by game). Without `--first-game` the output of a command
 is exactly what it was.
 
+**Deeper labels for chosen positions** (`--relabel-nodes N
+--relabel-select RULE`, opt-in). A kept position chosen by the rule is
+searched again with N nodes by a second searcher with its own table, and
+that score becomes its label. The game is played as without the option:
+the same positions, order and results. Only the chosen labels change, and
+a chosen position whose deeper search finds a mate is not kept, as in the
+game search. `disagree:CP` chooses positions where the static evaluation
+and the search score differ by at least CP; `random:P` chooses a fraction
+P by a hash of the position, the equal-compute control for an experiment.
+The shard header records the rule.
+
+Measured on 100 games, 5000 nodes, relabelling with 40,000 (one thread,
+on the loaded VM, so the times are relative):
+
+| rule | positions relabelled | mean change of the label | time |
+|---|---|---|---|
+| none | - | - | 27 s |
+| `disagree:50` | 57.9% | 117.8 cp | 126 s |
+| `disagree:100` | 36.3% | 153.0 cp | 90 s |
+| `disagree:200` | 16.8% | 210.7 cp | 57 s |
+| `random:0.168` | 15.6% | 66.6 cp | 54 s |
+
+At the same cost (about 2x), the disagreeing positions are the ones whose
+5000-node label the deeper search revises most, by 3.2 times the random
+ones. Whether training on them gives a stronger network is untested. The
+experiment: the same games with `disagree:200` and with `random:0.168`
+(equal compute), each trained from scratch with the same settings,
+compared on a fixed evaluation set and then by SPRT [0, 10] against each
+other.
+
 Where the time goes (callgrind, network 8, 5000 nodes, one thread): the
 search is 99% of the instructions; openings, filtering, packing and output
 together about 1%. Of the positions searched (36,122 in 300 games), 73.7%

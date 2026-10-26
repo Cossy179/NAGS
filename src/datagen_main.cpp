@@ -61,6 +61,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <set>
@@ -89,6 +90,12 @@ struct Options {
     // occurrence, as the laws give it (the search still plays by its own rule).
     bool thirdRepetition = false;
     long long firstGame = -1; // >= 0: shard mode (numbered games, own random streams, resumable)
+    // Deeper labels (--relabel-nodes N --relabel-select ...): a kept position chosen by the rule is searched
+    // again with N nodes by a second searcher, whose score becomes its label; the game itself is unchanged.
+    uint64_t relabelNodes = 0;
+    bool relabelRandom = false;     // "random:P": a fraction P of the positions, by a hash of the position
+    int relabelThreshold = 0;       // "disagree:T": |static evaluation - search score| >= T centipawns
+    double relabelFraction = 0.0;
 };
 
 struct Record {
@@ -123,7 +130,7 @@ std::atomic<long long> gamesStarted{0}, gamesDone{0}, positionsWritten{0};
 void usage() {
     std::cerr << "usage: nags_datagen --out FILE [--games N] [--threads N] [--nodes N] [--random-plies N]\n"
                  "                    [--max-opening-score CP] [--hash MB] [--seed N] [--repetition first|third]\n"
-                 "                    [--first-game N]\n";
+                 "                    [--first-game N] [--relabel-nodes N --relabel-select disagree:CP|random:P]\n";
 }
 
 bool parseArgs(int argc, char **argv, Options &o) {
@@ -135,6 +142,26 @@ bool parseArgs(int argc, char **argv, Options &o) {
         if (a == "--out") {
             o.out = v;
             o.binary = v.size() >= 4 && v.compare(v.size() - 4, 4, ".bin") == 0;
+            continue;
+        }
+        if (a == "--relabel-select") {
+            const size_t colon = v.find(':');
+            const std::string kind = v.substr(0, colon), arg = colon == std::string::npos ? "" : v.substr(colon + 1);
+            long long t = 0;
+            if (kind == "disagree" && uci::parseInt(arg, t) && t >= 0) {
+                o.relabelRandom = false;
+                o.relabelThreshold = static_cast<int>(t);
+            } else if (kind == "random" && !arg.empty()) {
+                o.relabelRandom = true;
+                o.relabelFraction = std::atof(arg.c_str());
+                if (o.relabelFraction <= 0.0 || o.relabelFraction > 1.0) {
+                    std::cerr << "--relabel-select random:P needs 0 < P <= 1\n";
+                    return false;
+                }
+            } else {
+                std::cerr << "--relabel-select: disagree:CP or random:P\n";
+                return false;
+            }
             continue;
         }
         if (a == "--repetition") {
@@ -151,6 +178,7 @@ bool parseArgs(int argc, char **argv, Options &o) {
         else if (a == "--hash") o.hashMB = static_cast<int>(std::max(1LL, n));
         else if (a == "--seed") o.seed = static_cast<uint64_t>(n);
         else if (a == "--first-game") o.firstGame = n;
+        else if (a == "--relabel-nodes") o.relabelNodes = static_cast<uint64_t>(n);
         else { usage(); return false; }
     }
     if (o.out.empty()) { usage(); return false; }
@@ -162,10 +190,31 @@ bool isQuiet(const FastBoard &b, const Move &m) { return !eval::isNoisy(b, m); }
 // The game is drawn (fifty-move rule, repetition by --repetition, insufficient material).
 bool isGameDraw(const Options &o, const FastBoard &b) { return o.thirdRepetition ? b.isDraw(0) : b.isDraw(); }
 
+// The second searcher of --relabel-nodes, with its own table: the game's searcher (and so the game) is
+// untouched by the deeper searches.
+struct Relabeler {
+    explicit Relabeler(const Options &o) : tt(static_cast<size_t>(o.hashMB)), searcher(&tt) {}
+    TranspositionTable tt;
+    Searcher<FastBoard> searcher;
+};
+
+std::atomic<long long> relabelled{0}, relabelDropped{0}, relabelChange{0};
+
+// Whether --relabel-select picks this kept position (`score`: the game search's, side to move). The random
+// rule hashes the position and the seed, so the choice does not depend on the order games are played in.
+bool relabelChosen(const Options &o, const FastBoard &b, int score) {
+    if (!o.relabelRandom) return std::abs(eval::evaluate(b) - score) >= o.relabelThreshold;
+    uint64_t h = b.zobrist() ^ (o.seed * 0x9E3779B97F4A7C15ULL);
+    h = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    h = (h ^ (h >> 27)) * 0x94D049BB133111EBULL;
+    h ^= h >> 31;
+    return static_cast<double>(h >> 11) * (1.0 / 9007199254740992.0) < o.relabelFraction;
+}
+
 // Plays one game; returns false if the opening was rejected. Appends the
 // positions to keep (without results) to `records` and sets `result`.
 bool playGame(const Options &o, std::mt19937_64 &rng, Searcher<FastBoard> &searcher, TranspositionTable &tt,
-              std::vector<Record> &records, double &result) {
+              std::vector<Record> &records, double &result, Relabeler *relabeler = nullptr) {
     FastBoard board;
     for (int ply = 0; ply < o.randomPlies; ++ply) {
         auto moves = board.generateLegalMoves();
@@ -176,6 +225,10 @@ bool playGame(const Options &o, std::mt19937_64 &rng, Searcher<FastBoard> &searc
 
     tt.clear();
     searcher.clearHistory();
+    if (relabeler) {
+        relabeler->tt.clear();
+        relabeler->searcher.clearHistory();
+    }
     std::atomic<bool> stop{false};
     {
         SearchLimits check;
@@ -217,9 +270,24 @@ bool playGame(const Options &o, std::mt19937_64 &rng, Searcher<FastBoard> &searc
 
         // Training positions: not in check, a quiet best move, and no mate
         // or tablebase score (those say little about the evaluation).
-        if (!board.inCheck() && isQuiet(board, r.bestMove) && std::abs(r.score) < TB_BOUND)
-            records.push_back(o.binary ? Record{{}, packPosition(board, whiteScore), whiteScore}
-                                       : Record{board.getFEN(), {}, whiteScore});
+        bool keep = !board.inCheck() && isQuiet(board, r.bestMove) && std::abs(r.score) < TB_BOUND;
+        int label = whiteScore;
+        if (keep && relabeler && relabelChosen(o, board, r.score)) {
+            SearchLimits deeper;
+            deeper.nodes = o.relabelNodes;
+            const SearchResult d = relabeler->searcher.search(board, deeper, stop, nullptr);
+            if (std::abs(d.score) >= TB_BOUND) { // a mate or tablebase score: not kept, as in the game search
+                keep = false;
+                ++relabelDropped;
+            } else {
+                label = board.sideToMove() == Color::White ? d.score : -d.score;
+                relabelChange += std::abs(label - whiteScore);
+                ++relabelled;
+            }
+        }
+        if (keep)
+            records.push_back(o.binary ? Record{{}, packPosition(board, label), label}
+                                       : Record{board.getFEN(), {}, label});
         board.makeMove(r.bestMove);
     }
 }
@@ -293,6 +361,10 @@ const std::string &shardHeader(const Options &o) {
             h << " network=embedded network-fnv=" << hex64(fnv1a(kNagsEmbeddedNet, kNagsEmbeddedNetSize));
         else h << " network=" << nnue::networkName();
         h << " search=" << searchFingerprint();
+        if (o.relabelNodes)
+            h << " relabel=" << o.relabelNodes << "@"
+              << (o.relabelRandom ? "random:" + std::to_string(o.relabelFraction)
+                                  : "disagree:" + std::to_string(o.relabelThreshold));
         return h.str();
     }();
     return header;
@@ -304,12 +376,13 @@ std::atomic<size_t> shardNext{0};
 void shardWorker(const Options &o, std::ofstream &out, std::ofstream &index) {
     TranspositionTable tt(static_cast<size_t>(o.hashMB));
     Searcher<FastBoard> searcher(&tt);
+    std::unique_ptr<Relabeler> relabeler = o.relabelNodes ? std::make_unique<Relabeler>(o) : nullptr;
     std::vector<Record> records;
     for (size_t k; (k = shardNext.fetch_add(1)) < shardTodo.size();) {
         const long long game = shardTodo[k];
         std::mt19937_64 rng = gameRng(o.seed, game);
         double result = 0.5;
-        while (!playGame(o, rng, searcher, tt, records, result)) {
+        while (!playGame(o, rng, searcher, tt, records, result, relabeler.get())) {
         }
         const std::string bytes = serialise(o, records, result);
         {
@@ -457,10 +530,11 @@ void worker(const Options &o, int id, std::ofstream &out) {
     std::mt19937_64 rng(o.seed * 1000003ULL + static_cast<uint64_t>(id));
     TranspositionTable tt(static_cast<size_t>(o.hashMB));
     Searcher<FastBoard> searcher(&tt);
+    std::unique_ptr<Relabeler> relabeler = o.relabelNodes ? std::make_unique<Relabeler>(o) : nullptr;
     std::vector<Record> records;
     while (gamesStarted.fetch_add(1) < o.games) {
         double result = 0.5;
-        while (!playGame(o, rng, searcher, tt, records, result)) {
+        while (!playGame(o, rng, searcher, tt, records, result, relabeler.get())) {
         }
         const std::string bytes = serialise(o, records, result);
         {
@@ -521,5 +595,15 @@ int main(int argc, char **argv) {
     for (auto &t : threads) t.join();
     finished = true;
     progress.join();
+    if (o.relabelNodes) {
+        const long long kept = positionsWritten.load();
+        std::fprintf(stderr, "nags_datagen: relabelled %lld of %lld positions written (%.1f%%) at %llu nodes, mean "
+                     "change %.1f cp; %lld chosen positions dropped (mate or tablebase score)\n", relabelled.load(),
+                     kept, kept ? 100.0 * static_cast<double>(relabelled.load()) / static_cast<double>(kept) : 0.0,
+                     static_cast<unsigned long long>(o.relabelNodes),
+                     relabelled.load() ? static_cast<double>(relabelChange.load()) / static_cast<double>(relabelled.load())
+                                       : 0.0,
+                     relabelDropped.load());
+    }
     return 0;
 }
