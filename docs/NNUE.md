@@ -291,9 +291,22 @@ seed, with `quant_error.py --net <ckpt> --exported <nnue>`:
 | plain | 17.0 cp | 13.6 cp | +6.9 cp | 598 (1.7%) |
 | corrected (20,000 positions) | 12.3 cp | 7.7 cp | +0.03 cp | 215 (0.6%) |
 
-Integer arithmetic stays 0.51 cp. This is not network 8's own checkpoint
-(that needs the original `.ckpt`), and whether the smaller error is worth
-Elo is a match between the two exports of one checkpoint.
+Integer arithmetic stays 0.51 cp. This is not network 8's own checkpoint,
+which needs the original `.ckpt`.
+
+The two exports of that checkpoint, in main's engine (`b4baff0`), the
+corrected one against the plain one: SPRT [0, 10] at 3+0.03, H1 after 1664
+games (+434 =862 -368), **+13.8 ± 10.7**. That is one checkpoint, and an
+early stop overstates the estimate; a [−5, 0] check at 10+0.1 follows.
+
+`tools/nnue/reexport.py` applies the correction to an existing checkpoint
+without training:
+`python tools/nnue/reexport.py --ckpt <net>.nnue.ckpt --data data/selfplay_*.bin --out <net>_corrected.nnue --check <net>.nnue`.
+It first checks that the checkpoint's plain export is that network byte
+for byte, then corrects on N random positions and reports the error on N
+others. For network 8 this needs its checkpoint from the training PC. Like
+any network, the result replaces `nets/nags.nnue` only after an SPRT
+against it.
 
 ## 4. Experimental: format version 4 (a hidden stack)
 
