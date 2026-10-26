@@ -677,12 +677,45 @@ def evaluate_loss(model, data, idx, lam, size=65536, device="cpu"):
     return total / max(1, count)
 
 
-def export(model, path):
+def rounding_shift(model, ft_w, ft_b, out_w, sample):
+    """[B]: per output bucket, the mean difference (in output units) between the network with its rounded
+    weights (ft_w, ft_b, out_w as exported, computed in floating point) and the float network, on the
+    sample positions (white, black, stm, bucket) in that bucket; zero for a bucket without positions."""
+    white, black, stm, bucket = sample
+    k = KingBuckets(model.king.name, factor=False)
+    table = torch.from_numpy(np.vstack([ft_w, np.zeros((1, ft_w.shape[1]), ft_w.dtype)]).astype(np.float64) / QA)
+    bias = torch.from_numpy(ft_b.astype(np.float64) / QA)
+    weights = torch.from_numpy(out_w.astype(np.float64) / QB)
+
+    def acc(f):
+        rows = k(f.cpu())
+        return bias + table[torch.where(rows == k.rows, len(table) - 1, rows)].sum(dim=1)
+
+    with torch.no_grad():
+        aw, ab = acc(white).clamp(0, 1), acc(black).clamp(0, 1)
+        if model.screlu:
+            aw, ab = aw * aw, ab * ab
+        s = stm.cpu().unsqueeze(1).bool()
+        x = torch.cat([torch.where(s, ab, aw), torch.where(s, aw, ab)], dim=1)
+        b = bucket.cpu()
+        rounded = (x * weights[b]).sum(dim=1) + model.out.bias.detach().cpu().double()[b]
+        exact = model(white, black, stm, bucket).detach().cpu().double()
+        sums = torch.zeros(model.buckets, dtype=torch.float64).index_add_(0, b, rounded - exact)
+        counts = torch.bincount(b, minlength=model.buckets).double()
+    return (sums / counts.clamp(min=1)).numpy()
+
+
+def export(model, path, sample=None):
+    """Writes the quantized network. With `sample` (positions not trained on, as sample_positions gives)
+    each output bias is corrected so that, on those positions and bucket by bucket, the exported network's
+    output is on average the float network's: the mean shift its rounded weights make is taken off."""
     ft_w = model.feature_weights().cpu().numpy()  # [K * 768, H]
     ft_b = model.ft_bias.detach().cpu().numpy()
     out_w = model.out.weight.detach().cpu().numpy()  # [B, 2H]
     out_b = model.out.bias.detach().cpu().numpy()  # [B]
     q = lambda a, s: np.clip(np.round(a * s), -32767, 32767).astype("<i2")
+    if sample is not None:
+        out_b = out_b.astype(np.float64) - rounding_shift(model, q(ft_w, QA), q(ft_b, QA), q(out_w, QB), sample)
     with open(path, "wb") as fh:
         fh.write(MAGIC)
         k = model.king
@@ -698,6 +731,24 @@ def export(model, path):
         fh.write(q(ft_b, QA).tobytes())
         fh.write(q(out_w, QB).tobytes())
         fh.write(np.round(out_b * QA * QB).astype("<i4").tobytes())
+
+
+def sample_positions(source, n, buckets, device):
+    """(white, black, stm, bucket) of up to n positions: the validation set's first, then training positions
+    (for the export's bias correction, which matches the float network's own output, not the labels)."""
+    if isinstance(source, BinData):
+        recs, left = [], n
+        for i, s, e in list(source.val_parts) + [(i, s, e) for i, s, e in source.chunks]:
+            take = min(left, e - s)
+            recs.append(np.array(source.maps[i][s : s + take]))
+            left -= take
+            if left == 0:
+                break
+        rec = torch.from_numpy(np.concatenate(recs)).to(device)
+        feats, stm, score, result = decode(rec)
+        return tensors(feats, stm, score, result, torch.arange(len(rec), device=device), 1.0, buckets, device)[:4]
+    idx = np.concatenate([np.asarray(source.val_idx), np.asarray(source.train_idx)])[:n]
+    return tensors(*source.data, idx, 1.0, buckets, device)[:4]
 
 
 def read_net(path):
@@ -981,6 +1032,9 @@ def main(argv=None):
                          "last epoch's stays <out>)")
     ap.add_argument("--early-stop", type=int, default=0, metavar="N",
                     help="stop when the --select-by loss has not improved for N epochs (0: never)")
+    ap.add_argument("--export-bias-correction", type=int, default=0, metavar="N",
+                    help="correct each exported output bias for the mean shift the rounded weights make in its "
+                         "bucket, measured on N positions not trained on (0: off; the checkpoint is not changed)")
     ap.add_argument("--sync-every", type=int, default=1,
                     help="read the training loss back from the GPU every N batches instead of every batch (each "
                          "read waits for the GPU); the network trained is the same, the logged loss differs in "
@@ -1100,6 +1154,8 @@ def main(argv=None):
     if args.early_stop and best and history and history[-1]["epoch"] - best["epoch"] >= args.early_stop:
         last_epoch = first_epoch - 1  # a resumed run that had already stopped early
     version = code_version()
+    correction_sample = (sample_positions(source, args.export_bias_correction, args.buckets, device)
+                         if args.export_bias_correction else None)
     for epoch in range(first_epoch, last_epoch + 1):
         t = time.time()
         total, count = 0.0, 0
@@ -1135,7 +1191,7 @@ def main(argv=None):
                 print(f"  eval {os.path.basename(path)}: {rep['loss']:.6f} on {rep['positions']} positions; by piece "
                       "count " + " ".join("-" if x is None else f"{x:.5f}" for x in rep["by_output_bucket"]), flush=True)
         history.append(entry)
-        export(model, args.out)
+        export(model, args.out, correction_sample)
         best = best_epoch(history, select_by)
         if args.keep_best and best and best["epoch"] == epoch:
             shutil.copyfile(args.out, best_path + ".tmp")
@@ -1155,6 +1211,7 @@ def main(argv=None):
             "data": {"positions": n, "train": n - source.n_val, "validation": source.n_val, "split": source.split,
                      **fingerprint},
             "init_from": started_from, "epochs_done": epoch, "history": history, "code": version,
+            "export": {"bias_correction_positions": len(correction_sample[0]) if correction_sample else 0},
             "best": {**best, "select_by": select_by,
                      "file": os.path.basename(best_path) if args.keep_best else None} if best else None,
             "eval_sets": [{"name": os.path.basename(p), "sha256": file_sha256(p, cache=False),
