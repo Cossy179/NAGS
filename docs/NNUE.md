@@ -274,6 +274,27 @@ needs network 8's checkpoint (`quant_error.py --net <net>.nnue.ckpt --data
 corrects each output bias for the rounding of its bucket's weights,
 SPRT-tested against the same checkpoint exported as now.
 
+**Bias-corrected export** (`train.py --export-bias-correction N`, off by
+default; the checkpoint and training are unchanged, only the exported
+output biases differ). Each output bias is corrected so that, on N
+positions (the validation set's first, then training positions) and bucket
+by bucket, the exported network's output is on average the float network's.
+The mean shift its rounded weights make is taken off; it includes the
+feature transformer's rounding, which moves the activations. The format
+is unchanged (v3). Measured on a float network close to network 8 (network
+8 fine-tuned for 3 epochs on 102,545 local self-play positions, so its
+weights are no longer on the integer grid), on 34,353 positions of another
+seed, with `quant_error.py --net <ckpt> --exported <nnue>`:
+
+| export | mean error | p50 | bias | sign changes |
+|---|---|---|---|---|
+| plain | 17.0 cp | 13.6 cp | +6.9 cp | 598 (1.7%) |
+| corrected (20,000 positions) | 12.3 cp | 7.7 cp | +0.03 cp | 215 (0.6%) |
+
+Integer arithmetic stays 0.51 cp. This is not network 8's own checkpoint
+(that needs the original `.ckpt`), and whether the smaller error is worth
+Elo is a match between the two exports of one checkpoint.
+
 ## 4. Experimental: format version 4 (a hidden stack)
 
 `tools/nnue/train_v4.py` trains, and the engine reads, a fourth format next

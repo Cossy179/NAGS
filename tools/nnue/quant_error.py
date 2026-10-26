@@ -133,12 +133,15 @@ def _summary(diff, base, other):
             "sign_changes": int(flips.sum())}
 
 
-def measure(net_path, data_paths, count=20000, seed=1, batch=8192, simulate=0):
+def measure(net_path, data_paths, count=20000, seed=1, batch=8192, simulate=0, exported=None):
     """The report as a dict (see the module docstring); with `simulate`, also that many simulated roundings
     of each layer of the exported network (an estimate of the weight rounding error when the float weights
     are not at hand)."""
     model = None
-    if net_path.endswith(".ckpt"):
+    if net_path.endswith(".ckpt") and exported:  # a file exported from this checkpoint (e.g. with a correction)
+        model = load_float(net_path)
+        net = IntegerNet(exported)
+    elif net_path.endswith(".ckpt"):
         model = load_float(net_path)
         tmp = tempfile.NamedTemporaryFile(suffix=".nnue", delete=False)
         tmp.close()
@@ -191,9 +194,12 @@ def main(argv=None):
     ap.add_argument("--simulate", type=int, default=0, metavar="N",
                     help="also N simulated roundings of each layer (uniform offsets of up to half a step): an "
                          "estimate of the weight rounding error for an exported network without its checkpoint")
+    ap.add_argument("--exported", metavar="NNUE", help="with a .ckpt --net: measure this file exported from it "
+                    "(for example with --export-bias-correction) instead of a plain export")
     ap.add_argument("--json", help="also write the report here")
     args = ap.parse_args(argv)
-    report = measure(args.net, train.expand_paths(args.data), args.positions, args.seed, simulate=args.simulate)
+    report = measure(args.net, train.expand_paths(args.data), args.positions, args.seed, simulate=args.simulate,
+                     exported=args.exported)
     ev = report["eval_cp"]
     print(f"{report['network']}: {report['positions']} positions; |eval| mean {ev['mean']:.0f} cp, "
           f"p50 {ev['p50']:.0f}, p99 {ev['p99']:.0f}")
