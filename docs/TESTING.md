@@ -355,6 +355,32 @@ at a cap, 3 if invalid or refused, 4 if stopped before a decision.
 losses, crashes, illegal moves). It ends with one strength-log row per stage
 played, ready for the table below.
 
+**Tuning search parameters** (`tools/spsa.py`). The search's tunable
+constants are listed in `src/Tune.h` with their defaults and ranges. In a
+normal build they are compile-time constants, so the search and its bench
+are unchanged. A tuning build (`cmake -B build-tune -DNAGS_TUNE=ON`) makes
+them UCI spin options; its search is slightly slower, since the reduction
+table is computed per call, so it is used only for tuning. With defaults it
+benches exactly like the normal build (1528850), and changing one changes
+it (RfpMargin=100: 1671936).
+
+```bash
+python tools/spsa.py --engine build-tune/nags_enhanced --params RfpMargin FutilityMargin \
+    --iterations 2000 --pairs 4 --tc 3+0.03 --concurrency 3 --state runs/spsa_rfp_fut.json
+```
+
+Each iteration plays `--pairs` game pairs between the parameters perturbed
+up and down (independent random signs) and moves them by fishtest's
+schedule (c_end a twentieth of the range, r_end 0.002 unless given). The
+budget, parameters, engine, time control and openings are fixed in the
+state file before the first game: the same command continues a stopped run
+and other settings are refused. The result is not a decision. The tuned
+values are tested against the defaults by SPRT in the same tuning build
+(equal speed), and only then copied into `src/Tune.h`, where the change
+needs its normal-build SPRT like any functional change. On the 4-core VM,
+2000 iterations of 4 pairs at 3+0.03 are about 16,000 games, roughly 14
+hours, for two or three parameters at a time.
+
 **Other runners.** For very fast time controls or big matches, a dedicated
 C++ runner has lower overhead, for example
 [fastchess](https://github.com/Disservin/fastchess) (`-each tc=8+0.08 -openings

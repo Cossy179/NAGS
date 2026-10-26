@@ -18,6 +18,7 @@
 #include "Legality.h"
 #include "Syzygy.h"
 #include "TT.h"
+#include "Tune.h"
 
 #include <algorithm>
 #include <array>
@@ -300,7 +301,7 @@ public:
         if (rootMoves.empty()) return true;
         rootMoveNodes.clear(); // nodes per root move over all attempts of this iteration
         iterationNodes = 0;
-        int window = (depth >= 5 && std::abs(prevScore) < MATE_BOUND) ? 25 : INF_SCORE;
+        int window = (depth >= 5 && std::abs(prevScore) < MATE_BOUND) ? tune::AspirationWindow : INF_SCORE;
         int alpha = window >= INF_SCORE ? -INF_SCORE : std::max(-INF_SCORE, prevScore - window);
         int beta = window >= INF_SCORE ? INF_SCORE : std::min(INF_SCORE, prevScore + window);
         const Move previousBest = rootMoves.front(); // the last completed iteration's best move
@@ -572,13 +573,19 @@ private:
 
     // Late-move reduction in plies: 0.75 + ln(depth) * ln(moveNumber) / 2.25.
     static int lmrReduction(int depth, int moveNumber) {
+#ifdef NAGS_TUNE
+        return static_cast<int>(tune::LmrBase / 100.0 + std::log(std::min(depth, 63)) * std::log(std::min(moveNumber, 63)) /
+                                (tune::LmrDivisor / 100.0));
+#else
         static const auto table = [] {
             std::array<std::array<int, 64>, 64> t{};
             for (int d = 1; d < 64; ++d)
                 for (int m = 1; m < 64; ++m) t[d][m] = static_cast<int>(0.75 + std::log(d) * std::log(m) / 2.25);
             return t;
         }();
+        static_assert(tune::LmrBase == 75 && tune::LmrDivisor == 225, "the table is 0.75 + ln d ln m / 2.25");
         return table[std::min(depth, 63)][std::min(moveNumber, 63)];
+#endif
     }
     static void updateHistory(int &h, int bonus) { h += bonus - h * std::abs(bonus) / kHistoryMax; }
     static void updateContHistory(int16_t &h, int bonus) {
@@ -905,7 +912,7 @@ private:
         // Reverse futility pruning: at shallow depth, a static evaluation that
         // beats beta by a depth-scaled margin is assumed to hold.
         if (!isPv && !inCheck && !excluding && depth <= 6 && std::abs(beta) < MATE_BOUND &&
-            staticEval - 80 * (depth - improving) >= beta) {
+            staticEval - tune::RfpMargin * (depth - improving) >= beta) {
             NAGS_STAT(++stats.rfp);
             return staticEval;
         }
@@ -916,7 +923,7 @@ private:
         // or with only king and pawns (zugzwang is common there).
         if (!isPv && !inCheck && !excluding && depth >= 3 && !board.lastMoveWasNull() && std::abs(beta) < MATE_BOUND &&
             hasNonPawnMaterial(board.sideToMove()) && staticEval >= beta) {
-            int reduction = 3 + depth / 6;
+            int reduction = tune::NmpBase + depth / tune::NmpDivisor;
             NAGS_STAT(++stats.nmpTries);
             plyMoves[ply] = PlyMove{};
             doubleExtensions[ply + 1] = doubleExtensions[ply]; // the null move's subtree continues this line
@@ -973,12 +980,12 @@ private:
                     NAGS_STAT(stats.lmp += 1 + dropped);
                     continue;
                 }
-                if (staticEval + 120 * depth <= alpha) { // futility pruning
+                if (staticEval + tune::FutilityMargin * depth <= alpha) { // futility pruning
                     [[maybe_unused]] const int dropped = picker.skipQuietMoves(excluded);
                     NAGS_STAT(stats.futility += 1 + dropped);
                     continue;
                 }
-                if (histScore < -4096 * depth) { // history pruning
+                if (histScore < -tune::HistoryPruneMargin * depth) { // history pruning
                     NAGS_STAT(++stats.historyPrunes);
                     continue;
                 }
@@ -986,7 +993,7 @@ private:
             // SEE pruning: at low depth, skip moves that lose material by
             // force (more for captures, which win some of it back).
             if (!isPv && !inCheck && i > 0 && depth <= 8 && std::abs(alpha) < MATE_BOUND && !sameMove(m, ttMove) &&
-                picker.seeOfLast() < (quiet ? -60 * depth : -20 * depth * depth)) {
+                picker.seeOfLast() < (quiet ? -tune::SeeQuietMargin * depth : -tune::SeeCaptureMargin * depth * depth)) {
                 NAGS_STAT(++stats.seePrunes);
                 continue;
             }
@@ -995,7 +1002,7 @@ private:
             // more ply. If even the alternatives beat beta, cut (multi-cut).
             int extension = 0;
             if (trySingular && sameMove(m, ttMove)) {
-                int singularBeta = ttScore - 2 * depth;
+                int singularBeta = ttScore - tune::SingularMargin * depth;
                 NAGS_STAT(++stats.singularTries);
                 int s = negamax((depth - 1) / 2, singularBeta - 1, singularBeta, ply, false, m);
                 if (aborted) return 0;
@@ -1003,7 +1010,7 @@ private:
                     // Far below the margin: the TT move is the only move by
                     // far. Two plies, outside PV nodes and at most a few
                     // times per line, so no line grows without bound.
-                    extension = !isPv && s < singularBeta - 20 && doubleExtensions[ply] < 6 ? 2 : 1;
+                    extension = !isPv && s < singularBeta - tune::DoubleExtensionMargin && doubleExtensions[ply] < 6 ? 2 : 1;
                     NAGS_STAT(++stats.singularExtensions);
                 } else if (singularBeta >= beta) {
                     NAGS_STAT(++stats.multiCuts);
@@ -1031,7 +1038,7 @@ private:
                 int reduction = 0;
                 if (depth >= 3 && i >= 2 && quiet && !inCheck && !givesCheck &&
                     !sameMove(m, killers[ply][0]) && !sameMove(m, killers[ply][1])) {
-                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1) - histScore / 8192;
+                    reduction = lmrReduction(depth, i + 1) - (isPv ? 1 : 0) + (improving ? 0 : 1) - histScore / tune::LmrHistoryDivisor;
                     reduction = std::clamp(reduction, 0, depth - 2);
                 }
                 NAGS_STAT(if (reduction) ++stats.lmrSearches);

@@ -40,6 +40,9 @@ public:
         lines.push_back("option name Ponder type check default false");
         lines.push_back("option name RepetitionRule type combo default Twofold var Twofold var Laws");
         for (const auto &l : uci::syzygyOptionLines()) lines.push_back(l);
+        for (const tune::Param &p : tune::params()) // tuning builds (NAGS_TUNE) only
+            lines.push_back("option name " + std::string(p.name) + " type spin default " + std::to_string(p.def) +
+                            " min " + std::to_string(p.min) + " max " + std::to_string(p.max));
         if constexpr (eval::HasNnue<BoardT>::value) {
             lines.push_back("option name UseNNUE type check default true");
             lines.push_back("option name EvalFile type string default <embedded>");
@@ -51,6 +54,13 @@ public:
         long long v = 0;
         bool ok = false;
         if (uci::setSyzygyOption(optName, value, message, ok)) return ok;
+        for (const tune::Param &p : tune::params()) {
+            if (optName != p.name) continue;
+            if (!uci::parseInt(value, v)) { message = "invalid " + optName + " value '" + value + "'"; return false; }
+            *p.value = static_cast<int>(std::clamp<long long>(v, p.min, p.max));
+            message = optName + " set to " + std::to_string(*p.value);
+            return true;
+        }
         if constexpr (eval::HasNnue<BoardT>::value) {
             if (optName == "UseNNUE") {
                 bool on = false;

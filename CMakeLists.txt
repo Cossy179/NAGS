@@ -18,6 +18,12 @@ option(NAGS_STATS "Count search statistics (profiling builds)" OFF)
 if(NAGS_STATS)
   add_compile_definitions(NAGS_STATS=1)
 endif()
+# Search parameters as UCI options for tools/spsa.py (src/Tune.h). Tuning
+# builds only: off, every parameter is a compile-time constant.
+option(NAGS_TUNE "Search parameters as UCI options (tuning builds)" OFF)
+if(NAGS_TUNE)
+  add_compile_definitions(NAGS_TUNE=1)
+endif()
 
 find_package(Threads REQUIRED)
 
