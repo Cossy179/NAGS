@@ -75,6 +75,7 @@ import json
 import math
 import multiprocessing as mp
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -846,6 +847,17 @@ def init_from(model, path):
         model.out.bias.copy_(torch.from_numpy(out_b.astype(np.float64) / (QA * QB)).float())
 
 
+def best_epoch(history, select_by):
+    """{"epoch", "loss"} of the epoch with the lowest `select_by` loss in `history` ("val" or "eval:NAME"),
+    or None. Ties go to the earlier epoch."""
+    best = None
+    for h in history:
+        loss = h.get("val") if select_by == "val" else (h.get("eval") or {}).get(select_by[5:], {}).get("loss")
+        if loss is not None and (best is None or loss < best["loss"]):
+            best = {"epoch": h["epoch"], "loss": loss}
+    return best
+
+
 def code_version():
     """The commit the trainer ran from (None outside a git checkout) and the trainer file's SHA-256."""
     commit = None
@@ -960,6 +972,15 @@ def main(argv=None):
                     help="refuse an --eval-set more than this fraction of whose records also occur in the training "
                          "data (default 0.01; independent self-play shares about 0.01%%); the same file, or a game "
                          "(seed and number) in both, is always refused")
+    ap.add_argument("--select-by", metavar="METRIC",
+                    help="the loss that picks the best epoch: 'val' (the validation loss) or 'eval:NAME' (an "
+                         "--eval-set file's overall loss, by file name); used by --keep-best and --early-stop "
+                         "(default val)")
+    ap.add_argument("--keep-best", action="store_true",
+                    help="also keep the network of the best epoch so far as <out without .nnue>.best.nnue (the "
+                         "last epoch's stays <out>)")
+    ap.add_argument("--early-stop", type=int, default=0, metavar="N",
+                    help="stop when the --select-by loss has not improved for N epochs (0: never)")
     ap.add_argument("--sync-every", type=int, default=1,
                     help="read the training loss back from the GPU every N batches instead of every batch (each "
                          "read waits for the GPU); the network trained is the same, the logged loss differs in "
@@ -1068,6 +1089,16 @@ def main(argv=None):
         profile(model, opt, sched, source, rng, args, device)
         return
     last_epoch = args.epochs if not args.stop_after else min(args.epochs, first_epoch + args.stop_after - 1)
+    select_by = args.select_by or "val"
+    if select_by != "val" and not (select_by.startswith("eval:") and
+                                   select_by[5:] in [os.path.basename(p) for p in args.eval_set]):
+        sys.exit(f"--select-by {select_by}: use 'val' or 'eval:NAME' with NAME one of the --eval-set files")
+    if select_by == "val" and not source.n_val and (args.keep_best or args.early_stop):
+        sys.exit("--keep-best/--early-stop with --select-by val need a validation set (--val > 0)")
+    best_path = (args.out[:-5] if args.out.endswith(".nnue") else args.out) + ".best.nnue"
+    best = best_epoch(history, select_by)
+    if args.early_stop and best and history and history[-1]["epoch"] - best["epoch"] >= args.early_stop:
+        last_epoch = first_epoch - 1  # a resumed run that had already stopped early
     version = code_version()
     for epoch in range(first_epoch, last_epoch + 1):
         t = time.time()
@@ -1105,6 +1136,10 @@ def main(argv=None):
                       "count " + " ".join("-" if x is None else f"{x:.5f}" for x in rep["by_output_bucket"]), flush=True)
         history.append(entry)
         export(model, args.out)
+        best = best_epoch(history, select_by)
+        if args.keep_best and best and best["epoch"] == epoch:
+            shutil.copyfile(args.out, best_path + ".tmp")
+            os.replace(best_path + ".tmp", best_path)
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(),
                     "rng": rng.bit_generator.state, "epoch": epoch, "positions": n, "hidden": args.hidden,
                     "epochs": args.epochs, "buckets": args.buckets, "king_buckets": args.king_buckets,
@@ -1120,6 +1155,8 @@ def main(argv=None):
             "data": {"positions": n, "train": n - source.n_val, "validation": source.n_val, "split": source.split,
                      **fingerprint},
             "init_from": started_from, "epochs_done": epoch, "history": history, "code": version,
+            "best": {**best, "select_by": select_by,
+                     "file": os.path.basename(best_path) if args.keep_best else None} if best else None,
             "eval_sets": [{"name": os.path.basename(p), "sha256": file_sha256(p, cache=False),
                            "records": overlaps[p]["records"],
                            "records_in_training_data": overlaps[p]["records_in_training_data"]}
@@ -1130,6 +1167,14 @@ def main(argv=None):
         with open(args.out + ".json.tmp", "w") as fh:
             json.dump(manifest, fh, indent=1)
         os.replace(args.out + ".json.tmp", args.out + ".json")
+        if args.early_stop and best and epoch - best["epoch"] >= args.early_stop:
+            print(f"early stop after epoch {epoch}: the {select_by} loss has not improved since epoch "
+                  f"{best['epoch']} ({best['loss']:.6f})", flush=True)
+            last_epoch = epoch
+            break
+    if best and (args.keep_best or args.early_stop):
+        print(f"best epoch {best['epoch']} ({select_by} {best['loss']:.6f})"
+              + (f": {best_path}" if args.keep_best else ""), flush=True)
     print(f"wrote {args.out}" + (f" (stopped after epoch {last_epoch} of {args.epochs})" if last_epoch < args.epochs else ""))
 
 
