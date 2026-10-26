@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -94,5 +95,61 @@ def test_overlapping_evaluation_sets_are_refused(tmp_path, capsys):
     assert "also in the training data" in capsys.readouterr().out
     m = json.loads(Path(out + ".json").read_text())
     assert m["eval_sets"][0]["records"] == len(independent) // 32
-    assert m["eval_sets"][0]["records_in_training_data"] <= 0.01 * m["eval_sets"][0]["records"]
+    chk = m["eval_sets"][0]["checked"]
+    assert chk["min_pieces"] == 10 and chk["in_training_data"] <= 0.01 * chk["records"]
     assert json.loads(Path(str(tmp_path / "indep.bin") + ".overlap.json").read_text())["data_sha256"]
+
+
+def _relabelled(recs):
+    """The same positions with other scores and results, as deeper labels give them."""
+    recs = recs.copy()
+    score = recs[:, 24:26].copy().view("<i2").ravel().astype(np.int32)
+    recs[:, 24:26] = np.clip(score + 37, -32000, 32000).astype("<i2").view(np.uint8).reshape(-1, 2)
+    recs[:, 26] = (recs[:, 26] + 1) % 3
+    return recs
+
+
+def _pieces(recs):
+    return np.unpackbits(recs[:, :8], axis=1).sum(axis=1)
+
+
+@needs_datagen
+def test_positions_are_compared_whatever_their_labels(tmp_path, capsys):
+    data = _shard(tmp_path / "train.bin", 11, 0, 30)
+    out = str(tmp_path / "n.nnue")
+    recs = np.fromfile(data, np.uint8).reshape(-1, 32)
+    # Training games relabelled and written without an index: every position is the training data's, no record is.
+    relabelled = tmp_path / "relabelled.bin"
+    _relabelled(recs).tofile(relabelled)
+    assert not (set(map(bytes, _relabelled(recs))) & set(map(bytes, recs)))
+    with pytest.raises(SystemExit, match="also occur in the training data, whatever their scores and results"):
+        train.main(["--data", data, "--out", out, "--eval-set", str(relabelled)] + COMMON)
+    # Simple endgames shared with the training data (as independent self-play shares them) are recorded but do
+    # not count towards the limit; the same number of middlegame positions does.
+    independent = np.fromfile(_shard(tmp_path / "indep.bin", 99, 0, 10), np.uint8).reshape(-1, 32)
+    few, many = recs[_pieces(recs) < 10], recs[_pieces(recs) >= 10]
+    endings = tmp_path / "endings.bin"
+    np.concatenate([independent, _relabelled(few[:40])]).tofile(endings)
+    capsys.readouterr()
+    train.main(["--data", data, "--out", out, "--eval-set", str(endings)] + COMMON)
+    ov = json.loads(Path(str(endings) + ".overlap.json").read_text())
+    assert ov["positions_in_training_data"] >= 40 and ov["checked"]["in_training_data"] == 0
+    middlegames = tmp_path / "middlegames.bin"
+    np.concatenate([independent, _relabelled(many[:40])]).tofile(middlegames)
+    with pytest.raises(SystemExit, match="also occur in the training data"):
+        train.main(["--data", data, "--out", str(tmp_path / "m.nnue"), "--eval-set", str(middlegames)] + COMMON)
+
+
+@needs_datagen
+def test_an_overlap_cache_of_another_method_is_computed_again(tmp_path):
+    data = _shard(tmp_path / "train.bin", 11, 0, 30)
+    recs = np.fromfile(data, np.uint8).reshape(-1, 32)
+    relabelled = tmp_path / "relabelled.bin"
+    _relabelled(recs).tofile(relabelled)
+    fingerprint = train.data_fingerprint([data])["sha256"]
+    # What the label-sensitive check left next to the file: no record in common.
+    stale = {"eval_sha256": train.file_sha256(str(relabelled), cache=False), "data_sha256": fingerprint,
+             "records": len(recs), "records_in_training_data": 0, "same_file_as": [], "games_in_training_data": 0}
+    Path(str(relabelled) + ".overlap.json").write_text(json.dumps(stale))
+    ov = train.eval_overlap(str(relabelled), [data], fingerprint)
+    assert ov["method"] == train.OVERLAP_METHOD and ov["positions_in_training_data"] == len(recs)

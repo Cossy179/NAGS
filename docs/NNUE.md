@@ -251,14 +251,39 @@ An evaluation set must be independent of the training data. Before
 training, each `--eval-set` is compared with the data, and the run is
 refused if the set is one of the training files (or a copy of one), if
 both have shard indexes and share a game (the same seed and number), or
-if more than `--eval-overlap-limit` of its records (default 1%) occur in
-the training data too. That last check catches pasted training data
-without an index; it takes one pass over the data, and the result is kept
-in `<eval>.overlap.json`. The overlap found is recorded in `<out>.json`.
-Independent self-play shares very few records: 0 of 38,944 between two
-400-game shards of different seeds, and 3 of 26,406 (0.011%) against 73k
-records of two others. Identical positions with other scores or results
-are more common (0.04-0.09%) but don't count.
+if more than `--eval-overlap-limit` (default 1%) of its positions with 10
+or more pieces occur in the training data too. Positions are compared by
+placement and side to move, whatever their scores and results, so
+training games relabelled (`--relabel-nodes`) or with other results are
+found like copies; that check catches them without an index. It takes one
+pass over the data, and the result is kept in `<eval>.overlap.json` (an
+older file, which compared whole records, is computed again). The overlap
+found, overall and with 10 or more pieces, is recorded in `<out>.json`.
+
+Why 10 pieces: independent self-play shares simple endgames, and more of
+them the more data there is. Against 3,000 games of another seed (275k
+positions), 23 of a 300-game set's 26,168 positions (0.088%) occurred in
+the training data, all with 3 to 5 pieces (0.9% of its 2,518 positions
+with 2 to 5 pieces); none of its 23,650 positions with 6 or more pieces
+did. The count grew about in proportion to the training data (2, 3, 7, 23
+against 100, 300, 1,000, 3,000 games), so against a round's 100M
+positions a limit on all positions would refuse an independent set. A
+copied or relabelled game brings its middlegame along, which independent
+games do not share. (Whole records, labels included, matched none of
+these.)
+
+**Resuming keeps the evaluation setup.** The checkpoint records the
+evaluation sets (name and SHA-256), `--select-by`, `--early-stop` and
+`--keep-best`, and `--resume` refuses any change: another file under the
+same name would put two sets' losses into one history, and the best epoch
+would be chosen across them. A checkpoint written before this was
+recorded resumes only if its history has no evaluation-set results.
+
+**An earlier run is never overwritten.** If `<out>`, its checkpoint, its
+`.json` or its `.best.nnue` exist, train.py refuses to start unless
+`--resume` continues the run from its checkpoint (files without a
+checkpoint cannot be resumed: choose another `--out`). `--profile` writes
+nothing and is not affected.
 
 **Measuring the trainer.** `--profile N` times N batches by phase (batch
 preparation, forward, backward, optimiser step, reading the loss back),

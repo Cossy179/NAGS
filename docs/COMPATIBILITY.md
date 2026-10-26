@@ -92,7 +92,17 @@ it). The validation boundary moves to a game start only
 in a file with a complete shard index, which no data made before
 `--first-game` has, so existing data splits exactly as before. The
 trainer writes `<out>.json`, `<file>.sha256` and `<eval>.overlap.json`
-caches next to the data; none changes what is trained.
+caches next to the data; none changes what is trained. Then `evaluation`
+(the evaluation sets by SHA-256, `--select-by`, `--early-stop`,
+`--keep-best`: a resume with another setup is refused; a checkpoint
+without it resumes as before unless its history holds evaluation-set
+results, which only trainers since `--eval-set` wrote) and
+`export_bias_correction` among the checked settings. `<eval>.overlap.json`
+gained `method` (positions compared without their labels); one without it
+is computed again. **Changed on purpose:** train.py refuses to start when
+`<out>`, its checkpoint, `.json` or `.best.nnue` exist unless `--resume`
+is given (it used to start again and overwrite them); `run_round.py` and
+`screen.py` always pass `--resume` and are unaffected.
 
 ### `tools/nnue/run_round.py` and `tools/sprt.py`
 
