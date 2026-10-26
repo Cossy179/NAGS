@@ -17,6 +17,8 @@ venv/
 
 # Training artefacts (large / machine-specific)
 /data/
+/runs/
+/nets/candidates/
 models/
 logs/
 *.pth
