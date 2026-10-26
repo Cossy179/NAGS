@@ -54,9 +54,13 @@ Usage:
 
 Provenance: the training data is fingerprinted (SHA-256 of each file's content, cached next to the file
 as <file>.sha256 by size and modification time), the fingerprint is kept in the checkpoint, and --resume
-refuses data with the same number of positions but other content. After every epoch <out>.json records
-what the network is: its architecture, the settings, the data fingerprint, the loss history, the weights
-it started from and the code that trained it.
+refuses data with the same number of positions but other content. It also refuses another evaluation setup:
+other --eval-set files (by content), another --select-by, --early-stop or --keep-best, since the history
+holds their results. After every epoch <out>.json records what the network is: its architecture, the
+settings, the data fingerprint, the loss history, the weights it started from and the code that trained it.
+
+An earlier run's files are never overwritten: if <out>, <out>.ckpt, <out>.json or the best network exist,
+the run refuses to start unless --resume continues it from its checkpoint.
 
 Two ways to start from an existing network, kept apart:
 
@@ -386,27 +390,42 @@ def game_boundary(paths, counts, target):
     return target, "games"
 
 
-def record_hashes(recs):
-    """64-bit hashes of 32-byte records (uint8 [N, 32]), to find records two files share."""
+# Of a record's last 8 bytes (score, result, side to move, reserved) only the side to move is the position.
+SIDE_TO_MOVE_MASK = np.uint64(0xFF << 24)
+OVERLAP_METHOD = "positions-1"  # what <eval>.overlap.json counted; a cache of another method is computed again
+# Independent self-play shares simple endgames: against 3,000 games (275k positions) of another seed, 0.9% of
+# an evaluation set's 2-5 piece positions occurred in the training data and none with 6 or more pieces, and
+# the share grows with the training data. A copied or relabelled game brings its middlegame along, so the
+# --eval-overlap-limit counts positions with at least this many pieces.
+OVERLAP_MIN_PIECES = 10
+
+
+def position_hashes(recs):
+    """64-bit hashes of the positions in 32-byte records (uint8 [N, 32]): the occupancy, the pieces and the side
+    to move, not the score or the result, so that a position two files share is found whatever its labels (a
+    relabelled copy of training games has other scores)."""
     w = np.ascontiguousarray(recs).view("<u8").reshape(-1, 4)
     with np.errstate(over="ignore"):
         h = w[:, 0] * np.uint64(0x9E3779B97F4A7C15)
         for k, c in ((1, 0xC2B2AE3D27D4EB4F), (2, 0x165667B19E3779F9), (3, 0xD6E8FEB86659FD93)):
-            h = (h ^ (h >> np.uint64(29))) * np.uint64(0xBF58476D1CE4E5B9) + w[:, k] * np.uint64(c)
+            word = w[:, k] & SIDE_TO_MOVE_MASK if k == 3 else w[:, k]
+            h = (h ^ (h >> np.uint64(29))) * np.uint64(0xBF58476D1CE4E5B9) + word * np.uint64(c)
     return h
 
 
 def eval_overlap(eval_path, paths, data_sha, cache=True):
     """How an --eval-set file overlaps the training data: the same file, games of the same seed and number in
-    both (from their nags_datagen indexes), and records that occur in both (one pass over the data, kept in
-    <eval>.overlap.json for this data and eval file)."""
+    both (from their nags_datagen indexes), and records whose position (placement and side to move, whatever
+    the score and result) occurs in both, overall and ("checked") among positions with OVERLAP_MIN_PIECES or
+    more pieces (one pass over the data, kept in <eval>.overlap.json for this data and eval file)."""
     eval_sha = file_sha256(eval_path, cache=False)
     side = eval_path + ".overlap.json"
     if cache and os.path.exists(side):
         try:
             with open(side) as fh:
                 kept = json.load(fh)
-            if kept.get("eval_sha256") == eval_sha and kept.get("data_sha256") == data_sha:
+            if (kept.get("eval_sha256") == eval_sha and kept.get("data_sha256") == data_sha
+                    and kept.get("method") == OVERLAP_METHOD):
                 return kept
         except (OSError, ValueError):
             pass
@@ -428,7 +447,9 @@ def eval_overlap(eval_path, paths, data_sha, cache=True):
     raw = np.fromfile(eval_path, np.uint8)
     if raw.size % RECORD_BYTES:
         sys.exit(f"--eval-set {eval_path}: the size is not a multiple of {RECORD_BYTES} bytes")
-    eval_h = record_hashes(raw.reshape(-1, RECORD_BYTES))
+    recs = raw.reshape(-1, RECORD_BYTES)
+    eval_h = position_hashes(recs)
+    checked = np.unpackbits(recs[:, :8], axis=1).sum(axis=1) >= OVERLAP_MIN_PIECES
     unique = np.unique(eval_h)
     found = np.zeros(len(unique), bool)
     for p in paths:
@@ -437,13 +458,15 @@ def eval_overlap(eval_path, paths, data_sha, cache=True):
             continue
         m = np.memmap(p, np.uint8, "r", shape=(size // RECORD_BYTES, RECORD_BYTES))
         for start in range(0, len(m), 1 << 20):
-            h = record_hashes(np.array(m[start : start + (1 << 20)]))
+            h = position_hashes(np.array(m[start : start + (1 << 20)]))
             idx = np.minimum(np.searchsorted(unique, h), len(unique) - 1)
             found[idx[unique[idx] == h]] = True
-    shared = int(np.isin(eval_h, unique[found]).sum())
-    result = {"eval_sha256": eval_sha, "data_sha256": data_sha, "records": int(len(eval_h)),
-              "records_in_training_data": shared, "same_file_as": [os.path.basename(p) for p in same_file],
-              "games_in_training_data": shared_games}
+    shared = np.isin(eval_h, unique[found])
+    result = {"method": OVERLAP_METHOD, "eval_sha256": eval_sha, "data_sha256": data_sha,
+              "records": int(len(eval_h)), "positions_in_training_data": int(shared.sum()),
+              "checked": {"min_pieces": OVERLAP_MIN_PIECES, "records": int(checked.sum()),
+                          "in_training_data": int((shared & checked).sum())},
+              "same_file_as": [os.path.basename(p) for p in same_file], "games_in_training_data": shared_games}
     if cache:
         try:
             with open(side, "w") as fh:
@@ -909,6 +932,25 @@ def best_epoch(history, select_by):
     return best
 
 
+def evaluation_differences(was, now):
+    """What differs between two evaluation setups ({"eval_sets": [{"name", "sha256"}], "select_by",
+    "early_stop", "keep_best"}), as messages; empty if they are the same."""
+    a = {e["name"]: e["sha256"] for e in was.get("eval_sets", [])}
+    b = {e["name"]: e["sha256"] for e in now["eval_sets"]}
+    out = []
+    for name in sorted(set(a) | set(b)):
+        if name not in b:
+            out.append(f"--eval-set {name} was evaluated, now it is not")
+        elif name not in a:
+            out.append(f"--eval-set {name} was not evaluated before")
+        elif a[name] != b[name]:
+            out.append(f"--eval-set {name} has other content (sha256 {a[name][:16]}, now {b[name][:16]})")
+    for key, flag in (("select_by", "--select-by"), ("early_stop", "--early-stop"), ("keep_best", "--keep-best")):
+        if was.get(key) != now[key]:
+            out.append(f"{flag} was {was.get(key)!r}, now {now[key]!r}")
+    return out
+
+
 def code_version():
     """The commit the trainer ran from (None outside a git checkout) and the trainer file's SHA-256."""
     commit = None
@@ -1020,9 +1062,11 @@ def main(argv=None):
                     help="a fixed set of 32-byte records (not trained on) evaluated after every epoch, overall, by "
                          "output bucket and by king bucket (repeatable; recorded in <out>.json)")
     ap.add_argument("--eval-overlap-limit", type=float, default=0.01, metavar="FRACTION",
-                    help="refuse an --eval-set more than this fraction of whose records also occur in the training "
-                         "data (default 0.01; independent self-play shares about 0.01%%); the same file, or a game "
-                         "(seed and number) in both, is always refused")
+                    help=f"refuse an --eval-set more than this fraction of whose positions with {OVERLAP_MIN_PIECES} "
+                         "or more pieces also occur in the training data, compared by placement and side to move "
+                         "whatever their scores and results (default 0.01; simple endgames, which independent "
+                         "self-play shares, are not counted); the same file, or a game (seed and number) in both, "
+                         "is always refused")
     ap.add_argument("--select-by", metavar="METRIC",
                     help="the loss that picks the best epoch: 'val' (the validation loss) or 'eval:NAME' (an "
                          "--eval-set file's overall loss, by file name); used by --keep-best and --early-stop "
@@ -1043,6 +1087,24 @@ def main(argv=None):
                     help="time N training batches by phase (data, forward, backward, step, loss read) and end to "
                          "end with and without a loss read per batch, then stop without writing anything")
     args = ap.parse_args(argv)
+
+    select_by = args.select_by or "val"
+    eval_names = [os.path.basename(p) for p in args.eval_set]
+    if len(set(eval_names)) != len(eval_names):
+        sys.exit("--eval-set: two files of the same name (results are recorded by file name)")
+    if select_by != "val" and not (select_by.startswith("eval:") and select_by[5:] in eval_names):
+        sys.exit(f"--select-by {select_by}: use 'val' or 'eval:NAME' with NAME one of the --eval-set files")
+    # An earlier run's files are never overwritten: only --resume continues them (from the checkpoint).
+    ckpt_path = args.out + ".ckpt"
+    best_path = (args.out[:-5] if args.out.endswith(".nnue") else args.out) + ".best.nnue"
+    existing = [p for p in (args.out, ckpt_path, args.out + ".json", best_path) if os.path.exists(p)]
+    if existing and not args.profile:  # --profile writes nothing
+        if not args.resume:
+            sys.exit(f"{', '.join(existing)} already exist(s): continue that run with --resume, or choose another "
+                     "--out")
+        if not os.path.exists(ckpt_path):
+            sys.exit(f"{', '.join(existing)} already exist(s) without the checkpoint {ckpt_path}, so there is "
+                     "nothing to resume: choose another --out")
 
     if args.threads:
         torch.set_num_threads(args.threads)
@@ -1077,18 +1139,26 @@ def main(argv=None):
     for path in args.eval_set:  # an evaluation set must be independent of what is trained on
         ov = eval_overlap(path, [p for p in paths if p.endswith(".bin")], fingerprint["sha256"],
                           cache=not args.no_data_cache)
-        frac = ov["records_in_training_data"] / max(1, ov["records"])
+        chk = ov["checked"]
+        frac = chk["in_training_data"] / max(1, chk["records"])
         if ov["same_file_as"]:
             sys.exit(f"--eval-set {path} is training data ({', '.join(ov['same_file_as'])})")
         if ov["games_in_training_data"]:
             sys.exit(f"--eval-set {path}: {ov['games_in_training_data']} of its games (seed and number) are in "
                      "the training data")
         if frac > args.eval_overlap_limit:
-            sys.exit(f"--eval-set {path}: {ov['records_in_training_data']} of its {ov['records']} records "
-                     f"({frac:.2%}) also occur in the training data (limit {args.eval_overlap_limit:.2%})")
-        print(f"eval set {os.path.basename(path)}: {ov['records']} records, {ov['records_in_training_data']} "
-              f"({frac:.3%}) also in the training data", flush=True)
+            sys.exit(f"--eval-set {path}: {chk['in_training_data']} of its {chk['records']} positions with "
+                     f"{chk['min_pieces']} or more pieces ({frac:.2%}) also occur in the training data, whatever "
+                     f"their scores and results (limit {args.eval_overlap_limit:.2%})")
+        print(f"eval set {os.path.basename(path)}: {ov['records']} records; positions also in the training data: "
+              f"{ov['positions_in_training_data']} ({ov['positions_in_training_data'] / max(1, ov['records']):.3%}), "
+              f"{chk['in_training_data']} of the {chk['records']} with {chk['min_pieces']}+ pieces ({frac:.3%})",
+              flush=True)
         overlaps[path] = ov
+    # What the history's evaluation results and the best epoch depend on; a resume must find it unchanged.
+    evaluation = {"eval_sets": sorted(({"name": os.path.basename(p), "sha256": overlaps[p]["eval_sha256"]}
+                                       for p in args.eval_set), key=lambda e: e["name"]),
+                  "select_by": select_by, "early_stop": args.early_stop, "keep_best": args.keep_best}
 
     if not 1 <= args.buckets <= MAX_BUCKETS:
         sys.exit(f"--buckets must be 1-{MAX_BUCKETS}")
@@ -1104,11 +1174,11 @@ def main(argv=None):
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     steps = args.epochs * source.steps(args.batch)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, steps), eta_min=args.lr * 0.01)
-    ckpt_path = args.out + ".ckpt"
     # Settings that must also match on --resume. Checkpoints written before
     # they were recorded lack them and are resumed as before.
     settings = {"batch": args.batch, "lr": args.lr, "lam": args.lam, "val": args.val, "seed": args.seed,
-                "king_layout": [int(x) for x in king_config(args.king_buckets)[2]]}
+                "king_layout": [int(x) for x in king_config(args.king_buckets)[2]],
+                "export_bias_correction": args.export_bias_correction}
     first_epoch = 1
     history = []
     if args.resume and os.path.exists(ckpt_path):
@@ -1131,6 +1201,18 @@ def main(argv=None):
         if args.init_from and (ckpt.get("init_from") or {}).get("sha256") != started_from["sha256"]:
             sys.exit(f"{ckpt_path} started from {(ckpt.get('init_from') or {}).get('path')!r}, not from "
                      f"{args.init_from!r}")
+        # The history holds each epoch's evaluation results and picks the best epoch, so a resumed run keeps
+        # its evaluation sets (by content), --select-by, --early-stop and --keep-best. A checkpoint written
+        # before they were recorded had none of them unless its history holds evaluation-set results.
+        was = ckpt.get("evaluation")
+        if was is None:
+            if any("eval" in h for h in ckpt.get("history", [])):
+                sys.exit(f"{ckpt_path} holds evaluation-set results but not which files they came from, so it "
+                         "cannot be resumed with certainty: start a new run (another --out)")
+            was = {"eval_sets": [], "select_by": "val", "early_stop": 0, "keep_best": False}
+        differences = evaluation_differences(was, evaluation)
+        if differences:
+            sys.exit(f"{ckpt_path} was made with another evaluation setup: {'; '.join(differences)}")
         started_from = ckpt.get("init_from", started_from)
         model.load_state_dict(ckpt["model"])
         opt.load_state_dict(ckpt["opt"])
@@ -1143,13 +1225,8 @@ def main(argv=None):
         profile(model, opt, sched, source, rng, args, device)
         return
     last_epoch = args.epochs if not args.stop_after else min(args.epochs, first_epoch + args.stop_after - 1)
-    select_by = args.select_by or "val"
-    if select_by != "val" and not (select_by.startswith("eval:") and
-                                   select_by[5:] in [os.path.basename(p) for p in args.eval_set]):
-        sys.exit(f"--select-by {select_by}: use 'val' or 'eval:NAME' with NAME one of the --eval-set files")
     if select_by == "val" and not source.n_val and (args.keep_best or args.early_stop):
         sys.exit("--keep-best/--early-stop with --select-by val need a validation set (--val > 0)")
-    best_path = (args.out[:-5] if args.out.endswith(".nnue") else args.out) + ".best.nnue"
     best = best_epoch(history, select_by)
     if args.early_stop and best and history and history[-1]["epoch"] - best["epoch"] >= args.early_stop:
         last_epoch = first_epoch - 1  # a resumed run that had already stopped early
@@ -1201,7 +1278,7 @@ def main(argv=None):
                     "epochs": args.epochs, "buckets": args.buckets, "king_buckets": args.king_buckets,
                     "activation": args.activation, **settings,
                     "data_sha256": fingerprint["sha256"], "n_train": source.n_train, "split": source.split,
-                    "init_from": started_from, "history": history},
+                    "init_from": started_from, "evaluation": evaluation, "history": history},
                    ckpt_path + ".tmp")
         os.replace(ckpt_path + ".tmp", ckpt_path)
         manifest = {
@@ -1214,9 +1291,11 @@ def main(argv=None):
             "export": {"bias_correction_positions": len(correction_sample[0]) if correction_sample else 0},
             "best": {**best, "select_by": select_by,
                      "file": os.path.basename(best_path) if args.keep_best else None} if best else None,
-            "eval_sets": [{"name": os.path.basename(p), "sha256": file_sha256(p, cache=False),
+            "selection": {k: evaluation[k] for k in ("select_by", "early_stop", "keep_best")},
+            "eval_sets": [{"name": os.path.basename(p), "sha256": overlaps[p]["eval_sha256"],
                            "records": overlaps[p]["records"],
-                           "records_in_training_data": overlaps[p]["records_in_training_data"]}
+                           "positions_in_training_data": overlaps[p]["positions_in_training_data"],
+                           "checked": overlaps[p]["checked"]}
                           for p in args.eval_set],
             "torch": torch.__version__, "device": str(device),
             "written": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
