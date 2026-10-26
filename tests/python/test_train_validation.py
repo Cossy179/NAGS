@@ -41,7 +41,7 @@ def test_the_boundary_moves_to_the_nearest_game_start(tmp_path, capsys):
     lines = ["# nags_datagen games v2 seed=1 nodes=1 format=bin search=1"]
     for g, recs in enumerate((7, 8, 9, 6)):
         lines.append(f"{g} {recs} {32 * recs} 0.5 {shards.fnv1a(bytes(32 * recs)):016x}")
-    Path(str(b) + ".games").write_text("\n".join(lines) + "\n")
+    Path(str(b) + ".games").write_bytes(("\n".join(lines) + "\n").encode())  # as nags_datagen writes it: LF
     counts = [10, 30]
     assert train.game_boundary([str(a), str(b)], counts, 10 + 13) == (10 + 15, "games")  # 13 -> start 15
     assert train.game_boundary([str(a), str(b)], counts, 10 + 26) == (10 + 24, "games")  # 26 -> start 24
