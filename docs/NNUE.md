@@ -327,7 +327,12 @@ which needs the original `.ckpt`.
 The two exports of that checkpoint, in main's engine (`b4baff0`), the
 corrected one against the plain one: SPRT [0, 10] at 3+0.03, H1 after 1664
 games (+434 =862 -368), **+13.8 ± 10.7**. That is one checkpoint, and an
-early stop overstates the estimate; a [−5, 0] check at 10+0.1 follows.
+early stop overstates the estimate. At 10+0.1 the same pair passed its
+non-regression SPRT [−5, 0]: H1 after 4486 games (+1005 =2517 -964),
+**+3.2 ± 6.1**. So the correction costs no strength at the longer time
+control, and any gain there is smaller than the 3+0.03 estimate. Network 8
+itself needs its own corrected export and SPRT against the plain network
+before anything replaces `nets/nags.nnue`.
 
 `tools/nnue/reexport.py` applies the correction to an existing checkpoint
 without training:
