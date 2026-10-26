@@ -76,3 +76,18 @@ def test_bad_selections_are_refused(tmp_path):
         r = subprocess.run([str(_datagen()), "--out", str(tmp_path / "x.bin"), "--games", "1", "--relabel-nodes", "100",
                             "--relabel-select", bad], capture_output=True, text=True, timeout=60)
         assert r.returncode == 2 and not (tmp_path / "x.bin").exists(), bad
+
+
+def test_every_run_reports_what_its_searches_cost(tmp_path):
+    import re
+    plain = _run(tmp_path / "plain.bin")
+    deeper = _run(tmp_path / "deeper.bin", "--relabel-nodes", 4000, "--relabel-select", "disagree:60")
+    game = re.search(r"searches in this run: game moves (\d+) nodes, (\d+) thread-seconds", plain)
+    assert game and int(game.group(1)) > 0 and "relabelling" not in plain
+    m = re.search(r"game moves (\d+) nodes, \d+ thread-seconds; relabelling (\d+) nodes \(([\d.]+)% of all\)", deeper)
+    assert m and m.group(1) == game.group(1)  # the same games, so the same game searches
+    chosen = re.search(r"relabelled (\d+) of \d+ positions written .*; (\d+) chosen positions dropped", deeper)
+    searches = int(chosen.group(1)) + int(chosen.group(2))
+    assert searches > 0 and int(m.group(2)) >= searches * 4000  # every deeper search ran to its node budget
+    share = 100 * int(m.group(2)) / (int(m.group(1)) + int(m.group(2)))
+    assert abs(share - float(m.group(3))) < 0.1

@@ -199,6 +199,13 @@ struct Relabeler {
 };
 
 std::atomic<long long> relabelled{0}, relabelDropped{0}, relabelChange{0};
+// What this run's searches cost, summed over the threads: nodes and microseconds of the game's moves and of
+// the deeper relabelling searches apart, so relabelling choices can be compared by the compute they take.
+std::atomic<long long> gameNodes{0}, gameMicros{0}, relabelNodes{0}, relabelMicros{0};
+
+long long microsSince(std::chrono::steady_clock::time_point t) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t).count();
+}
 
 // Whether --relabel-select picks this kept position (`score`: the game search's, side to move). The random
 // rule hashes the position and the seed, so the choice does not depend on the order games are played in.
@@ -252,7 +259,10 @@ bool playGame(const Options &o, std::mt19937_64 &rng, Searcher<FastBoard> &searc
         }
         SearchLimits limits;
         limits.nodes = o.nodes;
+        const auto started = std::chrono::steady_clock::now();
         SearchResult r = searcher.search(board, limits, stop, nullptr);
+        gameMicros += microsSince(started);
+        gameNodes += static_cast<long long>(r.nodes);
         int whiteScore = board.sideToMove() == Color::White ? r.score : -r.score;
 
         // Adjudication: a decisive score for 6 plies in a row, or a near-zero
@@ -275,7 +285,10 @@ bool playGame(const Options &o, std::mt19937_64 &rng, Searcher<FastBoard> &searc
         if (keep && relabeler && relabelChosen(o, board, r.score)) {
             SearchLimits deeper;
             deeper.nodes = o.relabelNodes;
+            const auto started = std::chrono::steady_clock::now();
             const SearchResult d = relabeler->searcher.search(board, deeper, stop, nullptr);
+            relabelMicros += microsSince(started);
+            relabelNodes += static_cast<long long>(d.nodes);
             if (std::abs(d.score) >= TB_BOUND) { // a mate or tablebase score: not kept, as in the game search
                 keep = false;
                 ++relabelDropped;
@@ -605,5 +618,17 @@ int main(int argc, char **argv) {
                                        : 0.0,
                      relabelDropped.load());
     }
+    const double gameSeconds = static_cast<double>(gameMicros.load()) / 1e6;
+    std::fprintf(stderr, "nags_datagen: searches in this run: game moves %lld nodes, %.0f thread-seconds", gameNodes.load(),
+                 gameSeconds);
+    if (o.relabelNodes) {
+        const double relabelSeconds = static_cast<double>(relabelMicros.load()) / 1e6;
+        const double allNodes = static_cast<double>(gameNodes.load() + relabelNodes.load());
+        std::fprintf(stderr, "; relabelling %lld nodes (%.1f%% of all), %.0f thread-seconds (%.1f%% of all)",
+                     relabelNodes.load(), allNodes > 0 ? 100.0 * static_cast<double>(relabelNodes.load()) / allNodes : 0.0,
+                     relabelSeconds,
+                     gameSeconds + relabelSeconds > 0 ? 100.0 * relabelSeconds / (gameSeconds + relabelSeconds) : 0.0);
+    }
+    std::fprintf(stderr, "\n");
     return 0;
 }

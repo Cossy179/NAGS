@@ -82,13 +82,27 @@ on the loaded VM, so the times are relative):
 | `disagree:200` | 16.8% | 210.7 cp | 57 s |
 | `random:0.168` | 15.6% | 66.6 cp | 54 s |
 
-At the same cost (about 2x), the disagreeing positions are the ones whose
-5000-node label the deeper search revises most, by 3.2 times the random
-ones. Whether training on them gives a stronger network is untested. The
-experiment: the same games with `disagree:200` and with `random:0.168`
-(equal compute), each trained from scratch with the same settings,
-compared on a fixed evaluation set and then by SPRT [0, 10] against each
-other.
+At about the same cost (about 2x), the disagreeing positions are the ones
+whose 5000-node label the deeper search revises most, by 3.2 times the
+random ones. Whether training on them gives a stronger network is untested.
+
+**What a run cost.** Every run ends with
+`searches in this run: game moves N nodes, S thread-seconds` and, when
+relabelling, `relabelling M nodes (x% of all), R thread-seconds (y% of
+all)`: the nodes and the time of the searches, summed over the threads,
+kept apart for the game's moves and the deeper searches (dropped ones
+included). A resumed shard reports each sitting on its own. Arms of an
+experiment are matched by these, not by the fraction of positions chosen:
+a rule that picks harder positions can cost more per search. On 300 games
+of seed 9201 (4 threads, the idle VM, 40,000 nodes): plain 104-105 game
+thread-seconds; `disagree:200` relabelled 16.2% for 180.1M nodes and
+114-120 thread-seconds (two runs) on top of 106-111 for the moves;
+`random:0.165` relabelled 16.4% for 181.4M nodes and 116 thread-seconds.
+Equal fractions cost the same here to within the timing noise, and a
+relabelled game costs about 2.2 plain ones, so the fair comparisons are
+`disagree` against `random` at equal measured relabelling cost, and either
+against plain data with about twice the games (`docs/PC_TASKS.md`,
+section 7).
 
 Where the time goes (callgrind, network 8, 5000 nodes, one thread): the
 search is 99% of the instructions; openings, filtering, packing and output
