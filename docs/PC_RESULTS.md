@@ -52,3 +52,34 @@ and a resume at 6 threads, so data from this PC and from the VM are the same gam
 Sections 3 and 4 name `runs\xm\ref.bin`, which no step creates (the repo holds only its index,
 `docs/data/ref_seed77_n5000_g400.games`). Since `runs\xm\pc.bin` holds the same 400 games (checked above),
 sections 3 and 4 use `runs\xm\pc.bin` instead.
+
+## 2. Network 8's training checkpoint (2026-10-26)
+
+Searched `D:\NAGS` and `C:\Users\Alex\Documents\code` (the round's data directory is `D:\NAGS\data`):
+
+```
+FullName                                       Length LastWriteTime
+D:\NAGS\data\net_kb4_201667886_e20.nnue.ckpt 11858755 15/10/2026 21:23:18
+```
+
+The `.nnue` next to it, `D:\NAGS\data\net_kb4_201667886_e20.nnue` (1,581,692 bytes), is byte-identical to
+`nets\nags.nnue` (SHA-256 equal). Section 4's `--check` confirms the checkpoint itself.
+
+## 3. The real quantization error of network 8 (2026-10-26)
+
+```
+$PY tools\nnue\quant_error.py --net D:\NAGS\data\net_kb4_201667886_e20.nnue.ckpt --data runs\xm\pc.bin --positions 40000 --json runs\quant_net8.json
+D:\NAGS\data\net_kb4_201667886_e20.nnue.ckpt: 37195 positions; |eval| mean 400 cp, p50 214, p99 1838
+total (float - engine): mean 9.40 cp, p50 7.48, p90 20.50, p99 32.21, max 47.13, bias +5.76, sign changes 530
+  by output bucket (mean/p99): 0: 7.89/24.9, 1: 7.33/23.2, 2: 6.69/22.8, 3: 8.35/26.0, 4: 6.95/22.8, 5: 7.35/24.1, 6: 6.72/23.4, 7: 21.01/38.6
+weights (float - rounded): mean 9.40 cp, p50 7.45, p90 20.53, p99 32.14, max 47.27, bias +5.77, sign changes 569
+  by output bucket (mean/p99): 0: 8.02/25.5, 1: 7.35/23.5, 2: 6.61/22.7, 3: 8.33/26.3, 4: 6.92/22.7, 5: 7.33/23.9, 6: 6.71/23.5, 7: 21.07/38.7
+arithmetic (rounded - engine): mean 0.51 cp, p50 0.51, p90 0.91, p99 1.00, max 1.02, bias -0.01, sign changes 0
+  by output bucket (mean/p99): 0: 0.52/1.0, 1: 0.51/1.0, 2: 0.52/1.0, 3: 0.51/1.0, 4: 0.51/1.0, 5: 0.51/1.0, 6: 0.51/1.0, 7: 0.51/1.0
+```
+
+The 400 reference games (37,195 positions, all there are; network 8 never trained on seed 77). Time: 6 s.
+Network 8 loses 9.4 cp on average to quantization, with a systematic +5.8 cp bias; nearly all of it is the
+rounding of the weights (integer arithmetic adds 0.51 cp). Output bucket 7 (the most pieces: openings) is
+much the worst, 21.0 cp mean against 6.7-8.4 for the others. For comparison, the VM measured 17.0 cp mean,
+bias +6.9 cp and arithmetic 0.51 cp on a fine-tuned derivative of network 8.
