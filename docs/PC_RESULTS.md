@@ -83,3 +83,23 @@ Network 8 loses 9.4 cp on average to quantization, with a systematic +5.8 cp bia
 rounding of the weights (integer arithmetic adds 0.51 cp). Output bucket 7 (the most pieces: openings) is
 much the worst, 21.0 cp mean against 6.7-8.4 for the others. For comparison, the VM measured 17.0 cp mean,
 bias +6.9 cp and arithmetic 0.51 cp on a fine-tuned derivative of network 8.
+
+## 4. Bias-corrected network 8 and its SPRTs (2026-10-26)
+
+```
+$PY tools\nnue\reexport.py --ckpt D:\NAGS\data\net_kb4_201667886_e20.nnue.ckpt --data runs\xm\pc.bin --positions 20000 --out nets\candidates\net8_corrected.nnue --check nets\nags.nnue
+the plain export of net_kb4_201667886_e20.nnue.ckpt is nets\nags.nnue, byte for byte
+wrote nets\candidates\net8_corrected.nnue: output biases corrected on 18597 positions
+  plain     export on 18598 other positions: float - engine 9.39 cp mean, p50 7.47, bias +5.75, sign changes 271
+  corrected export on 18598 other positions: float - engine 6.04 cp mean, p50 4.91, bias +0.00, sign changes 119
+```
+
+Time: 7 s. The checkpoint is network 8's (byte-for-byte check). The engine loads the corrected file
+(`info string NNUE evaluation: nets/candidates/net8_corrected.nnue`); its evaluation of the start position
+is 62 cp against network 8's 41 (the start position is in output bucket 7, whose quantization error is the
+largest, 21.0 cp in section 3).
+
+Launching: the template's `Start-Process`, run from the Claude app's shell, still leaves the match inside
+the app's Windows job (checked earlier with `IsProcessInJob`: such processes report `True`), so an app
+update would end it. The matches were therefore started from a `.cmd` file opened through `explorer.exe`,
+which puts them outside the job (`False`).
