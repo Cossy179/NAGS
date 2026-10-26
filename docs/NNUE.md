@@ -160,6 +160,28 @@ uses and under a name `run_round.py` does not train on (it trains on
 (tested). A loss is not a strength result: it can rule designs out, and
 matches decide.
 
+**The best epoch and early stopping** (off by default; training is
+unchanged by them, tested byte for byte). `--keep-best` also keeps the
+network of the best epoch so far as `<out without .nnue>.best.nnue`, and
+`--early-stop N` stops when the loss has not improved for N epochs. The loss
+is the validation loss, or with `--select-by eval:NAME` an evaluation set's
+overall loss, which doesn't move with the round's data. `<out>.json`
+records the best epoch, its loss and the metric. A resumed run that had
+already stopped stays stopped. The cosine schedule still runs over
+`--epochs`, so a run that stops early ends at a higher learning rate than a
+full one.
+
+**Staged screening** (`tools/nnue/screen.py`). Candidates (designs or
+settings, as train.py arguments in a JSON file) are first trained briefly
+on a subset (stage 0) and ranked on a fixed evaluation set at their best
+epoch. The best `--keep` are then trained in full with `--keep-best`
+(stage 1). Every run resumes, and `results.json` and the printed table
+hold both stages' losses. A lower loss is not more Elo: the 512-wide
+network had the lower loss and lost 48 Elo. So the tool ends by printing
+the equal-time `sprt.py` commands for the stage-1 networks. Whether stage 0
+ranks candidates the way stage 1 does is itself unmeasured; the table
+keeps both stages' losses so that can be checked as results accumulate.
+
 An evaluation set must be independent of the training data. Before
 training, each `--eval-set` is compared with the data, and the run is
 refused if the set is one of the training files (or a copy of one), if
