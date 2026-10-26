@@ -1,8 +1,9 @@
 # Tasks for the training PC
 
-A handoff from the cloud VM session (2026-10-26), for a Claude session on the Windows PC. That PC has an
-AMD Ryzen 5 3500X (6 cores, 6 threads), an RTX 3060 12 GB, 16 GB RAM, MSVC (VS 2019 Build Tools) and
-Python 3.13 with CUDA PyTorch. Everything here uses branch **`integ/round3`**, which combines all the
+A handoff from the cloud VM session (2026-10-26), for a Claude session on the Windows PC. `docs/NNUE.md`
+records that PC as an AMD Ryzen 5 3500X (6 cores, 6 threads), an RTX 3060 12 GB, 16 GB RAM, MSVC (VS 2019
+Build Tools) and Python 3.13 with CUDA PyTorch. Check the thread count, since the user mentioned 5; every
+command below takes it from `$T` (see "Threads"). Everything here uses branch **`integ/round3`**, which combines all the
 work of the last two rounds. CI is green on it on Linux, macOS and Windows; ctest 49/49 and pytest 359
 passed with none skipped on the VM. These are the tasks that need this PC's GPU, its data or its
 checkpoints. Work through them in order: each section says how long it takes, what to run, and what to
@@ -11,7 +12,7 @@ record.
 | # | Task | Time | Needs |
 |---|---|---|---|
 | 0 | Setup, build, tests, bench check | 30 min | - |
-| 1 | Cross-machine check of resumable self-play (MSVC vs the VM's GCC) | 10 min | 0 |
+| 1 | Cross-machine check of resumable self-play (MSVC vs the VM's GCC) | 5 min | 0 |
 | 2 | Find network 8's training checkpoint | minutes | - |
 | 3 | Network 8's real quantization error | 10 min | 2 |
 | 4 | Bias-corrected network 8: re-export, then SPRTs against network 8 | hours | 2 |
@@ -39,8 +40,8 @@ https://claude.ai/artifact/UgPVqJ7i1y3QBnH3shEUow and https://claude.ai/artifact
    ended when the app updated itself (`docs/NNUE.md`). Use `Start-Process` (template below), write a log,
    and check the log. Every long job here can be resumed with the same command (shards, `train.py --resume`,
    `sprt.py --resume`).
-5. **Run one CPU-heavy job at a time.** `nags_datagen --threads 6` and an SPRT with `--concurrency 5` each
-   fill the CPU; running both slows the matches and makes them noisy. GPU training can run alongside data
+5. **Run one CPU-heavy job at a time.** `nags_datagen --threads $T` and an SPRT with
+   `--concurrency $C` each fill the CPU; running both slows the matches and makes them noisy. GPU training can run alongside data
    generation, but not alongside an SPRT.
 6. **Only an SPRT decides strength.** Record every number as it was printed: games, W/D/L, Elo ± error,
    LLR, the decision. Do not replace `nets\nags.nnue`, merge to `main` or push to `main`: report, and the
@@ -51,6 +52,22 @@ https://claude.ai/artifact/UgPVqJ7i1y3QBnH3shEUow and https://claude.ai/artifact
 8. **Write nothing into an earlier round's data directory.** `train.py` caches each data file's SHA-256 as
    `<file>.sha256` next to it, so add `--no-data-cache` whenever it reads data from another round
    (section 5).
+
+**Threads.** Use every thread the CPU has:
+```powershell
+$T = [Environment]::ProcessorCount   # logical processors: 6 on a Ryzen 5 3500X
+$C = $T - 1                          # games played at once in a match
+```
+- Self-play (`nags_datagen`) uses `--threads $T`. Measured on this PC: 1,465 positions/s with 6 threads,
+  1,301 with 5, and no gain from more threads than the CPU has.
+- Matches (`sprt.py`) use `--concurrency $C`, that is $T − 1. Each game has one engine thinking at a time, so that
+  fills all but one thread; the last one stays for the runner and the clocks. Using every thread there
+  makes engines steal time from each other (`docs/TESTING.md`).
+- Training runs on the GPU; its CPU use is small once the data is in GPU memory.
+- Only two places use fewer threads, on purpose: the 4-thread match (section 8) plays one game at a time
+  so the engine has its 4 threads, and `bench` is single-threaded by definition.
+
+In a `.cmd` file or a detached command, write the number itself.
 
 Detached launch template (PowerShell). Adjust the paths; `$PY` is the venv's python:
 ```powershell
@@ -81,40 +98,31 @@ everything passes; the SIGINT funnel test is skipped on Windows by design. CUDA 
 **Record:** the four benches, the ctest and pytest summary lines, the torch version and device. **If a
 bench differs, stop and report it**, because section 1 and every shard depend on it.
 
-## 1. Cross-machine check of resumable self-play (about 10 minutes)
+## 1. Cross-machine check of resumable self-play (about 5 minutes)
 
-The VM (GCC) generated these games; the MSVC build should write the same bytes.
+The VM (GCC, Linux) generated these 400 games; its index is in the repo,
+`docs/data/ref_seed77_n5000_g400.games`. The MSVC build should play the same games, with the same
+checksum per game, at any thread count: only the order in the file depends on the threads. Generate them
+with every thread, kill the run part-way, resume it, then compare game by game:
 ```powershell
 New-Item -ItemType Directory -Force runs\xm | Out-Null
-.\build\Release\nags_datagen.exe --out runs\xm\ref.bin --nodes 5000 --seed 77 --first-game 0 --games 400 --threads 1
-Get-FileHash runs\xm\ref.bin -Algorithm SHA256
-Get-Content runs\xm\ref.bin.games -TotalCount 4
+$p = Start-Process .\build\Release\nags_datagen.exe -ArgumentList "--out runs\xm\pc.bin --nodes 5000 --seed 77 --first-game 0 --games 400 --threads $T" -PassThru
+Start-Sleep 15; Stop-Process -Id $p.Id -Force       # a hard kill mid-run
+.\build\Release\nags_datagen.exe --out runs\xm\pc.bin --nodes 5000 --seed 77 --first-game 0 --games 400 --threads $T
+& $PY tools\nnue\shards.py check runs\xm\pc.bin --checksums all
+& $PY -c "import sys; sys.path.insert(0,'tools/nnue'); import shards; ref=[l.split() for l in open('docs/data/ref_seed77_n5000_g400.games').read().splitlines()[1:]]; r={int(x[0]):(x[1],x[2],x[4]) for x in ref}; h,g=shards.read_index('runs/xm/pc.bin'); p={x.number:(str(x.records),str(x.bytes),x.checksum) for x in g}; bad=sorted(k for k in r if r[k]!=p.get(k)); print('games', len(p), 'identical to the VM:', not bad, 'first differing game:', bad[:1]); print('header equal:', h==open('docs/data/ref_seed77_n5000_g400.games').readline().rstrip())"
 ```
-**Expected:** SHA-256 `5DAE2E861C56CA106CA768811DB80B25DAE5C3B2E0654DC698B1DB2B48AE7674`, size
-1,190,240 bytes, 401 index lines, and these first lines:
+**Expected:** the resume prints `N already written, 400-N to play`; `shards.py check` prints
+`1 shard(s), 400 games: consistent`; the comparison prints
+`games 400 identical to the VM: True first differing game: []` and `header equal: True`. The header is:
 ```
 # nags_datagen games v2 seed=77 nodes=5000 random-plies=8 max-opening-score=400 hash=16 repetition=first format=bin network=embedded network-fnv=c7c60e3d6a52e155 search=1528850
-0 43 1376 0.5 a4a4a4a9b6abc059
-1 68 2176 0.5 3b48d62d94d7bfa5
-2 35 1120 1 b9d5ee8dbb7b8bf7
 ```
-Then the same games with 6 threads, killed part-way and resumed. They should be the same games in
-another order:
-```powershell
-$p = Start-Process .\build\Release\nags_datagen.exe -ArgumentList "--out runs\xm\six.bin --nodes 5000 --seed 77 --first-game 0 --games 400 --threads 6" -PassThru
-Start-Sleep 20; Stop-Process -Id $p.Id -Force       # a hard kill mid-run
-.\build\Release\nags_datagen.exe --out runs\xm\six.bin --nodes 5000 --seed 77 --first-game 0 --games 400 --threads 6
-& $PY tools\nnue\shards.py check runs\xm\ref.bin runs\xm\six.bin --checksums all
-```
-**Expected:** the resume prints `N already written, 400-N to play`. `shards.py check` reports
-`game 0 of seed 77 is in both ...` for all 400 games. That is the duplicate detection working, since both
-files hold the same games. To confirm they are identical, compare checksums by game number:
-```powershell
-& $PY -c "import sys; sys.path.insert(0,'tools/nnue'); import shards; a={g.number:g.checksum for g in shards.read_index('runs/xm/ref.bin')[1]}; b={g.number:g.checksum for g in shards.read_index('runs/xm/six.bin')[1]}; print(len(a), len(b), a==b)"
-```
-Expected `400 400 True`. **Record:** the hash, the header line, the kill point, and the comparison. If the
-hash differs, find the first game whose checksum differs and report it with its index line; don't go on
-to section 6 until that's understood.
+**Record:** the kill point (`N`), the time, and both comparison lines. If a game differs, rerun with
+`--threads 1` into another file: with one thread the file is in game order, and the VM's single-thread
+file had SHA-256 `5DAE2E861C56CA106CA768811DB80B25DAE5C3B2E0654DC698B1DB2B48AE7674` (1,190,240 bytes).
+Report the first differing game's index line from both. Don't go on to section 6 until it's understood:
+data from this PC and from the VM must be the same games for the same seed.
 
 ## 2. Find network 8's training checkpoint (minutes)
 
@@ -155,7 +163,7 @@ the plain and the corrected export on 20,000 other positions. **Record:** both l
 Then the match. Both sides are `integ/round3`'s `nags_enhanced.exe`; the base plays its embedded network 8.
 Run it detached (template above):
 ```
-tools\sprt.py --engine build\Release\nags_enhanced.exe --engine build\Release\nags_enhanced.exe --name net8-corrected --name net8 --option1 EvalFile=nets\candidates\net8_corrected.nnue --tc 3+0.03 --sprt 0 10 --games 8000 --concurrency 5 --openings tools\openings\nags_balanced.epd --resign-adjudication 4 1000 --pgnout runs\net8c_stc.pgn
+tools\sprt.py --engine build\Release\nags_enhanced.exe --engine build\Release\nags_enhanced.exe --name net8-corrected --name net8 --option1 EvalFile=nets\candidates\net8_corrected.nnue --tc 3+0.03 --sprt 0 10 --games 8000 --concurrency $C --openings tools\openings\nags_balanced.epd --resign-adjudication 4 1000 --pgnout runs\net8c_stc.pgn
 ```
 Log: `runs\net8c_stc.log`. It starts with a `Fingerprint:` line. The preflight refuses to start if the
 `EvalFile` doesn't load. Expect a few hours; 8000 games at most.
@@ -194,13 +202,13 @@ still 1.
 Question: does starting from network 8's weights (`--init-from`) on new data give a network at least as
 strong as training from scratch, in less GPU time?
 
-**6a. New data (about 20 hours of CPU, resumable).** Make a new directory `R9` on the data drive (for
+**6a. New data (about 20 hours with 6 threads, 22 with 5; resumable).** Make a new directory `R9` on the data drive (for
 example `D:\NAGS\r9`). In it, generate eight shards of 150,000 games with seeds never used for training
 (9101–9108), about 104M positions, plus a fixed evaluation set from seed 9999:
 ```
-.\build\Release\nags_datagen.exe --out R9\selfplay_9101.bin --seed 9101 --first-game 0 --games 150000 --threads 6
+.\build\Release\nags_datagen.exe --out R9\selfplay_9101.bin --seed 9101 --first-game 0 --games 150000 --threads $T
 ... the same for 9102 to 9108, one after the other ...
-.\build\Release\nags_datagen.exe --out R9\evalset_9999.bin --seed 9999 --first-game 0 --games 3000 --threads 6
+.\build\Release\nags_datagen.exe --out R9\evalset_9999.bin --seed 9999 --first-game 0 --games 3000 --threads $T
 ```
 Run them as one detached `.cmd` that loops over the seeds. After a stop, run the same `.cmd` again: each
 shard resumes from its index, and finished ones report `150000 already written, 0 to play`. Then:
@@ -229,7 +237,7 @@ and the validation loss.
 **6c. Matches (hours each, one at a time).** Each network at its best epoch (`R9\X.best.nnue`) against
 network 8, then the warm runs against scratch:
 ```
-tools\sprt.py --engine build\Release\nags_enhanced.exe --engine build\Release\nags_enhanced.exe --name A --name net8 --option1 EvalFile=R9\A_scratch_e20.best.nnue --tc 3+0.03 --sprt 0 10 --games 8000 --concurrency 5 --openings tools\openings\nags_balanced.epd --resign-adjudication 4 1000
+tools\sprt.py --engine build\Release\nags_enhanced.exe --engine build\Release\nags_enhanced.exe --name A --name net8 --option1 EvalFile=R9\A_scratch_e20.best.nnue --tc 3+0.03 --sprt 0 10 --games 8000 --concurrency $C --openings tools\openings\nags_balanced.epd --resign-adjudication 4 1000
 (the same for B and C)
 tools\sprt.py ... --name B --name A --option1 EvalFile=R9\B_warm_e20.best.nnue --option2 EvalFile=R9\A_scratch_e20.best.nnue --sprt -5 5 --games 8000 ...
 tools\sprt.py ... --name C --name A --option1 EvalFile=R9\C_warm_e10.best.nnue --option2 EvalFile=R9\A_scratch_e20.best.nnue --sprt -5 5 --games 8000 ...
@@ -247,8 +255,8 @@ more (`disagree:200`) are 16.8% of positions. Relabelling them with 40,000 nodes
 train a better network is untested. Use the same seeds as three of the section 6 shards, so the games are
 identical and only the labels differ:
 ```
-.\build\Release\nags_datagen.exe --out R9\relabel_dis\selfplay_9101.bin --seed 9101 --first-game 0 --games 150000 --threads 6 --relabel-nodes 40000 --relabel-select disagree:200
-.\build\Release\nags_datagen.exe --out R9\relabel_rnd\selfplay_9101.bin --seed 9101 --first-game 0 --games 150000 --threads 6 --relabel-nodes 40000 --relabel-select random:<FRACTION>
+.\build\Release\nags_datagen.exe --out R9\relabel_dis\selfplay_9101.bin --seed 9101 --first-game 0 --games 150000 --threads $T --relabel-nodes 40000 --relabel-select disagree:200
+.\build\Release\nags_datagen.exe --out R9\relabel_rnd\selfplay_9101.bin --seed 9101 --first-game 0 --games 150000 --threads $T --relabel-nodes 40000 --relabel-select random:<FRACTION>
 (seeds 9101–9103 for both)
 ```
 Take `<FRACTION>` from the end line of the `disagree` run (`relabelled X of Y positions (Z%)`), so that
@@ -263,7 +271,7 @@ The VM measured that Threads=2 against 1 gives +107.5 ± 14.0, and that double t
 So a second thread is worth about 65% of a time doubling. The 6-core PC can measure 4 threads:
 ```
 tools\sprt.py --engine build\Release\nags_enhanced.exe --engine build\Release\nags_enhanced.exe --name threads4 --name threads1 --option1 Threads=4 --tc 3+0.03 --concurrency 1 --games 1000 --openings tools\openings\nags_balanced.epd --resign-adjudication 4 1000
-tools\sprt.py ... --name time4x --name time1x --tc1 12+0.12 --tc2 3+0.03 --concurrency 5 --games 1000 ...
+tools\sprt.py ... --name time4x --name time1x --tc1 12+0.12 --tc2 3+0.03 --concurrency $C --games 1000 ...
 ```
 **Record:** both results, and the nodes per second at 1 and 4 threads (`go movetime 4000` from a few
 positions).
@@ -275,4 +283,4 @@ For each: the commands as run (with the real paths), the printed results (copied
 anything that failed or differed from "Expected" and what was done about it, and the time taken. Push
 after each section. When an SPRT finishes, also add its row in the strength-log format of
 `docs/TESTING.md`, for example:
-`| what | SPRT [0, 10], 3+0.03, 5 at a time on the Windows PC | H1 after N games (+W =D -L) | +x ± y | bench |`.
+`| what | SPRT [0, 10], 3+0.03, <concurrency> at a time on the Windows PC | H1 after N games (+W =D -L) | +x ± y | bench |`.
