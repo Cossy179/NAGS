@@ -120,13 +120,17 @@ def test_a_damaged_index_or_other_settings_are_refused_untouched(tmp_path):
     part = tmp_path / "part.bin"
     _run(part, "--first-game", 0, "--games", 4, "--threads", 1)
     index = Path(str(part) + ".games")
-    data, lines = part.read_bytes(), index.read_text().splitlines(keepends=True)
-    for broken in (lines[:2] + ["garbage\n"] + lines[3:], lines[:3] + [lines[1]] + lines[3:]):  # damaged, duplicate
-        index.write_text("".join(broken))
+    data, lines = part.read_bytes(), index.read_bytes().splitlines(keepends=True)
+    for broken in (lines[:2] + [b"garbage\n"] + lines[3:], lines[:3] + [lines[1]] + lines[3:]):  # damaged, duplicate
+        index.write_bytes(b"".join(broken))
         bad = _run(part, "--first-game", 0, "--games", 4, check=False)
         assert bad.returncode == 2 and "damaged line" in bad.stderr
-        assert part.read_bytes() == data and index.read_text() == "".join(broken)
-    index.write_text("".join(lines))
+        assert part.read_bytes() == data and index.read_bytes() == b"".join(broken)
+    # An index saved with Windows line endings reads the same (nothing to replay).
+    index.write_bytes(b"".join(l.replace(b"\n", b"\r\n") for l in lines))
+    assert "4 already written, 0 to play" in _run(part, "--first-game", 0, "--games", 4).stderr
+    assert [g.number for g in shards.read_index(part)[1]] == [0, 1, 2, 3] and part.read_bytes() == data
+    index.write_bytes(b"".join(lines))
     bad = subprocess.run([str(_datagen()), "--out", str(part), "--nodes", "400", "--seed", "11", "--first-game", "0",
                           "--games", "4"], capture_output=True, text=True, timeout=600)
     assert bad.returncode == 2 and "other settings" in bad.stderr and part.read_bytes() == data

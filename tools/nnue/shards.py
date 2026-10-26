@@ -37,7 +37,7 @@ def read_index(data_path):
     Raises ValueError for a missing or foreign header, a damaged line or a game listed twice."""
     with open(index_path(data_path), "rb") as fh:
         text = fh.read().decode("ascii", errors="replace")
-    lines = text.split("\n")[:-1]  # the part after the last newline is unfinished
+    lines = [l[:-1] if l.endswith("\r") else l for l in text.split("\n")[:-1]]  # after the last newline: unfinished
     if not lines or not lines[0].startswith(HEADER):
         raise ValueError(f"{index_path(data_path)}: not a nags_datagen shard index (v2)")
     games, seen, offset = [], set(), 0

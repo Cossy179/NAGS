@@ -370,7 +370,11 @@ bool prepareShard(const Options &o, const std::string &indexPath, long long &res
         resumedGames = 0;
         return true;
     }
-    const std::string header = text.substr(0, headerEnd);
+    // A line may end in "\r\n" (an index edited on Windows): the '\r' is not part of it.
+    const auto line = [&](size_t from, size_t to) {
+        return text.substr(from, to > from && text[to - 1] == '\r' ? to - 1 - from : to - from);
+    };
+    const std::string header = line(0, headerEnd);
     if (header != shardHeader(o)) {
         std::cerr << indexPath << " was written with other settings, network or search:\n  " << header << "\nnow\n  "
                   << shardHeader(o) << "\n(use another --out, or the same settings and build)\n";
@@ -381,8 +385,8 @@ bool prepareShard(const Options &o, const std::string &indexPath, long long &res
     size_t pos = headerEnd + 1;
     for (size_t end; (end = text.find('\n', pos)) != std::string::npos; pos = end + 1) {
         IndexEntry e;
-        if (!parseIndexLine(o, text.substr(pos, end - pos), e) || !seen.insert(e.game).second) {
-            std::cerr << indexPath << ": damaged line " << entries.size() + 2 << " ('" << text.substr(pos, end - pos)
+        if (!parseIndexLine(o, line(pos, end), e) || !seen.insert(e.game).second) {
+            std::cerr << indexPath << ": damaged line " << entries.size() + 2 << " ('" << line(pos, end)
                       << "'): not touching the shard\n";
             return false;
         }
