@@ -27,9 +27,10 @@ settings are written as one "Fingerprint:" line. An engine that cannot be starte
 the match invalid (exit 3, no decision): a failed launch is not a game. An engine that crashes, hangs,
 plays an illegal move or loses on time during a game loses that game, and the "Forfeits:" line counts
 these per engine. --resume refuses a log whose fingerprint names other engines or settings; a log with a
-fingerprint and no status line yet (stopped in the first seconds) resumes at zero games. An earlier match's
-games are never overwritten: a --pgnout file that already holds games is refused unless --resume continues
-that match.
+fingerprint and no status line yet (stopped in the first seconds) resumes at zero games, a log with neither
+(missing, empty) starts the match, and an SPRT the log shows decided reports its decision without playing on,
+so a command naming its own log with --resume can simply be run again. An earlier match's games are never
+overwritten: a --pgnout file that already holds games is refused unless --resume continues that match.
 
 Exit status: 0 = H1 accepted (or the fixed-length match finished),
 1 = H0 accepted, 2 = maximum games reached without a decision, 3 = error (no decision),
@@ -674,6 +675,11 @@ class Match:
             raise ValueError("inconsistent status line")
         self.next_pair = self.penta.pairs
         self.resumed = True
+        if self.sprt:  # an SPRT that had already decided reports its decision without playing on
+            llr = self.penta.llr(*self.sprt)
+            self.decision = "H1" if llr >= self.bounds[1] else "H0" if llr <= self.bounds[0] else None
+            if self.decision:
+                self.stop.set()
 
     def run(self, report_interval: float = 10.0) -> int:
         # An earlier match's games are never overwritten: only a resumed match adds to its PGN.
@@ -798,7 +804,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--report", type=float, default=10.0, help="seconds between status lines")
     ap.add_argument("--resume", metavar="LOG",
                     help="continue an interrupted match from the last status line in its output (same engines, "
-                         "settings and --seed); games are appended to --pgnout")
+                         "settings and --seed); games are appended to --pgnout. A LOG with nothing to resume (missing, "
+                         "or no fingerprint or status line) starts the match; a decided SPRT reports its decision")
     ap.add_argument("--force-resume", action="store_true",
                     help="resume even if the log's fingerprint names other engines or settings (the games of "
                          "both are then mixed in one result)")
@@ -825,7 +832,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except (ValueError, OSError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 3
-    if args.pgnout and not args.resume and pgn_has_games(args.pgnout):
+    # --resume LOG continues the match recorded in LOG. A log without a fingerprint or a status line (missing,
+    # empty, or a launch that failed before the first game) holds nothing to resume: the match starts, so a
+    # command that always names its own log can be run again to continue.
+    log: Optional[List[str]] = None
+    if args.resume:
+        try:
+            with open(args.resume) as f:
+                log = f.readlines()
+        except FileNotFoundError:
+            log = []
+        except OSError as e:
+            print(f"ERROR: --resume: {e}", file=sys.stderr)
+            return 3
+        if not any(l.startswith("Fingerprint: ") or (l.startswith("Games ") and _STATUS_LINE.search(l))
+                   for l in log):
+            print(f"Nothing to resume in {args.resume}: starting the match", flush=True)
+            log = None
+    if args.pgnout and log is None and pgn_has_games(args.pgnout):
         print(f"ERROR: --pgnout {args.pgnout} already holds games: continue that match with --resume LOG, or "
               "write to another file (an earlier match's games are never overwritten)", file=sys.stderr)
         return 3
@@ -856,17 +880,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                      "games": args.games, "concurrency": args.concurrency},
         "runner_sha256": file_sha256(__file__), "python_chess": chess.__version__,
     }
-    if args.resume:
+    if log is not None:
         try:
-            with open(args.resume) as f:
-                log = f.readlines()
             # The last complete status line: a runner killed while writing one leaves it cut off.
             lines = [l for l in log if l.startswith("Games ") and _STATUS_LINE.search(l)]
-            if lines or not any(l.startswith("Fingerprint: ") for l in log):
-                match.resume(lines[-1] if lines else "")
+            if lines:
+                match.resume(lines[-1])
             else:  # stopped before its first status line: no game counted yet, its PGN is continued
                 match.resumed = True
-        except (ValueError, OSError) as e:
+        except ValueError as e:
             print(f"ERROR: --resume: {e}", file=sys.stderr)
             return 3
         earlier = [l for l in log if l.startswith("Fingerprint: ")]

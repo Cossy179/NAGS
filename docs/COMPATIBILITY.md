@@ -110,8 +110,11 @@ cap line and exit 2) and its `Fingerprint:` and `Forfeits:` lines are
 additions; a log without a fingerprint resumes as before. **Changed on
 purpose:** a `--pgnout` file that already holds games is refused unless
 `--resume` is given (it used to be emptied), also by the `Match` class
-that `calibrate.py` and `ladder.py` use; a log with a fingerprint and no
-status line resumes at zero games (it used to be an error).
+that `calibrate.py` and `ladder.py` use; with `--resume`, a log with a
+fingerprint and no status line resumes at zero games, a log with neither
+(or none) starts the match, and a decided SPRT reports its decision
+without playing on (the first two used to be errors, the last played one
+more pair).
 `reexport.py --out` and `quant_error.py --json` refuse an existing file.
 
 ### GNN side (`chess_graph.py`, `gnn_evaluator.py`, `rpc_server.py`)
