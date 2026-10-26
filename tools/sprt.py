@@ -26,7 +26,10 @@ a legal move from a one-ply search), and the engines, the network each one repor
 settings are written as one "Fingerprint:" line. An engine that cannot be started, then or later, makes
 the match invalid (exit 3, no decision): a failed launch is not a game. An engine that crashes, hangs,
 plays an illegal move or loses on time during a game loses that game, and the "Forfeits:" line counts
-these per engine. --resume refuses a log whose fingerprint names other engines or settings.
+these per engine. --resume refuses a log whose fingerprint names other engines or settings; a log with a
+fingerprint and no status line yet (stopped in the first seconds) resumes at zero games. An earlier match's
+games are never overwritten: a --pgnout file that already holds games is refused unless --resume continues
+that match.
 
 Exit status: 0 = H1 accepted (or the fixed-length match finished),
 1 = H0 accepted, 2 = maximum games reached without a decision, 3 = error (no decision),
@@ -591,6 +594,7 @@ class Match:
         self.forfeits: Dict[Tuple[str, str], int] = {}  # (engine, kind) -> games lost so
         self.decision: Optional[str] = None
         self.errors: List[str] = []
+        self.resumed = False  # continues an earlier run of this match (its PGN is added to)
 
     def _claim_pair(self) -> Optional[int]:
         with self.lock:
@@ -672,8 +676,9 @@ class Match:
         self.resumed = True
 
     def run(self, report_interval: float = 10.0) -> int:
-        if self.pgnout and not getattr(self, "resumed", False):
-            open(self.pgnout, "w").close()
+        # An earlier match's games are never overwritten: only a resumed match adds to its PGN.
+        if self.pgnout and not self.resumed and pgn_has_games(self.pgnout):
+            raise FileExistsError(f"{self.pgnout} already holds games: resume that match, or write elsewhere")
         threads = [threading.Thread(target=self._worker, daemon=True) for _ in range(self.concurrency)]
         for t in threads:
             t.start()
@@ -722,6 +727,10 @@ class Match:
 
 # ----------------------------------------------------------------------------
 # Command line
+
+
+def pgn_has_games(path: str) -> bool:
+    return os.path.exists(path) and os.path.getsize(path) > 0
 
 
 def fingerprint_differences(old: Dict[str, Any], new: Dict[str, Any]) -> List[str]:
@@ -783,7 +792,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--resign-adjudication", nargs=2, type=int, metavar=("COUNT", "SCORE"),
                     help="decide the game if both engines agree on |score| >= SCORE cp for COUNT moves each")
     ap.add_argument("--max-plies", type=int, default=400, help="adjudicate a draw after this many plies")
-    ap.add_argument("--pgnout", help="write all games to this PGN file")
+    ap.add_argument("--pgnout", help="write all games to this PGN file (a file that already holds games is "
+                                     "refused, except by --resume)")
     ap.add_argument("--seed", type=int, default=1, help="seed for the opening order")
     ap.add_argument("--report", type=float, default=10.0, help="seconds between status lines")
     ap.add_argument("--resume", metavar="LOG",
@@ -814,6 +824,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         openings = load_openings(args.openings, args.plies)
     except (ValueError, OSError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
+        return 3
+    if args.pgnout and not args.resume and pgn_has_games(args.pgnout):
+        print(f"ERROR: --pgnout {args.pgnout} already holds games: continue that match with --resume LOG, or "
+              "write to another file (an earlier match's games are never overwritten)", file=sys.stderr)
         return 3
 
     adj = Adjudication(max_plies=args.max_plies)
@@ -848,7 +862,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 log = f.readlines()
             # The last complete status line: a runner killed while writing one leaves it cut off.
             lines = [l for l in log if l.startswith("Games ") and _STATUS_LINE.search(l)]
-            match.resume(lines[-1] if lines else "")
+            if lines or not any(l.startswith("Fingerprint: ") for l in log):
+                match.resume(lines[-1] if lines else "")
+            else:  # stopped before its first status line: no game counted yet, its PGN is continued
+                match.resumed = True
         except (ValueError, OSError) as e:
             print(f"ERROR: --resume: {e}", file=sys.stderr)
             return 3

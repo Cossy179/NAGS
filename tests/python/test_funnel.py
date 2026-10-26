@@ -77,6 +77,20 @@ def test_a_stopped_stage_is_resumed(tmp_path, capsys):
 
 
 @needs_engines
+def test_a_stage_stopped_before_its_first_status_line_is_resumed_with_its_games(tmp_path, capsys):
+    assert _run(tmp_path, _engine("nags_fast"), _engine("nags_basic"), *WIDE[:2]) == 0
+    capsys.readouterr()
+    log, pgn = tmp_path / "f" / "first.log", tmp_path / "f" / "first.pgn"
+    text = log.read_text()
+    log.write_text(text[: text.index("\nGames ") + 1])  # the fingerprint, no status line; the PGN holds games
+    games = pgn.read_text()
+    assert funnel.stage_status(log) is None and games
+    assert _run(tmp_path, _engine("nags_fast"), _engine("nags_basic"), *WIDE[:2]) == 0
+    assert "Resuming after 0 games" in capsys.readouterr().out and funnel.stage_status(log)["decision"] == "H1"
+    assert pgn.read_text().startswith(games)  # kept, not overwritten
+
+
+@needs_engines
 def test_a_rejected_candidate_stops_at_that_stage(tmp_path, capsys):
     assert _run(tmp_path, _engine("nags_basic"), _engine("nags_fast"), *WIDE) == 1
     assert not (tmp_path / "f" / "second.log").exists()

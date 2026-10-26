@@ -259,7 +259,13 @@ How the runner works:
   match and did not resume it; it now says "Match interrupted after N games".)
 * An interrupted match continues with `--resume <its output>` (same engines,
   settings and `--seed`): the counts are restored from the last status line
-  and play goes on with the next opening pair.
+  and play goes on with the next opening pair. A log with a fingerprint but
+  no status line yet (stopped in its first seconds) resumes at zero games.
+* An earlier match's games are never overwritten: a `--pgnout` file that
+  already holds games is refused (exit 3, before any engine starts) unless
+  `--resume` continues that match, which adds to it. (Before, a rerun
+  without `--resume` emptied it.) `funnel.py` and `hybrid_eval.py` resume
+  any stage whose log has a fingerprint.
 * Before the first game each engine is started once (a preflight): the UCI
   handshake, every option known and set without a complaint (an `EvalFile`
   the engine cannot load fails here), `isready`, and a legal move from a

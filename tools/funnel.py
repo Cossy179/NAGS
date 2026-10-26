@@ -151,7 +151,9 @@ def run_stage(stage: Dict[str, Any], plan: Dict[str, Any], args: argparse.Namesp
            "--concurrency", str(args.concurrency), "--sprt", f"{stage['elo0']:g}", f"{stage['elo1']:g}",
            "--games", str(stage["games"]), "--resign-adjudication", "4", "1000",
            "--pgnout", str(out / f"{stage['name']}.pgn"), "--report", str(args.report)]
-    if done:  # stopped part-way: continue from its last status line
+    # Stopped part-way: continue from its last status line, or from zero games if it stopped before the first
+    # one (its PGN may hold games already, which only a resume adds to).
+    if done or (log.exists() and "\nFingerprint: " in "\n" + log.read_text(errors="replace")):
         part = log.with_suffix(".part")
         shutil.copyfile(log, part)
         cmd += ["--resume", str(part)]

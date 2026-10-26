@@ -38,6 +38,8 @@ def main(argv=None):
     ap.add_argument("--check", metavar="NNUE", help="refuse unless the plain export equals this network")
     ap.add_argument("--seed", type=int, default=1)
     args = ap.parse_args(argv)
+    if os.path.exists(args.out):
+        sys.exit(f"{args.out} already exists: choose another --out (an existing network is never overwritten)")
 
     model = quant_error.load_float(args.ckpt)
     paths = train.expand_paths(args.data)

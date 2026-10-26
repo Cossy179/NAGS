@@ -36,3 +36,15 @@ def test_reexport_corrects_only_the_output_biases(tmp_path, capsys):
         reexport.main(["--ckpt", str(net) + ".ckpt", "--data", data, "--out", str(tmp_path / "x.nnue"), "--check",
                        str(other)])
     assert not (tmp_path / "x.nnue").exists()
+    # An existing file is never overwritten (here: the network the checkpoint was exported to).
+    before = net.read_bytes()
+    with pytest.raises(SystemExit, match="already exists"):
+        reexport.main(["--ckpt", str(net) + ".ckpt", "--data", data, "--out", str(net), "--check", str(net)])
+    assert net.read_bytes() == before
+    # Fewer positions than asked for: all are used, and it says so.
+    capsys.readouterr()
+    assert reexport.main(["--ckpt", str(net) + ".ckpt", "--data", data, "--out", str(tmp_path / "all.nnue"),
+                          "--positions", "100000"]) == 0
+    text = capsys.readouterr().out
+    assert "the data holds 800 positions, fewer than the 200000 asked for" in text
+    assert "corrected on 400 positions" in text and "on 400 other positions" in text
