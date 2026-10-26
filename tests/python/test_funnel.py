@@ -146,6 +146,8 @@ def test_how_a_stage_ended_is_read_from_its_log(tmp_path, monkeypatch, code, lin
 
 
 @needs_engines
+@pytest.mark.skipif(os.name == "nt", reason="sends SIGINT to a POSIX process group (Ctrl-C); the resume logic is "
+                                            "tested on every platform by the fake-log test above")
 def test_an_interrupted_funnel_resumes_where_it_stopped(tmp_path):
     cmd = [sys.executable, str(ROOT / "tools" / "funnel.py"), "--name", "cand", "--candidate", _engine("nags_fast"),
            "--base", _engine("nags_basic"), "--dir", str(tmp_path / "f"), "--concurrency", "1", "--report", "0.5",
