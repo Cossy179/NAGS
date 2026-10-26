@@ -30,3 +30,25 @@ Build: `cmake -B build`, `cmake --build build --config Release --parallel` (32 s
 All as expected. The two Windows-only failures seen on `main` (`test_sprt.py::test_engine_paths_stay_whole`,
 `test_ladder.py::test_anchor_and_rate`) pass on `integ/round3`. Time: about 30 minutes, mostly pytest and the
 LFS detour.
+
+## 1. Cross-machine check of resumable self-play (2026-10-26)
+
+As in `docs/PC_TASKS.md` with `$T` = 6: `nags_datagen --out runs\xm\pc.bin --nodes 5000 --seed 77 --first-game 0
+--games 400 --threads 6` started with `Start-Process`, killed with `Stop-Process -Force` after 15 s (the file
+had 971,616 bytes), then the same command again.
+
+```
+nags_datagen: games 0-399, 323 already written, 77 to play
+nags_datagen: evaluation NNUE embedded
+1 shard(s), 400 games: consistent
+games 400 identical to the VM: True first differing game: []
+header equal: True
+# nags_datagen games v2 seed=77 nodes=5000 random-plies=8 max-opening-score=400 hash=16 repetition=first format=bin network=embedded network-fnv=c7c60e3d6a52e155 search=1528850
+```
+
+Kill point N = 323. Time: 19 s in all. The MSVC build plays the VM's (GCC) games exactly, across a hard kill
+and a resume at 6 threads, so data from this PC and from the VM are the same games for the same seed.
+
+Sections 3 and 4 name `runs\xm\ref.bin`, which no step creates (the repo holds only its index,
+`docs/data/ref_seed77_n5000_g400.games`). Since `runs\xm\pc.bin` holds the same 400 games (checked above),
+sections 3 and 4 use `runs\xm\pc.bin` instead.
