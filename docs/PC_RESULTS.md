@@ -103,3 +103,25 @@ Launching: the template's `Start-Process`, run from the Claude app's shell, stil
 the app's Windows job (checked earlier with `IsProcessInJob`: such processes report `True`), so an app
 update would end it. The matches were therefore started from a `.cmd` file opened through `explorer.exe`,
 which puts them outside the job (`False`).
+
+The match, from `runs\net8c_stc.cmd` (opened through `explorer.exe`; `--concurrency 5`), as in the plan:
+```
+tools\sprt.py --engine build\Release\nags_enhanced.exe --engine build\Release\nags_enhanced.exe --name net8-corrected --name net8 --option1 EvalFile=nets\candidates\net8_corrected.nnue --tc 3+0.03 --sprt 0 10 --games 8000 --concurrency 5 --openings tools\openings\nags_balanced.epd --resign-adjudication 4 1000 --pgnout runs\net8c_stc.pgn
+```
+The fingerprint line names the corrected file for `net8-corrected` (`eval 62 ... nnue nets\candidates\net8_corrected.nnue`,
+eval_file_sha256 `a2b816bc...`) and the embedded network for `net8` (`eval 41`), both with engine SHA-256
+`e8979c06...`. Final lines (21:55 to 22:37, 42 minutes):
+```
+Games 1770: +406 =943 -421 | penta [34, 214, 404, 199, 34] | Elo -2.9 ± 10.1 | LLR -2.99 [-2.94, 2.94] for [0, 10]
+Endings: threefold_repetition 672, adjudication: black resigns 422, adjudication: white resigns 396, fifty_moves 135, insufficient_material 124, checkmate 8, adjudication: max plies 8, stalemate 4, net8-corrected lost on time 1
+Forfeits: net8-corrected: 1 lost on time
+H0 accepted: net8-corrected is not stronger by 10 Elo
+```
+
+**H0.** On network 8 the bias correction removes the export's bias and a third of its error (9.39 to 6.04 cp)
+but does not play better: −2.9 ± 10.1. So the 10+0.1 check was not run, and nothing changes. The VM's
++13.8 ± 10.7 was on a fine-tuned derivative of network 8, whose quantization error was larger (17.0 cp mean).
+
+| Change | Test | Result | Elo | Bench |
+|--------|------|--------|-----|-------|
+| Bias-corrected export of network 8 (`tools/nnue/reexport.py`: output biases corrected on 18,597 positions of seed 77; float-to-engine error 6.04 cp instead of 9.39, bias 0) vs network 8 | SPRT [0, 10], 3+0.03, 5 at a time on the Windows PC | H0 after 1770 games (+406 =943 -421; 1 loss on time by the corrected network) | −2.9 ± 10.1 | – (not adopted) |
