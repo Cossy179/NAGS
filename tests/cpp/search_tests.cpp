@@ -196,6 +196,13 @@ static void testSearch(TranspositionTable *tt, const char *label) {
     r = searchFen<B>("4K3/8/1Q6/8/8/5p2/5r2/7k w - - 0 1", 1, tt);
     CHECK(moveToUciString(r.bestMove) != "b6f2" && r.score > 0, "%s: quiescence missed a stalemate (%s, %d)", label,
           moveToUciString(r.bestMove).c_str(), r.score);
+    // The same with a piece left: Kxg6 and hxg6 win the rook and stalemate
+    // Black, whose knight is pinned on the long diagonal (python-chess
+    // agrees). At depth 1 quiescence used to stand pat on the material.
+    r = searchFen<B>("7k/5Kn1/6r1/7P/8/8/QB6/8 w - - 0 1", 1, tt);
+    CHECK(moveToUciString(r.bestMove) != "f7g6" && moveToUciString(r.bestMove) != "h5g6" && r.score > 0,
+          "%s: quiescence missed a stalemate with a pinned knight (%s, %d)", label, moveToUciString(r.bestMove).c_str(),
+          r.score);
 
     // Win the hanging queen.
     r = searchFen<B>("4k3/8/8/3q4/8/8/8/3QK3 w - - 0 1", 4, tt);

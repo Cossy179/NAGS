@@ -1158,9 +1158,11 @@ private:
 
         bool inCheck = board.inCheck();
         // Stalemate: outside check, quiescence would stand pat on the
-        // evaluation of a drawn position. It happens to a side with only its
-        // king and pawns; only then are the legal moves generated.
-        if (!inCheck && !hasNonPawnMaterial(board.sideToMove()) && board.generateLegalMoves().empty()) {
+        // evaluation of a drawn position. Whether any move exists is mostly
+        // settled by one piece that cannot be pinned and has a square to go
+        // to (see hasLegalMoveOutsideCheck); the moves are generated only
+        // for a side whose pieces are all blocked or possibly pinned.
+        if (!inCheck && !hasLegalMoveOutsideCheck(board)) {
             NAGS_STAT(++stats.qStalemates);
             return 0;
         }

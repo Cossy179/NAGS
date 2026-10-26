@@ -51,6 +51,10 @@ inline const std::vector<std::string> &positions() {
         "6k1/5p1p/6p1/8/8/1P4P1/5PKP/8 w - - 0 1",
         "8/3k4/8/3N4/8/8/3BK3/8 w - - 0 1",
         "4k3/8/8/8/8/8/8/4K2Q w - - 0 1",
+        // Self-play endgames where quiescence meets a stalemate with a piece left
+        // (a bench without them did not tell that rule apart)
+        "8/4r3/4B3/8/8/8/2k5/K7 w - - 0 1",
+        "8/8/4b3/7B/3k4/r7/3K4/8 b - - 0 1",
     };
     return fens;
 }

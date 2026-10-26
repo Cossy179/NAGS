@@ -52,7 +52,13 @@ K p n b r q k = 0-11, ascending squares, low nibble first), int16 score
 `nags_datagen` keeps its command line, and with `--threads 1` its output
 is a function of the binary, the embedded network and the arguments; a
 change that keeps the bench node count also keeps it byte-identical
-(checked for every non-functional commit). `--first-game N` (opt-in:
+(checked for every non-functional commit). The converse does not hold by
+itself: a functional change that no bench position meets keeps the bench
+and changes games (quiescence's stalemate test with a piece left changed 4
+of 400 seed-77 games; two endgames were added to the bench list on
+2026-10-26 so that it shows). So a functional change also compares a seed's
+games with the reference index, `docs/data/ref_seed77_n5000_g400.games`,
+and regenerates it when they differ. `--first-game N` (opt-in:
 numbered games with their own random streams and a `<out>.games` index,
 resumable; the records are the same format) leaves the default output
 unchanged (checked byte for byte, text and binary). The index is format v2:

@@ -14,6 +14,7 @@ static const char *kBoardName = "Board";
 #endif
 
 #include "Eval.h"
+#include "Legality.h"
 
 #include <cstdio>
 #include <random>
@@ -385,6 +386,75 @@ static void testGenerationModes() {
     CHECK(checked > 1000, "generation modes checked on only %d positions", checked);
 }
 
+// hasLegalMoveOutsideCheck (Legality.h, quiescence's stalemate test) against
+// the generator: positions python-chess classified, then random sparse
+// positions, where kings are often boxed in and pieces pinned.
+static void testHasLegalMove() {
+    struct Case {
+        const char *fen;
+        bool any;
+    };
+    const Case cases[] = {
+        {"Rn4k1/2BN3R/8/7Q/K7/8/8/8 b - - 0 1", false}, // stalemate: the knight is pinned along the rank
+        {"7k/5Kn1/6P1/8/8/8/QB6/8 b - - 0 1", false},   // stalemate: the knight is pinned on the diagonal
+        {"7k/5K2/6Q1/8/8/8/8/8 b - - 0 1", false},      // stalemate, king alone
+        {"8/6Q1/K6R/P7/8/8/7q/7k b - - 0 1", true},     // only the pinned queen moves, along the pin
+        {"1r5k/8/4p3/3pP3/8/2n5/8/K7 w - d6 0 1", true}, // only en passant
+        {"7k/5Kn1/6P1/8/8/8/Q7/8 b - - 0 1", true},     // the knight is free
+        {"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", true},
+    };
+    for (const Case &c : cases) {
+        TestBoard b;
+        CHECK(b.setFromFEN(c.fen), "FEN rejected: %s", c.fen);
+        CHECK(!b.inCheck(), "in check: %s", c.fen);
+        CHECK(!b.generateLegalMoves().empty() == c.any, "generator disagrees with python-chess: %s", c.fen);
+        CHECK(hasLegalMoveOutsideCheck(b) == c.any, "hasLegalMoveOutsideCheck wrong: %s", c.fen);
+    }
+    std::mt19937 rng(2718);
+    const char *kinds = "PNBRQpnbrq";
+    int checked = 0, none = 0;
+    for (int i = 0; i < 300000; ++i) {
+        char grid[64];
+        for (char &x : grid) x = '.';
+        auto empty = [&](bool pawn) {
+            for (;;) {
+                const int sq = static_cast<int>(rng() % 64);
+                if (grid[sq] == '.' && (!pawn || (sq >= 8 && sq < 56))) return sq;
+            }
+        };
+        grid[empty(false)] = 'K';
+        grid[empty(false)] = 'k';
+        for (int n = 1 + static_cast<int>(rng() % 9); n > 0; --n) {
+            const char p = kinds[rng() % 10];
+            grid[empty(p == 'P' || p == 'p')] = p;
+        }
+        std::string fen;
+        for (int r = 7; r >= 0; --r) {
+            int gap = 0;
+            for (int f = 0; f < 8; ++f) {
+                const char x = grid[r * 8 + f];
+                if (x == '.') {
+                    ++gap;
+                    continue;
+                }
+                if (gap) fen += static_cast<char>('0' + gap);
+                gap = 0;
+                fen += x;
+            }
+            if (gap) fen += static_cast<char>('0' + gap);
+            if (r) fen += '/';
+        }
+        fen += rng() % 2 ? " w - - 0 1" : " b - - 0 1";
+        TestBoard b;
+        if (!b.setFromFEN(fen) || b.inCheck()) continue;
+        const bool any = !b.generateLegalMoves().empty();
+        ++checked;
+        none += !any;
+        CHECK(hasLegalMoveOutsideCheck(b) == any, "hasLegalMoveOutsideCheck wrong: %s", fen.c_str());
+    }
+    CHECK(checked > 50000 && none > 20, "too few random positions (%d) or stalemates (%d)", checked, none);
+}
+
 // The laws' rule against a direct count of earlier occurrences, over random
 // games steered into repetitions and with occasional null moves: `fromRoot`
 // plies below a search root, an earlier occurrence inside the tree draws,
@@ -463,6 +533,7 @@ int main() {
     testRepetitionRuleRandom();
     testApplyMoves();
     testGenerationModes();
+    testHasLegalMove();
     if (failures) {
         std::printf("%s: %d failure(s)\n", kBoardName, failures);
         return 1;
