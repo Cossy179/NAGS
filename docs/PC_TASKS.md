@@ -67,7 +67,7 @@ $C = $T - 1                          # games played at once in a match
 - Only two places use fewer threads, on purpose: the 4-thread match (section 8) plays one game at a time
   so the engine has its 4 threads, and `bench` is single-threaded by definition.
 
-In a `.cmd` file or a detached command, write the number itself.
+The double-quoted command string of the launch template below expands `$T` and `$C`; in a `.cmd` file, write the numbers themselves.
 
 Detached launch template (PowerShell). Adjust the paths; `$PY` is the venv's python:
 ```powershell
