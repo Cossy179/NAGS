@@ -115,6 +115,9 @@ def positions(paths, count, seed):
     total = sum(len(r) for r in recs)
     if total == 0:
         sys.exit("no positions in the data")
+    if total < count:
+        print(f"note: the data holds {total} positions, fewer than the {count} asked for: all of them are used",
+              flush=True)
     pick = np.sort(np.random.default_rng(seed).choice(total, min(count, total), replace=False))
     out, offset = [], 0
     for r in recs:
@@ -198,6 +201,8 @@ def main(argv=None):
                     "(for example with --export-bias-correction) instead of a plain export")
     ap.add_argument("--json", help="also write the report here")
     args = ap.parse_args(argv)
+    if args.json and os.path.exists(args.json):
+        sys.exit(f"{args.json} already exists: choose another --json (an earlier report is never overwritten)")
     report = measure(args.net, train.expand_paths(args.data), args.positions, args.seed, simulate=args.simulate,
                      exported=args.exported)
     ev = report["eval_cp"]

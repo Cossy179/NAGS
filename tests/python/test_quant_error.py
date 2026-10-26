@@ -94,3 +94,14 @@ def test_the_built_in_network_matches_the_reference():
     engine, _ = net.evaluate(w, b, s, k)
     assert engine.tolist() == [float(train.quantized_eval(ref, f)) for f in FENS]
     assert torch.is_tensor(engine)
+
+
+def test_an_existing_report_is_never_overwritten(tmp_path, capsys):
+    _dataset(tmp_path / "d.txt", n=200)
+    pack.main([str(tmp_path / "d.txt")])
+    report = tmp_path / "r.json"
+    report.write_text("{}")
+    with pytest.raises(SystemExit, match="already exists"):
+        quant_error.main(["--net", str(ROOT / "nets" / "nags.nnue"), "--data", str(tmp_path / "d.bin"), "--json",
+                          str(report)])
+    assert report.read_text() == "{}"

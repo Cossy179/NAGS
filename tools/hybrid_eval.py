@@ -450,8 +450,8 @@ def gauntlet(args: argparse.Namespace, sprt_args: Sequence[str]) -> int:
                     cmd += ["--sprt", str(args.sprt[0]), str(args.sprt[1])]
                 if args.games:
                     cmd += ["--games", str(args.games)]
-                if status:
-                    cmd += ["--resume", str(log)]
+                if status or (log.exists() and "\nFingerprint: " in "\n" + log.read_text(errors="replace")):
+                    cmd += ["--resume", str(log)]  # (no status line yet: resumed at zero games, its PGN kept)
                 cmd += list(sprt_args)
                 print(f"== {name} vs {args.baseline}" + (f" (resuming after {status['games']} games)" if status else ""),
                       flush=True)

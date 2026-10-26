@@ -107,7 +107,12 @@ default since 2026-10-24) are aliases that train and resume the files of
 the historical names; `--warm-start` (default `none`) writes its own `_warm`
 files. `sprt.py` exit status 4 (an interrupted match, which used to print the
 cap line and exit 2) and its `Fingerprint:` and `Forfeits:` lines are
-additions; a log without a fingerprint resumes as before.
+additions; a log without a fingerprint resumes as before. **Changed on
+purpose:** a `--pgnout` file that already holds games is refused unless
+`--resume` is given (it used to be emptied), also by the `Match` class
+that `calibrate.py` and `ladder.py` use; a log with a fingerprint and no
+status line resumes at zero games (it used to be an error).
+`reexport.py --out` and `quant_error.py --json` refuse an existing file.
 
 ### GNN side (`chess_graph.py`, `gnn_evaluator.py`, `rpc_server.py`)
 

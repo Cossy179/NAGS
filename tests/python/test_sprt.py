@@ -436,3 +436,45 @@ def test_resume_skips_a_status_line_cut_off_by_a_kill(tmp_path, capsys):
     log.write_text(capsys.readouterr().out + "Games 4: +2 =1 -1 | penta [0, 1")  # killed while writing
     assert sprt.main(common + ["--games", "4", "--resume", str(log)]) == 0
     assert "Resuming after 2 games" in capsys.readouterr().out
+
+
+@needs_engines
+def test_an_earlier_match_s_games_are_never_overwritten(tmp_path, capsys):
+    common = ["--engine", _engine("nags_fast"), "--engine", _engine("nags_basic"), "--depth", "1", "--concurrency",
+              "1", "--openings", str(ROOT / "tools/openings/nags_balanced.epd"), "--report", "1000"]
+    pgn = tmp_path / "m.pgn"
+    assert sprt.main(common + ["--games", "2", "--pgnout", str(pgn)]) == 0
+    log = tmp_path / "m.log"
+    log.write_text(capsys.readouterr().out)
+    games = pgn.read_text()
+    assert games.count("[Event ") == 2
+    # The same command again (a resume without --resume) is refused before anything starts.
+    assert sprt.main(common + ["--games", "4", "--pgnout", str(pgn)]) == 3
+    assert "already holds games" in capsys.readouterr().err and pgn.read_text() == games
+    match = sprt.Match((sprt.EngineSpec("a", ["a"], {}, None), sprt.EngineSpec("b", ["b"], {}, None)), [], None,
+                       sprt.Adjudication(), max_pairs=1, concurrency=1, sprt=None, alpha=0.05, beta=0.05,
+                       pgnout=str(pgn), seed=1, shuffle=False)
+    with pytest.raises(FileExistsError):  # the library refuses too (calibrate.py, ladder.py)
+        match.run()
+    # --resume adds to it.
+    assert sprt.main(common + ["--games", "4", "--pgnout", str(pgn), "--resume", str(log)]) == 0
+    assert pgn.read_text().startswith(games) and pgn.read_text().count("[Event ") == 4
+
+
+@needs_engines
+def test_a_match_stopped_before_its_first_status_line_resumes_at_zero(tmp_path, capsys):
+    common = ["--engine", _engine("nags_fast"), "--engine", _engine("nags_basic"), "--depth", "1", "--concurrency",
+              "1", "--openings", str(ROOT / "tools/openings/nags_balanced.epd"), "--report", "1000"]
+    pgn = tmp_path / "m.pgn"
+    assert sprt.main(common + ["--games", "2", "--pgnout", str(pgn)]) == 0
+    out = capsys.readouterr().out
+    log = tmp_path / "m.log"
+    log.write_text("".join(l + "\n" for l in out.splitlines() if not l.startswith("Games ")
+                           and not l.startswith("Endings")))  # killed before its first status line
+    assert sprt.main(common + ["--games", "2", "--pgnout", str(pgn), "--resume", str(log)]) == 0
+    assert "Resuming after 0 games" in capsys.readouterr().out
+    assert pgn.read_text().count("[Event ") == 4  # kept, and added to
+    # Without a fingerprint there is nothing to resume.
+    bare = tmp_path / "bare.log"
+    bare.write_text("ERROR: preflight: something\n")
+    assert sprt.main(common + ["--games", "2", "--resume", str(bare)]) == 3
