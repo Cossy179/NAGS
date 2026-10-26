@@ -474,7 +474,31 @@ def test_a_match_stopped_before_its_first_status_line_resumes_at_zero(tmp_path, 
     assert sprt.main(common + ["--games", "2", "--pgnout", str(pgn), "--resume", str(log)]) == 0
     assert "Resuming after 0 games" in capsys.readouterr().out
     assert pgn.read_text().count("[Event ") == 4  # kept, and added to
-    # Without a fingerprint there is nothing to resume.
+    # Without a fingerprint or a status line there is nothing to resume: the match starts (so a command that
+    # names its own log can be run again), unless its PGN already holds games.
     bare = tmp_path / "bare.log"
     bare.write_text("ERROR: preflight: something\n")
-    assert sprt.main(common + ["--games", "2", "--resume", str(bare)]) == 3
+    capsys.readouterr()
+    assert sprt.main(common + ["--games", "2", "--resume", str(bare)]) == 0
+    assert "Nothing to resume" in capsys.readouterr().out
+    assert sprt.main(common + ["--games", "2", "--resume", str(tmp_path / "missing.log")]) == 0
+    assert sprt.main(common + ["--games", "2", "--pgnout", str(pgn), "--resume", str(bare)]) == 3
+    assert pgn.read_text().count("[Event ") == 4
+
+
+@needs_engines
+def test_a_decided_sprt_resumed_reports_its_decision_without_playing(tmp_path, capsys):
+    common = ["--engine", _engine("nags_enhanced") or _engine("nags_fast"), "--engine", _engine("nags_basic"),
+              "--depth", "1", "--concurrency", "1", "--openings", str(ROOT / "tools/openings/nags_balanced.epd"),
+              "--report", "1000", "--sprt", "0", "200", "--games", "400"]
+    pgn, log = tmp_path / "m.pgn", tmp_path / "m.log"
+    assert sprt.main(common + ["--pgnout", str(pgn), "--resume", str(log)]) == 0  # nothing to resume: starts
+    out = capsys.readouterr().out
+    log.write_text(out)
+    assert "H1 accepted" in out
+    games = pgn.read_text()
+    assert sprt.main(common + ["--pgnout", str(pgn), "--resume", str(log)]) == 0  # run again: already decided
+    again = capsys.readouterr().out
+    assert "H1 accepted" in again and pgn.read_text() == games
+    status = [l for l in out.splitlines() if l.startswith("Games ")][-1]
+    assert [l for l in again.splitlines() if l.startswith("Games ")][-1] == status
