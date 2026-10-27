@@ -39,7 +39,7 @@ function ConvertTo-CmdLine([object[]]$Argv) {
 }
 
 # A long job, detached from this session: writes runs\NAME.cmd (the command lines, run one after the other in
-# the worktree, their output appended to runs\NAME.log) and starts it in its own minimised window. A NAME that
+# the worktree, their output appended to runs\NAME.log) and starts it outside the Claude app. A NAME that
 # exists is refused; Resume-Detached NAME starts the same .cmd again, which continues the job (every command
 # in these tasks resumes where it stopped, or refuses to redo finished work).
 function Start-Detached([string]$Name, [string[]]$Lines) {
@@ -52,8 +52,13 @@ function Start-Detached([string]$Name, [string[]]$Lines) {
     Resume-Detached $Name
 }
 
+# The .cmd is opened through explorer.exe, which hands it to the desktop's own Explorer: the job then runs
+# outside the Claude app's Windows job object. A process started directly from the app's shell (Start-Process)
+# stays in that job and ends when the app updates itself (docs/PC_RESULTS.md, section 4).
 function Resume-Detached([string]$Name) {
-    Start-Process -FilePath (Join-Path $ROOT "runs\$Name.cmd") -WorkingDirectory $ROOT -WindowStyle Minimized
+    $cmd = Join-Path $ROOT "runs\$Name.cmd"
+    if (-not (Test-Path -LiteralPath $cmd)) { throw "$cmd does not exist: Start-Detached $Name writes it" }
+    Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$cmd`""
 }
 
 # A match: tools\sprt.py with these arguments, its games in runs\NAME.pgn and --resume runs\NAME.log (the log

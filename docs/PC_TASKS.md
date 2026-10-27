@@ -8,23 +8,28 @@ work of the last rounds. On the VM ctest passed 49/49 and pytest 373 passed with
 the tasks that need this PC's GPU, its data or its checkpoints. Work through them in order: each section
 says how long it takes, what to run, and what to record.
 
+**Status (2026-10-27).** Sections 0-5 are done, on `integ/round3` `7464810` in the worktree
+`C:\Users\Alex\Documents\code\NAGS-round3` (branch `pc/results`; results in `docs/PC_RESULTS.md` there).
+Next is section 6, after updating that worktree to this version (**"Before section 6"** below). Sections
+1-5 need not be run again.
+
 The times are machine time with nothing else running, from rates measured on this PC (`docs/NNUE.md`):
 self-play 1,465 positions/s with 6 threads (network 7; network 8, which `integ/round3` plays with, has not
 been timed here), training `kb4` 365 s an epoch on 201.7M positions, matches at 3+0.03 with 5 at a time
-37-42 games a minute. A match is quoted at its game cap: an SPRT can stop sooner, but close networks
+37-42 games a minute (42 in section 4: 1,770 games in 42 minutes). A match is quoted at its game cap: an SPRT can stop sooner, but close networks
 often run to the cap. Steps that wait for a person or a session to start them add calendar time.
 
-| # | Task | Machine time | Needs |
-|---|---|---|---|
-| 0 | Setup, build, tests, bench check | 30-60 min | - |
-| 1 | Cross-machine check of resumable self-play (MSVC vs the VM's GCC) | 5 min | 0 |
-| 2 | Find network 8's training checkpoint | minutes | - |
-| 3 | Network 8's real quantization error | 10 min | 1, 2 |
-| 4 | Bias-corrected network 8: re-export, then SPRTs against network 8 | up to 4 h, then up to 10 h | 1, 2 |
-| 5 | GPU training overhead (`--profile`, `--sync-every`), three times each | 1.5 h | 0 |
-| 6 | Warm start vs from scratch: new data, three training runs, five SPRTs | about 2 days (up to 47 h) | 0 |
-| 7 | Deeper labels at equal compute (optional) | about 2 days | 6a |
-| 8 | Strength at 4 threads (optional) | 5 h | 0 |
+| # | Task | Machine time | Needs | Status |
+|---|---|---|---|---|
+| 0 | Setup, build, tests, bench check | 30-60 min | - | done: as expected |
+| 1 | Cross-machine check of resumable self-play (MSVC vs the VM's GCC) | 5 min | 0 | done: identical to the VM, game for game |
+| 2 | Find network 8's training checkpoint | minutes | - | done: `D:\NAGS\data\net_kb4_201667886_e20.nnue.ckpt` |
+| 3 | Network 8's real quantization error | 10 min | 1, 2 | done: 9.4 cp mean, bias +5.8 |
+| 4 | Bias-corrected network 8: re-export, then SPRTs against network 8 | up to 4 h, then up to 10 h | 1, 2 | done: H0, −2.9 ± 10.1, not adopted |
+| 5 | GPU training overhead (`--profile`, `--sync-every`), three times each | 1.5 h | 0 | done: 0.9%, the default stays 1 |
+| 6 | Warm start vs from scratch: new data, three training runs, five SPRTs | about 2 days (up to 47 h) | 0 | **next** |
+| 7 | Deeper labels at equal compute (optional) | about 2 days | 6a | |
+| 8 | Strength at 4 threads (optional) | 5 h | 0 | |
 
 Background: `docs/NNUE.md` (training, shards, quantization, the options used here), `docs/TESTING.md`
 (SPRT, funnel, tuning, strength log), `docs/COMPATIBILITY.md` (what must not change). The VM's reports:
@@ -47,14 +52,18 @@ https://claude.ai/artifact/UgPVqJ7i1y3QBnH3shEUow and https://claude.ai/artifact
 3. **Use a separate checkout**, so the checkout that a running or earlier round uses keeps its binaries:
    `git worktree add ..\NAGS-round3 origin/integ/round3`. Build and run everything from there.
 4. **Start long runs detached from the Claude app**, with `Start-Detached` or `Start-Match` (below). On
-   this PC a run that was a child of a packaged app ended when the app updated itself (`docs/NNUE.md`).
+   this PC a run that was a child of a packaged app ended when the app updated itself (`docs/NNUE.md`), and
+   a process started from the app's shell with `Start-Process` stays inside the app's Windows job object
+   (`IsProcessInJob` reports `True`), so `Resume-Detached` opens the `.cmd` through `explorer.exe`, which
+   starts it outside (`False`; `docs/PC_RESULTS.md`, section 4).
    Each job is a `runs\NAME.cmd` whose output goes to `runs\NAME.log`; after any stop,
    `Resume-Detached NAME` runs the same `.cmd` again and every command in it continues where it stopped
    (shards from their indexes, `train.py --resume`, `sprt.py --resume`).
 5. **Run one CPU-heavy job at a time.** `nags_datagen --threads $T` and an SPRT with
    `--concurrency $C` each fill the CPU; running both slows the matches and makes them noisy. GPU training
    can run alongside data generation, but not alongside an SPRT, and not during a timing measurement
-   (section 5).
+   (section 5). The user's own rule here is stricter, and it applies: GPU training overlaps neither data
+   generation nor a match.
 6. **Only an SPRT decides strength, and only as declared before its first game.** Record every number as
    it was printed: games, W/D/L, Elo ± error, LLR, the decision. A match that reaches its cap without a
    decision is inconclusive, never a pass. Do not replace `nets\nags.nnue`, merge to `main` or push to
@@ -91,8 +100,8 @@ It defines, with this machine's real paths (it stops if `$ROOT` or `$PY` does no
 - `ConvertTo-CmdLine ARRAY`: one command line for a `.cmd` file, every argument quoted (paths with spaces
   stay whole). Commands are built as PowerShell arrays, never by splitting a string.
 - `Start-Detached NAME LINES`: writes `runs\NAME.cmd` (the lines, run one after the other in the
-  worktree, output appended to `runs\NAME.log`) and starts it in its own minimised window. An existing
-  NAME is refused. `Resume-Detached NAME` starts the same `.cmd` again.
+  worktree, output appended to `runs\NAME.log`) and starts it outside the Claude app (rule 4). An
+  existing NAME is refused. `Resume-Detached NAME` starts the same `.cmd` again.
 - `Start-Match NAME ARGS`: `Start-Detached` for `tools\sprt.py ARGS --pgnout runs\NAME.pgn --resume
   runs\NAME.log`. Started again, the match continues from its log; a finished SPRT reports its decision
   without playing on.
@@ -102,6 +111,7 @@ Check a job with `Get-Content runs\NAME.log -Tail 5`.
 ## 0. Setup and checks (30-60 minutes)
 
 ```powershell
+$env:GIT_LFS_SKIP_SMUDGE = 1   # no task needs the 1 GB LFS file AJ-CORR-PGN-000.pgn
 git fetch origin
 git worktree add ..\NAGS-round3 origin/integ/round3
 cd ..\NAGS-round3
@@ -265,6 +275,44 @@ epoch times, and the hash count. **Decision:** if `--sync-every 100` is at least
 `--sync-every 1` in each of the three pairs, report that it should become run_round's default for GPU
 training; otherwise (smaller, or not in every pair) the default stays 1. A difference smaller than the
 spread of one setting's three times is no difference.
+
+## Before section 6: update the worktree of sections 0-5 (about 30 minutes)
+
+The worktree `C:\Users\Alex\Documents\code\NAGS-round3` is on `pc/results`: `integ/round3` `7464810` and
+the results commits. Merge this version of `integ/round3` into it (`docs/PC_RESULTS.md` stays; nothing
+else was changed there), make `runs\pc_env.ps1`, rebuild and check:
+```powershell
+cd C:\Users\Alex\Documents\code\NAGS-round3
+git status --short                    # only runs\ and nets\candidates\ may be listed (both ignored after the merge)
+$env:GIT_LFS_SKIP_SMUDGE = 1
+git fetch origin
+git merge origin/integ/round3
+Copy-Item docs\pc_env.example.ps1 runs\pc_env.ps1   # then edit its four EDIT lines, as in section 0
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+cmake --build build --config Release --parallel
+ctest --test-dir build --build-config Release --output-on-failure
+foreach ($e in "nags_basic","nags_fast","nags_enhanced","nags") { & ".\build\Release\$e.exe" bench | Select-String "Nodes searched" }
+& $PY -m pytest -q -rs
+```
+**Expected:** ctest 49/49; the benches of section 0 (they changed since sections 0-5: the stalemate test
+and two bench positions); pytest all passed but the SIGINT funnel test. The search changed, so check
+the self-play games once more against the regenerated reference, in a new directory:
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+New-Item -ItemType Directory runs\xm2 | Out-Null
+& $DG --out runs\xm2\pc.bin --nodes 5000 --seed 77 --first-game 0 --games 400 --threads $T
+& $PY -c "import sys; sys.path.insert(0,'tools/nnue'); import shards; ref=[l.split() for l in open('docs/data/ref_seed77_n5000_g400.games').read().splitlines()[1:]]; r={int(x[0]):(x[1],x[2],x[4]) for x in ref}; h,g=shards.read_index('runs/xm2/pc.bin'); p={x.number:(str(x.records),str(x.bytes),x.checksum) for x in g}; bad=sorted(k for k in r if r[k]!=p.get(k)); print('games', len(p), 'identical to the VM:', not bad, 'first differing game:', bad[:1]); print('header equal:', h==open('docs/data/ref_seed77_n5000_g400.games').readline().rstrip())"
+```
+**Expected:** `games 400 identical to the VM: True` and `header equal: True` (the header now ends
+`search=1584695`). Then try the launcher once, since it was written on the VM and never run on Windows:
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+Start-Detached smoke (ConvertTo-CmdLine @($PY, '-c', "import ctypes; k = ctypes.windll.kernel32; r = ctypes.c_int(); k.IsProcessInJob(k.GetCurrentProcess(), None, ctypes.byref(r)); print('smoke: in a job:', bool(r.value))"))
+Start-Sleep 5; Get-Content runs\smoke.log
+```
+**Expected:** a window opens and closes, and `runs\smoke.log` holds `smoke: in a job: False`. If the
+log is missing, or says `True`, stop and report it before starting anything long. **Record:** the merge,
+the benches, the test lines, the two comparison lines and the smoke line.
 
 ## 6. Warm start against training from scratch (about 2 days: the main GPU experiment)
 
