@@ -751,6 +751,7 @@ speed log), openings from `nags_balanced.epd` and resign adjudication
 | Correctness together: the rules fixes above and a stalemate check in quiescence for a side with only king and pawns (`fix/qsearch-stalemate`, `a41b24a`); on `b4baff0`, against it, run with `tools/funnel.py --kind fix` | SPRT [−5, 0] (non-regression), 3+0.03, 3 at a time on the 4-core VM | H1 after 3526 games (+893 =1794 -839; 1 loss on time, by the base) | +5.3 ± 7.1 | 1528850 |
 | Bias-corrected export (`feat/export-bias`, `d0f4adc`): one checkpoint (a fine-tuned derivative of network 8) exported with each bucket's output bias shifted by the mean rounding error on 20,000 positions; against the plain export of the same checkpoint, both in `b4baff0` | SPRT [0, 10], 3+0.03, 3 at a time on the 4-core VM | H1 after 1664 games (+434 =862 -368) | +13.8 ± 10.7 | 1509779 (engine unchanged) |
 | The same two exports at the longer time control | SPRT [−5, 0] (non-regression), 10+0.1, 3 at a time on the 4-core VM | H1 after 4486 games (+1005 =2517 -964; no losses on time) | +3.2 ± 6.1 | 1509779 (engine unchanged) |
+| Bias-corrected export of network 8 itself (`tools/nnue/reexport.py`: output biases corrected on 18,597 positions of seed 77; float-to-engine error 6.04 cp instead of 9.39, bias 0) against network 8, both in `integ/round3` `7464810` | SPRT [0, 10], 3+0.03, 5 at a time on the Windows PC | H0 after 1770 games (+406 =943 -421; 1 loss on time by the corrected network) | −2.9 ± 10.1 | – (not adopted) |
 
 ### Experiment record
 

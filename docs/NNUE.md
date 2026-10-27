@@ -274,9 +274,13 @@ training: the network trained is byte-identical (tested), only the logged
 loss's rounding differs. On the 4-core VM's CPU (no GPU; one thread, kb4
 SCReLU, batch 16384): 513 ms a batch, of which data 51, forward 147,
 backward 308, step 7, and the loss read nothing measurable (1.01x end to
-end), as expected without a GPU. Whether the per-batch read costs anything
-on the RTX 3060 is what `--profile 200` there will say; the default stays
-at 1 until it does.
+end), as expected without a GPU. On the RTX 3060 (2026-10-27, `kb4`
+SCReLU on network 8's 201.7M positions, `docs/PC_RESULTS.md`): 32.9 ms a
+batch, of which data 2.4, forward 7.2, backward 22.5, step 0.9 and the
+loss read 0.06; end to end 1.01-1.04x with the loss read every 100 batches,
+and one real epoch 389.1 s against 392.8 s (0.9%, the same network byte
+for byte). Under the 3% that would make it worth a default, so the default
+stays 1. Each figure is one run.
 
 **Exact resume and warm starts are separate.** `--resume` continues the
 same run (data, settings, optimiser and schedule state). `--init-from NET`
@@ -337,11 +341,15 @@ sign changes), which is the final truncation. Simulated weight rounding (5
 trials): feature transformer 1.5–1.6 cp mean (p99 5.5–5.9), output layer
 7.0–10.3 cp mean (p99 23–37), with a shift of up to ±5 cp over all positions
 that depends on the particular rounding. So the output weights (× 64) carry
-most of the error. Whether that costs strength is untested. The real figure
-needs network 8's checkpoint (`quant_error.py --net <net>.nnue.ckpt --data
-...`). The first, format-compatible experiment would be an export that
-corrects each output bias for the rounding of its bucket's weights,
-SPRT-tested against the same checkpoint exported as now.
+most of the error. The real figure, from network 8's checkpoint on the PC's
+37,195 positions of seed 77 (2026-10-26, `docs/PC_RESULTS.md`): 9.40 cp mean
+from float to engine (p99 32.2, max 47.1), bias +5.76 cp, 530 sign changes;
+the weight rounding is nearly all of it (9.40 cp), the integer arithmetic
+0.51 cp. Output bucket 7 (29-32 pieces) loses 21.0 cp, against 6.7-8.4 for
+the others, although its output weights are the smallest (mean |w| 6.0 of
+64ths, against 6.7-12.0) and none is at the clip; why is not known. Whether
+the error costs strength: the bias-corrected export below removes the bias
+and a third of the error and does not play better (H0).
 
 **Bias-corrected export** (`train.py --export-bias-correction N`, off by
 default; the checkpoint and training are unchanged, only the exported
@@ -370,8 +378,11 @@ early stop overstates the estimate. At 10+0.1 the same pair passed its
 non-regression SPRT [−5, 0]: H1 after 4486 games (+1005 =2517 -964),
 **+3.2 ± 6.1**. So the correction costs no strength at the longer time
 control, and any gain there is smaller than the 3+0.03 estimate. Network 8
-itself needs its own corrected export and SPRT against the plain network
-before anything replaces `nets/nags.nnue`.
+itself, corrected on the PC (`reexport.py`, output biases corrected on 18,597
+positions of seed 77: float to engine 9.39 → 6.04 cp mean, bias +5.75 →
+0.00 on 18,598 others), against network 8: SPRT [0, 10] at 3+0.03, H0 after
+1770 games (+406 =943 -421), **−2.9 ± 10.1**. Not adopted; `nets/nags.nnue`
+stays. The derivative's larger error (17.0 cp) may be why it gained there.
 
 `tools/nnue/reexport.py` applies the correction to an existing checkpoint
 without training:
