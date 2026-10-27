@@ -202,8 +202,8 @@ total of 17.0 cp mean, bias +6.9 cp, and integer arithmetic 0.51 cp.
 ## 4. Bias-corrected network 8 and its SPRTs (up to 4 h, then up to 10 h)
 
 On the VM, the bias-corrected export of a checkpoint beat that checkpoint's plain export: **+13.8 ± 10.7**,
-SPRT [0, 10] at 3+0.03, H1 after 1664 games. That was one checkpoint (a fine-tuned derivative), and its
-[−5, 0] check at 10+0.1 was still running at handoff (+2.9 ± 6.5, LLR +2.40 after 3770 games). Network 8
+SPRT [0, 10] at 3+0.03, H1 after 1664 games, and it passed its non-regression check at 10+0.1: SPRT
+[−5, 0], H1 after 4486 games, +3.2 ± 6.1. That was one checkpoint (a fine-tuned derivative). Network 8
 itself can be corrected without training. `reexport.py` draws 2 × `--positions` positions at random,
 corrects the output biases on one half and measures the result on the other; `runs\xm\pc.bin` holds
 37,126, so 18,000 each (both halves come from the same 400 games):
