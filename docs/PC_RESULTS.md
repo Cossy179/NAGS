@@ -125,3 +125,40 @@ but does not play better: −2.9 ± 10.1. So the 10+0.1 check was not run, and n
 | Change | Test | Result | Elo | Bench |
 |--------|------|--------|-----|-------|
 | Bias-corrected export of network 8 (`tools/nnue/reexport.py`: output biases corrected on 18,597 positions of seed 77; float-to-engine error 6.04 cp instead of 9.39, bias 0) vs network 8 | SPRT [0, 10], 3+0.03, 5 at a time on the Windows PC | H0 after 1770 games (+406 =943 -421; 1 loss on time by the corrected network) | −2.9 ± 10.1 | – (not adopted) |
+
+## 5. GPU training overhead (2026-10-27)
+
+From `runs\gpu_profile.cmd` (opened through `explorer.exe`), as in the plan with `$D = "D:\NAGS\data\selfplay_*.bin"`
+(network 8's 201.7M positions, read only with `--no-data-cache`; nothing was written to `D:\NAGS\data`):
+
+```
+profile: 50 batches of 16384 on cuda, median ms per batch (each phase synchronised): data 2.37, forward 7.18, backward 22.45, step 0.88, loss read 0.06; total 32.94
+profile: end to end 531,020 positions/s reading the loss every batch, 551,024 reading it every 100 (1.04x)
+
+(with --sync-every 100)
+profile: 50 batches of 16384 on cuda, median ms per batch (each phase synchronised): data 1.94, forward 6.73, backward 21.77, step 0.77, loss read 0.05; total 31.26
+profile: end to end 543,781 positions/s reading the loss every batch, 548,324 reading it every 100 (1.01x)
+
+(one real epoch each way)
+epoch   1  train 0.009246  val 0.008673  (393s)      runs\ep1_sync1.nnue,   history[0].seconds = 392.8
+epoch   1  train 0.009246  val 0.008673  (389s)      runs\ep1_sync100.nnue, history[0].seconds = 389.1
+same network: True     (SHA-256 1be1c89249b660614f5c818fbde8f8e7dc4f2467c9ef7822cf9f4f703591012c for both)
+```
+
+`--sync-every 100` saves **0.9%** of the epoch (389.1 s against 392.8 s) and gives the same network byte for
+byte. The 1.04x of the first profile is warm-up (the second profile, run right after, gives 1.01x). Under the
+plan's 3% threshold, so run_round's default should stay at 1. The backward pass is 68% of a batch; the data
+gathering 6-7%. Loading the data: 58 s for the content hash the first time, then 4-21 s (cached by the OS),
+and 4-63 s to move 201.7M positions into GPU memory. Time: 17 minutes in all.
+
+An epoch of the `kb4` design on these 201.7M positions took 389-393 s here with `integ/round3`'s `train.py`,
+against 365 s with `main`'s `train.py` at `07cf0ae` in the October round on the same PC (about 7% slower;
+not investigated).
+
+## Summary of sections 0-5
+
+Everything in sections 0-3 came out as expected: the same benches, all tests passing, the PC's self-play
+identical to the VM's game for game, and network 8's checkpoint found. Network 8 loses 9.4 cp to
+quantization (bias +5.8 cp, 21 cp in the opening bucket). The bias-corrected export removes the bias but
+does not play better than network 8 (H0, −2.9 ± 10.1 after 1770 games), so `nets\nags.nnue` stays.
+`--sync-every 100` saves 0.9% on the 3060, below the 3% threshold. Sections 6-8 wait for the user.
