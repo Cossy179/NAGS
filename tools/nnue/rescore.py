@@ -210,7 +210,12 @@ def label(args):
     os.makedirs(args.out_dir, exist_ok=True)
     try:
         for path in shards_of(args.data):
-            src_header, games = shards.read_index(path)
+            try:
+                src_header, games = shards.read_index(path)
+            except (OSError, ValueError) as e:
+                sys.exit(f"{path}: needs its nags_datagen shard index (--first-game): {e}")
+            if sum(g.bytes for g in games) != os.path.getsize(path):
+                sys.exit(f"{path}: its index does not cover the file (an unfinished shard?)")
             chosen = select_games(games, args.fraction, args.max_games, args.select_seed)
             out = os.path.join(args.out_dir, os.path.basename(path))
             if os.path.realpath(out) == os.path.realpath(path):

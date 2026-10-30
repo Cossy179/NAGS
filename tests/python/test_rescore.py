@@ -123,6 +123,10 @@ def test_label_resumes_to_the_same_bytes(tmp_path):
     (tmp_path / "raw" / "base.bin").write_bytes(b"\0" * 32)
     with pytest.raises(SystemExit, match="no index"):
         _label(base, tmp_path / "raw", "--max-games", 1)
+    plain = tmp_path / "plain.bin"
+    plain.write_bytes(base.read_bytes())
+    with pytest.raises(SystemExit, match="shard index"):
+        _label(plain, tmp_path / "p", "--max-games", 1)
 
 
 @needs_engines
