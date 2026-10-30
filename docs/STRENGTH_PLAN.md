@@ -377,4 +377,23 @@ Measured on the 4-core VM (Intel Xeon, 2.1 GHz, no GPU) on 2026-10-30, with netw
 - **Endgames (item 7):** 75.0% of 2,100 tablebase positions right (table above).
 - **Data composition (item 3):** the network-8 self-play composition and the imbalanced book's effect
   (above).
-- **Training speed (item 9):** the CPU profile above.
+- **Training speed (item 9):** the CPU profile above. With the CPU otherwise idle, a fused epoch over 5.46M
+  positions took 62-63 s (about 87,000 positions/s); with `--qat`, 62-69 s.
+- **QAT (item 2):**
+  - Setup: network 8 fine-tuned twice on the same 5.46M fresh positions (seeds 9201-9202, 30,000 games each
+    by the network-8 engine at 5000 nodes). Both runs: 2 epochs, lr 1e-4 cosine, `--ft-impl fused`,
+    `--init-from nets/nags.nnue`. P plain, Q with `--qat`.
+  - Loss against the labels (λ 0.75) on 100,000 positions of the evaluation set (seed 9299, 1,500 games, not
+    trained on), as the engine computes each export:
+
+    | Network | Export (engine) | Float network |
+    |---|---:|---:|
+    | network 8 | 0.009317 | - |
+    | P | 0.008757 | 0.008699 |
+    | Q | 0.008716 | 0.008718 (rounded by design) |
+
+  - Rounding costs P 12.6 cp on average (bias +3.5) and 0.000058 of loss. Q's export recovers 70% of that
+    loss. Q's own weight-rounding error is 0 by construction; only the 0.51 cp of integer arithmetic is left.
+  - Both fine-tunes have a lower loss than network 8 on positions like their training data. That is no
+    strength claim: an evaluation set from the same engine and settings favours them. The SPRT of Q against
+    P decides QAT.
