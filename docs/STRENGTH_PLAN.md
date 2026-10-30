@@ -374,6 +374,18 @@ CPU threads. The work in items 1-11 improves the alpha-beta engine that any hybr
 Measured on the 4-core VM (Intel Xeon, 2.1 GHz, no GPU) on 2026-10-30, with network 8 on this branch
 (bench 1528850).
 
+- **Node ladder (item 11, step 1):** network 8 at 256,000 nodes a move rates **172 ± 36** on the sf16-nodes
+  scale (100 games a rung):
+
+  | Rung | Result for NAGS | Elo |
+  |---|---|---:|
+  | sf16-8k | +59 =30 −11 | +182 ± 60 |
+  | sf16-16k | +26 =47 −27 | −3 ± 48 |
+  | sf16-32k | +10 =36 −54 | −164 ± 49 |
+
+  `989184c` with network 7 rated −13 ± 37. So NAGS now needs about **16 times** Stockfish 16's nodes for the
+  same results, not 32: a doubling of efficiency, nearly all of it network 8. The 8k rung is now too weak to
+  rate against. The next ladder needs the 64k-512k rungs anchored (step 2).
 - **Endgames (item 7):** 75.0% of 2,100 tablebase positions right (table above).
 - **Data composition (item 3):** the network-8 self-play composition and the imbalanced book's effect
   (above).

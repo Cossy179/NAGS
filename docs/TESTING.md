@@ -608,14 +608,20 @@ match gives the same games):
 |---|---|---:|---|---:|
 | `nags_enhanced` on the head (1399785), Hash 64 | 256,000 nodes a move | 100 | 8k: 29 34 37 (−28 ± 62); 16k: 10 35 55 (+7 ± 67); 32k: 6 21 73 (+43 ± 92) | −1 ± 41 |
 | `nags_enhanced` on main `989184c` (1466858), Hash 64, 2026-10-23 | 256,000 nodes a move | 100 | 8k: 25 33 42 (−60 ± 53); 16k: 14 31 55 (+24 ± 63); 32k: 9 18 73 (+61 ± 97) | −13 ± 37 |
+| `nags_enhanced` on `claude/upbeat-volta-95lzjz` (`integ/round3` + `pc/results`, network 8; 1528850), Hash 64, 2026-10-30 | 256,000 nodes a move | 100 | 8k: 59 30 11 (+182 ± 60); 16k: 26 47 27 (−3 ± 48); 32k: 10 36 54 (−164 ± 49) | **172 ± 36** |
 
 The two builds are level node for node (−13 ± 37 against −1 ± 41): what
 main gained since is speed and time use, which a fixed node count does not
 see, while the 10+0.1 calibration above (+117) does.
 
-So NAGS needs about 32 times Stockfish 16's nodes for the same strength
+So NAGS needed about 32 times Stockfish 16's nodes for the same strength
 (256k nodes is about 0.14 s of NAGS search on this machine, roughly a move
-at 10+0.1). The higher rungs (64k-512k) are not anchored yet; `anchor`
+at 10+0.1). With network 8 and `integ/round3`'s search it rates 172 ± 36,
++185 above `989184c`, level with sf16-16k (175 ± 36): about **16 times**
+Stockfish 16's nodes. The three rungs agree (182, 172, 160), and the 8k rung
+no longer separates (82% for NAGS). Network 8 is most of the step: the search
+changes between `989184c` and `integ/round3` were admitted as non-regression
+fixes, not gains. The higher rungs (64k-512k) are not anchored yet; `anchor`
 skips the three above, so they only cost the matches still missing.
 
 ### Suites (`tools/suite.py`)
