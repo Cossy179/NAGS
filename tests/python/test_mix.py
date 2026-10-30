@@ -112,3 +112,24 @@ def test_a_file_without_an_index_is_taken_in_blocks(tmp_path):
         sorted(map(bytes, np.fromfile(plain, np.uint8).reshape(-1, 32)))
     info = json.loads(Path(str(out) + ".mix.json").read_text())
     assert info["sources"][0]["indexed"] is False and info["sources"][0]["short"] is True
+
+
+def test_book_selects_kinds(tmp_path):
+    recs = _records([
+        ("4k3/pp6/8/8/8/8/PPP5/4K3 w - - 0 1", 150, 1.0),            # pawn ending
+        ("4k3/8/8/8/8/8/8/R3K3 w - - 0 1", 2500, 1.0),               # a rook up
+        ("r3k3/8/8/8/8/8/8/2B1KN2 w - - 0 1", 20, 0.5),              # the exchange
+        ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 30, 0.5),
+    ])
+    data = tmp_path / "d.bin"
+    recs.tofile(data)
+    out = tmp_path / "b.epd"
+    assert mix.main(["book", str(data), "--select", "imbalanced", "--out", str(out)]) == 0
+    lines = out.read_text().splitlines()
+    assert sorted(l.split()[0] for l in lines) == sorted(["4k3/8/8/8/8/8/8/R3K3", "r3k3/8/8/8/8/8/8/2B1KN2"])
+    mix.main(["book", str(data), "--select", "imbalanced", "--max-score", "300", "--out", str(out)])
+    assert [l.split()[0] for l in out.read_text().splitlines()] == ["r3k3/8/8/8/8/8/8/2B1KN2"]
+    mix.main(["book", str(data), "--select", "pieces:20-32", "--out", str(out)])
+    assert out.read_text().splitlines() == ["rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"]
+    mix.main(["book", str(data), "--select", "pawn-endings", "--out", str(out)])
+    assert out.read_text().splitlines() == ["4k3/pp6/8/8/8/8/PPP5/4K3 w - -"]

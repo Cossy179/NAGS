@@ -12,7 +12,15 @@
           mixture and falls between games. <out>.mix.json records the sources, their files, the shares
           asked for and obtained, the duplicates removed, and the composition of the result.
 
+  book    start positions for nags_datagen --book, drawn from record files by kind: 'imbalanced' (material
+          two or more pawns apart, or level material with different pieces), 'level-different' (only the
+          latter), 'pawn-endings', 'queenless' or 'pieces:LO-HI'; --max-score keeps starts the search does not
+          already call decided (nags_datagen skips openings beyond its --max-opening-score). Castling rights
+          are inferred (tools/nnue/rescore.py, record_fen).
+
   python tools/nnue/mix.py report data/selfplay_*.bin
+  python tools/nnue/mix.py book data/selfplay_*.bin --select imbalanced --count 5000 --max-score 300 \
+      --out books/imbalanced.epd
   python tools/nnue/mix.py build --source "data/r8/selfplay_*.bin=0.4" --source "data/r9/selfplay_*.bin=0.5" \\
       --source "data/imbalanced/*.bin=0.1" --positions 100000000 --max-copies 4 --out data/mix/mix_a.bin
 
@@ -162,6 +170,51 @@ def print_composition(name, c):
           f"{c['repeated_positions']:.1%} (distinct {c['distinct_positions']:.1%})")
 
 
+def selection(recs, kind):
+    """Boolean mask of the records of a kind (see the module docstring, 'book')."""
+    pc = piece_counts(recs)
+    white, black = pc[:, :6], pc[:, 6:]
+    diff = np.abs(white @ VALUES - black @ VALUES)
+    minors_w, minors_b = white[:, 1] + white[:, 2], black[:, 1] + black[:, 2]
+    different = ((minors_w != minors_b) | (white[:, 3] != black[:, 3]) | (white[:, 4] != black[:, 4])) & (diff <= 1)
+    if kind == "imbalanced":
+        return different | (diff >= 2)
+    if kind == "level-different":
+        return different
+    if kind == "pawn-endings":
+        return pc[:, [1, 2, 3, 4, 7, 8, 9, 10]].sum(axis=1) == 0
+    if kind == "queenless":
+        return (pc[:, 4] + pc[:, 10]) == 0
+    if kind.startswith("pieces:"):
+        lo, _, hi = kind[7:].partition("-")
+        pieces = pc.sum(axis=1)
+        return (pieces >= int(lo)) & (pieces <= int(hi or lo))
+    sys.exit(f"--select {kind}: imbalanced, level-different, pawn-endings, queenless or pieces:LO-HI")
+
+
+def book(args):
+    import rescore
+    paths = [p for pat in args.data for p in expand(pat)]
+    recs = sample(paths, args.sample, args.seed)
+    mask = selection(recs, args.select)
+    if args.max_score is not None:
+        mask &= np.abs(recs[:, 24:26].copy().view("<i2").reshape(-1).astype(np.int64)) <= args.max_score
+    picked = recs[mask]
+    keys = position_keys(picked)
+    _, first = np.unique(keys, return_index=True)  # each position once
+    picked = picked[np.sort(first)]
+    if len(picked) > args.count:
+        picked = picked[np.sort(np.random.default_rng(args.seed).choice(len(picked), args.count, replace=False))]
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+    with open(args.out, "w", newline="\n") as fh:
+        for r in picked:
+            fh.write(" ".join(rescore.record_fen(r).split()[:4]) + "\n")
+    print(f"{int(mask.sum())} of {len(recs)} sampled positions are '{args.select}'"
+          + (f" within {args.max_score} cp" if args.max_score is not None else "")
+          + f"; wrote {len(picked)} distinct ones to {args.out}")
+    return len(picked)
+
+
 def report(args):
     paths = [p for pat in args.data for p in expand(pat)]
     c = composition(sample(paths, args.sample, args.seed))
@@ -286,9 +339,19 @@ def main(argv=None):
     b.add_argument("--seed", type=int, default=1)
     b.add_argument("--sample", type=int, default=1_000_000, help="records sampled for the composition report")
     b.add_argument("--out", required=True)
+    k = sub.add_parser("book", help="start positions of a kind for nags_datagen --book")
+    k.add_argument("data", nargs="+")
+    k.add_argument("--select", required=True)
+    k.add_argument("--count", type=int, default=5000)
+    k.add_argument("--max-score", type=int, help="only positions whose |score| is at most this (centipawns)")
+    k.add_argument("--sample", type=int, default=5_000_000, help="records drawn to choose from")
+    k.add_argument("--seed", type=int, default=1)
+    k.add_argument("--out", required=True)
     args = ap.parse_args(argv)
     if args.cmd == "report":
         report(args)
+    elif args.cmd == "book":
+        book(args)
     else:
         build(args)
     return 0
