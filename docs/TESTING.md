@@ -619,9 +619,10 @@ So NAGS needed about 32 times Stockfish 16's nodes for the same strength
 at 10+0.1). With network 8 and `integ/round3`'s search it rates 172 ± 36,
 +185 above `989184c`, level with sf16-16k (175 ± 36): about **16 times**
 Stockfish 16's nodes. The three rungs agree (182, 172, 160), and the 8k rung
-no longer separates (82% for NAGS). Network 8 is most of the step: the search
-changes between `989184c` and `integ/round3` were admitted as non-regression
-fixes, not gains. The higher rungs (64k-512k) are not anchored yet; `anchor`
+no longer separates (82% for NAGS). Network 8 is probably most of the step: the
+search changes between `989184c` and `integ/round3` are correctness fixes
+tested for non-regression (quiescence stalemates, draws by the rules), not
+gains. The higher rungs (64k-512k) are not anchored yet; `anchor`
 skips the three above, so they only cost the matches still missing.
 
 ### Suites (`tools/suite.py`)

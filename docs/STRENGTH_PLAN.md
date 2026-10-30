@@ -384,7 +384,8 @@ Measured on the 4-core VM (Intel Xeon, 2.1 GHz, no GPU) on 2026-10-30, with netw
   | sf16-32k | +10 =36 −54 | −164 ± 49 |
 
   `989184c` with network 7 rated −13 ± 37. So NAGS now needs about **16 times** Stockfish 16's nodes for the
-  same results, not 32: a doubling of efficiency, nearly all of it network 8. The 8k rung is now too weak to
+  same results, not 32: a doubling of efficiency, probably nearly all of it network 8 (the search changes since are
+  correctness fixes). The 8k rung is now too weak to
   rate against. The next ladder needs the 64k-512k rungs anchored (step 2).
 - **Endgames (item 7):** 75.0% of 2,100 tablebase positions right (table above).
 - **Data composition (item 3):** the network-8 self-play composition and the imbalanced book's effect
