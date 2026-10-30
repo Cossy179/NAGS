@@ -44,6 +44,8 @@ jobs:
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DNAGS_BUILD_TESTS=OFF
           cmake --build build --config Release --parallel --target nags nags_basic nags_fast nags_enhanced nags_datagen rpc_client relgraph_dump
+          cmake -B build-tune -DCMAKE_BUILD_TYPE=Release -DNAGS_BUILD_TESTS=OFF -DNAGS_TUNE=ON
+          cmake --build build-tune --config Release --parallel --target nags_enhanced
       - name: Unit tests
         run: python -m pytest -q -rs
       - name: RPC round trip (rpc_server.py + rpc_client)
