@@ -22,6 +22,13 @@
 //
 //   nags_datagen --out data/selfplay.txt --games 10000 --threads 3 --nodes 5000
 //
+// Start positions (--book FILE): each game starts from a position of the
+// file (FEN or EPD lines; the first four fields are read, so EPD operations
+// are ignored), drawn by the game's random stream, before the random plies.
+// A book of unfamiliar openings or of imbalanced material steers the data
+// there (raise --max-opening-score for lopsided ones). Without --book the
+// games start from the initial position, exactly as before.
+//
 // Shards (--first-game N): the games are numbered N .. N + games - 1 and each
 // one draws its opening from its own random stream, seeded by (seed, game
 // number), so a game is the same whichever thread plays it and whatever was
@@ -96,6 +103,9 @@ struct Options {
     bool relabelRandom = false;     // "random:P": a fraction P of the positions, by a hash of the position
     int relabelThreshold = 0;       // "disagree:T": |static evaluation - search score| >= T centipawns
     double relabelFraction = 0.0;
+    std::string bookPath;           // --book: start positions, one FEN or EPD line each
+    std::vector<std::string> book;
+    uint64_t bookFnv = 0;           // FNV-1a 64 of the file's bytes, for the shard header
 };
 
 struct Record {
@@ -130,7 +140,45 @@ std::atomic<long long> gamesStarted{0}, gamesDone{0}, positionsWritten{0};
 void usage() {
     std::cerr << "usage: nags_datagen --out FILE [--games N] [--threads N] [--nodes N] [--random-plies N]\n"
                  "                    [--max-opening-score CP] [--hash MB] [--seed N] [--repetition first|third]\n"
-                 "                    [--first-game N] [--relabel-nodes N --relabel-select disagree:CP|random:P]\n";
+                 "                    [--first-game N] [--relabel-nodes N --relabel-select disagree:CP|random:P]\n"
+                 "                    [--book FILE]\n";
+}
+
+uint64_t fnv1a(const unsigned char *data, size_t n, uint64_t h = 0xcbf29ce484222325ULL);
+
+// Reads --book: every non-empty line's first four fields (placement, side to move, castling, en passant) must
+// be a position the board accepts; the halfmove and fullmove counters start at 0 and 1.
+bool loadBook(Options &o) {
+    std::ifstream in(o.bookPath, std::ios::binary);
+    if (!in) {
+        std::cerr << "--book: cannot open " << o.bookPath << "\n";
+        return false;
+    }
+    const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    o.bookFnv = fnv1a(reinterpret_cast<const unsigned char *>(bytes.data()), bytes.size());
+    std::istringstream lines(bytes);
+    std::string line;
+    for (int n = 1; std::getline(lines, line); ++n) {
+        std::istringstream fields(line);
+        std::string f[4];
+        if (!(fields >> f[0])) continue; // an empty line
+        if (!(fields >> f[1] >> f[2] >> f[3])) {
+            std::cerr << "--book " << o.bookPath << " line " << n << ": not a FEN or EPD position\n";
+            return false;
+        }
+        const std::string fen = f[0] + " " + f[1] + " " + f[2] + " " + f[3] + " 0 1";
+        FastBoard b;
+        if (!b.setFromFEN(fen)) {
+            std::cerr << "--book " << o.bookPath << " line " << n << ": not a legal position\n";
+            return false;
+        }
+        o.book.push_back(fen);
+    }
+    if (o.book.empty()) {
+        std::cerr << "--book " << o.bookPath << ": no positions\n";
+        return false;
+    }
+    return true;
 }
 
 bool parseArgs(int argc, char **argv, Options &o) {
@@ -164,6 +212,10 @@ bool parseArgs(int argc, char **argv, Options &o) {
             }
             continue;
         }
+        if (a == "--book") {
+            o.bookPath = v;
+            continue;
+        }
         if (a == "--repetition") {
             if (v != "first" && v != "third") { std::cerr << "--repetition: first or third\n"; return false; }
             o.thirdRepetition = v == "third";
@@ -182,7 +234,7 @@ bool parseArgs(int argc, char **argv, Options &o) {
         else { usage(); return false; }
     }
     if (o.out.empty()) { usage(); return false; }
-    return true;
+    return o.bookPath.empty() || loadBook(o);
 }
 
 bool isQuiet(const FastBoard &b, const Move &m) { return !eval::isNoisy(b, m); }
@@ -216,6 +268,7 @@ bool relabelChosen(const Options &o, const FastBoard &b, int score) {
 bool playGame(const Options &o, std::mt19937_64 &rng, Searcher<FastBoard> &searcher, TranspositionTable &tt,
               std::vector<Record> &records, double &result, Relabeler *relabeler = nullptr) {
     FastBoard board;
+    if (!o.book.empty()) board.setFromFEN(o.book[rng() % o.book.size()]);
     for (int ply = 0; ply < o.randomPlies; ++ply) {
         auto moves = board.generateLegalMoves();
         if (moves.empty()) return false;
@@ -318,7 +371,7 @@ std::string serialise(const Options &o, std::vector<Record> &records, double res
 }
 
 // FNV-1a 64 of `n` bytes, continuing from `h`.
-uint64_t fnv1a(const unsigned char *data, size_t n, uint64_t h = 0xcbf29ce484222325ULL) {
+uint64_t fnv1a(const unsigned char *data, size_t n, uint64_t h) {
     for (size_t i = 0; i < n; ++i) h = (h ^ data[i]) * 0x100000001b3ULL;
     return h;
 }
@@ -361,6 +414,7 @@ const std::string &shardHeader(const Options &o) {
             h << " network=embedded network-fnv=" << hex64(fnv1a(kNagsEmbeddedNet, kNagsEmbeddedNetSize));
         else h << " network=" << nnue::networkName();
         h << " search=" << searchFingerprint();
+        if (!o.book.empty()) h << " book=" << hex64(o.bookFnv) << ":" << o.book.size();
         if (o.relabelNodes)
             h << " relabel=" << o.relabelNodes << "@"
               << (o.relabelRandom ? "random:" + std::to_string(o.relabelFraction)

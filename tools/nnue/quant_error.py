@@ -33,10 +33,11 @@ QA, QB, SCALE = train.QA, train.QB, train.SCALE
 
 
 def load_float(path):
-    """The float model of a training checkpoint."""
+    """The float model of a training checkpoint, as it was trained: a quantization-aware (--qat) checkpoint's
+    forward pass rounds its weights, so its float - rounded part is (near) zero by design."""
     ckpt = torch.load(path, weights_only=False, map_location="cpu")
     model = train.Nnue(ckpt["hidden"], ckpt.get("buckets", 1), ckpt.get("king_buckets", "none"),
-                       ckpt.get("activation", "crelu") == "screlu")
+                       ckpt.get("activation", "crelu") == "screlu", qat=ckpt.get("qat", False))
     model.load_state_dict(ckpt["model"])
     model.eval()
     return model
@@ -133,10 +134,11 @@ def _summary(diff, base, other):
             "sign_changes": int(flips.sum())}
 
 
-def measure(net_path, data_paths, count=20000, seed=1, batch=8192, simulate=0, exported=None):
+def measure(net_path, data_paths, count=20000, seed=1, batch=8192, simulate=0, exported=None, lam=0.75):
     """The report as a dict (see the module docstring); with `simulate`, also that many simulated roundings
     of each layer of the exported network (an estimate of the weight rounding error when the float weights
-    are not at hand)."""
+    are not at hand). "loss" is each evaluation's training loss against the positions' labels (the target at
+    `lam`), which is what compares two networks' exports, for example trained with and without --qat."""
     model = None
     if net_path.endswith(".ckpt") and exported:  # a file exported from this checkpoint (e.g. with a correction)
         model = load_float(net_path)
@@ -153,11 +155,13 @@ def measure(net_path, data_paths, count=20000, seed=1, batch=8192, simulate=0, e
     else:
         net = IntegerNet(net_path)
     recs = positions(data_paths, count, seed)
-    groups = []  # (white, black, stm, bucket) per batch
+    groups, targets = [], []  # (white, black, stm, bucket) per batch, and the training target at lam
     for start in range(0, len(recs), batch):
         rec = torch.from_numpy(recs[start : start + batch])
         feats, stm, score, result = train.decode(rec)
-        groups.append(train.tensors(feats, stm, score, result, torch.arange(len(rec)), 1.0, net.buckets)[:4])
+        t = train.tensors(feats, stm, score, result, torch.arange(len(rec)), lam, net.buckets)
+        groups.append(t[:4])
+        targets.append(t[4].double())
     with torch.no_grad():
         engine, rounded = (torch.cat(x) for x in zip(*(net.evaluate(*g) for g in groups)))
         flt = torch.cat([model(*g).double() * SCALE for g in groups]) if model is not None else None
@@ -174,8 +178,12 @@ def measure(net_path, data_paths, count=20000, seed=1, batch=8192, simulate=0, e
     pairs = {"arithmetic (rounded - engine)": (rounded, engine)}
     if flt is not None:
         pairs = {"total (float - engine)": (flt, engine), "weights (float - rounded)": (flt, rounded), **pairs}
+    target = torch.cat(targets)
+    loss = lambda cp: float(((torch.sigmoid(cp / SCALE) - target) ** 2).mean())  # noqa: E731
     report = {"network": net_path, "positions": len(engine), "data": [os.path.basename(p) for p in data_paths],
-              "seed": seed, "eval_cp": _summary(engine, engine * 0, engine * 0)}
+              "seed": seed, "eval_cp": _summary(engine, engine * 0, engine * 0),
+              "loss": {"lambda": lam, "engine": loss(engine), "rounded": loss(rounded),
+                       "float": loss(flt) if flt is not None else None}}
     for name, (x, y) in pairs.items():
         report[name] = {"overall": _summary(x - y, x, y),
                         "by_output_bucket": [_summary((x - y)[buckets == i], x[buckets == i], y[buckets == i])
@@ -196,13 +204,18 @@ def main(argv=None):
                          "estimate of the weight rounding error for an exported network without its checkpoint")
     ap.add_argument("--exported", metavar="NNUE", help="with a .ckpt --net: measure this file exported from it "
                     "(for example with --export-bias-correction) instead of a plain export")
+    ap.add_argument("--lambda", dest="lam", type=float, default=0.75,
+                    help="weight of the search score in the loss against the labels (as train.py's --lambda)")
     ap.add_argument("--json", help="also write the report here")
     args = ap.parse_args(argv)
     report = measure(args.net, train.expand_paths(args.data), args.positions, args.seed, simulate=args.simulate,
-                     exported=args.exported)
+                     exported=args.exported, lam=args.lam)
     ev = report["eval_cp"]
     print(f"{report['network']}: {report['positions']} positions; |eval| mean {ev['mean']:.0f} cp, "
           f"p50 {ev['p50']:.0f}, p99 {ev['p99']:.0f}")
+    ls = report["loss"]
+    print(f"loss against the labels (lambda {ls['lambda']}): engine {ls['engine']:.6f}, rounded {ls['rounded']:.6f}"
+          + (f", float {ls['float']:.6f}" if ls["float"] is not None else ""))
     for name, part in report.items():
         if not isinstance(part, dict) or "overall" not in part:
             continue

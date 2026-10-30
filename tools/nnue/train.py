@@ -555,13 +555,40 @@ class BinData:
         return total / max(1, self.n_val)
 
 
+def fake_quant(x, scale, limit=32767):
+    """x rounded to the export's integer grid (as export() rounds and clips it), with the gradient of the
+    identity (straight-through), so the forward pass computes what the engine will."""
+    q = torch.clamp(torch.round(x * scale), -limit, limit) / scale
+    return x + (q - x).detach()
+
+
+FT_IMPLS = ("embedding", "fused")
+
+
 class Nnue(torch.nn.Module):
-    def __init__(self, hidden=256, buckets=1, king_buckets="none", screlu=False):
+    """ft_impl and qat change how the forward pass computes, not the parameters, so checkpoints are the
+    same either way:
+
+    * ft_impl "embedding": two EmbeddingBag lookups (one per perspective) of 32 rows each, 64 with king
+      buckets (the bucket row and its factor row, added in the lookup), padding included.
+    * ft_impl "fused": the factor rows are folded into the bucket rows once per batch (as export() folds
+      them), and both perspectives are one lookup of only the pieces there are: about a third of the rows
+      the embedding path gathers and scatters with king buckets. The same function up to float rounding.
+    * qat: quantization-aware training. The folded feature weights, the feature biases and the output layer
+      are rounded to the export's grid in the forward pass (fake_quant), so the network trained is the one
+      the engine runs; the latent float weights are what the optimiser updates. Implies the fused path."""
+
+    def __init__(self, hidden=256, buckets=1, king_buckets="none", screlu=False, ft_impl="embedding", qat=False):
         super().__init__()
+        if ft_impl not in FT_IMPLS:
+            raise ValueError(f"ft_impl must be one of {FT_IMPLS}")
         self.hidden = hidden
         self.buckets = buckets
         self.screlu = screlu
+        self.ft_impl = ft_impl
+        self.qat = qat
         self.king = KingBuckets(king_buckets)
+        self.king_folded = KingBuckets(king_buckets, factor=False)  # rows of the folded table
         self.pad = self.king.rows
         self.ft = torch.nn.EmbeddingBag(self.pad + 1, hidden, mode="sum", padding_idx=self.pad)
         self.ft_bias = torch.nn.Parameter(torch.zeros(hidden))
@@ -577,6 +604,8 @@ class Nnue(torch.nn.Module):
     def forward(self, white, black, stm, bucket):
         """white/black: [N, 32] plain feature indices per perspective; stm: [N]
         0/1; bucket: [N] output bucket."""
+        if self.qat or self.ft_impl == "fused":
+            return self._forward_fused(white, black, stm, bucket)
         aw = torch.clamp(self.ft(self.king(white)) + self.ft_bias, 0.0, 1.0)
         ab = torch.clamp(self.ft(self.king(black)) + self.ft_bias, 0.0, 1.0)
         if self.screlu:
@@ -586,6 +615,35 @@ class Nnue(torch.nn.Module):
         them = torch.where(s, aw, ab)
         out = self.out(torch.cat([us, them], dim=1))
         return out.gather(1, bucket.unsqueeze(1)).squeeze(1)
+
+    def folded_table(self):
+        """[K * 768 + 1, H]: the feature-transformer rows with the factor folded in (differentiable), and a
+        zero padding row last."""
+        w, k = self.ft.weight, self.king
+        rows = w[: k.count * FEATURES]
+        if k.factor:
+            rows = rows + w[k.count * FEATURES : (k.count + 1) * FEATURES].repeat(k.count, 1)
+        return torch.cat([rows, w.new_zeros(1, w.shape[1])])
+
+    def _forward_fused(self, white, black, stm, bucket):
+        n = white.shape[0]
+        table, ft_bias = self.folded_table(), self.ft_bias
+        out_w, out_b = self.out.weight, self.out.bias
+        if self.qat:
+            table, ft_bias = fake_quant(table, QA), fake_quant(ft_bias, QA)
+            out_w, out_b = fake_quant(out_w, QB), fake_quant(out_b, QA * QB, limit=2 ** 31 - 1)
+        rows = self.king_folded(torch.cat([white, black]))
+        present = rows != self.king_folded.rows
+        counts = present.sum(dim=1)
+        offsets = torch.cumsum(counts, 0) - counts
+        acc = torch.nn.functional.embedding_bag(rows[present], table, offsets, mode="sum") + ft_bias
+        acc = torch.clamp(acc, 0.0, 1.0)
+        if self.screlu:
+            acc = acc * acc
+        aw, ab = acc[:n], acc[n:]
+        s = stm.unsqueeze(1).bool()
+        x = torch.cat([torch.where(s, ab, aw), torch.where(s, aw, ab)], dim=1)
+        return torch.nn.functional.linear(x, out_w, out_b).gather(1, bucket.unsqueeze(1)).squeeze(1)
 
     def clip(self):
         with torch.no_grad():
@@ -955,7 +1013,8 @@ def profile(model, opt, sched, source, rng, args, device, warmup=5):
             for name, d in zip(phases, (t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4)):
                 phases[name].append(d * 1000)
     med = {k: float(np.median(v)) for k, v in phases.items()}
-    print(f"profile: {args.profile} batches of {args.batch} on {device}, median ms per batch (each phase "
+    impl = "fused + qat" if model.qat else model.ft_impl
+    print(f"profile: {args.profile} batches of {args.batch} on {device} ({impl}), median ms per batch (each phase "
           "synchronised): " + ", ".join(f"{k} {v:.2f}" for k, v in med.items())
           + f"; total {sum(med.values()):.2f}", flush=True)
 
@@ -1039,6 +1098,15 @@ def main(argv=None):
                     help="read the training loss back from the GPU every N batches instead of every batch (each "
                          "read waits for the GPU); the network trained is the same, the logged loss differs in "
                          "rounding")
+    ap.add_argument("--ft-impl", choices=FT_IMPLS, default="embedding",
+                    help="how the feature transformer is computed in training: 'embedding' (two lookups with "
+                         "padding and the factor rows) or 'fused' (factor folded in once per batch, one lookup of "
+                         "the pieces only); the same network up to float rounding, checkpoints interchangeable")
+    ap.add_argument("--qat", action="store_true",
+                    help="quantization-aware training: the forward pass rounds the feature transformer and the "
+                         "output layer to the export's integer grid (straight-through gradients), so the network "
+                         "trained is the one the engine runs; uses the fused path. Usually a fine-tune: "
+                         "--init-from a trained network")
     ap.add_argument("--profile", type=int, default=0, metavar="N",
                     help="time N training batches by phase (data, forward, backward, step, loss read) and end to "
                          "end with and without a loss read per batch, then stop without writing anything")
@@ -1096,7 +1164,8 @@ def main(argv=None):
         king_config(args.king_buckets)
     except ValueError as e:
         sys.exit(f"--king-buckets: {e}")
-    model = Nnue(args.hidden, args.buckets, args.king_buckets, args.activation == "screlu").to(device)
+    model = Nnue(args.hidden, args.buckets, args.king_buckets, args.activation == "screlu", args.ft_impl,
+                 args.qat).to(device)
     started_from = None
     if args.init_from:
         init_from(model, args.init_from)
@@ -1118,6 +1187,8 @@ def main(argv=None):
                 or ckpt.get("activation", "crelu") != args.activation):
             sys.exit(f"{ckpt_path} was made with different data, network design or --epochs")
         changed = [k for k, v in settings.items() if k in ckpt and ckpt[k] != v]
+        if ckpt.get("qat", False) != args.qat:  # checkpoints from before --qat trained without it
+            changed.append("qat")
         if changed:
             sys.exit(f"{ckpt_path} was made with different settings: {', '.join(changed)}")
         # Checkpoints written before the data was fingerprinted resume as before.
@@ -1199,7 +1270,7 @@ def main(argv=None):
         torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(),
                     "rng": rng.bit_generator.state, "epoch": epoch, "positions": n, "hidden": args.hidden,
                     "epochs": args.epochs, "buckets": args.buckets, "king_buckets": args.king_buckets,
-                    "activation": args.activation, **settings,
+                    "activation": args.activation, "qat": args.qat, "ft_impl": args.ft_impl, **settings,
                     "data_sha256": fingerprint["sha256"], "n_train": source.n_train, "split": source.split,
                     "init_from": started_from, "history": history},
                    ckpt_path + ".tmp")
@@ -1207,7 +1278,8 @@ def main(argv=None):
         manifest = {
             "format": "nags-nnue-training-1", "network": os.path.basename(args.out),
             "network_sha256": file_sha256(args.out, cache=False), "architecture": architecture(model),
-            "settings": {**settings, "epochs": args.epochs, "val": args.val, "seed": args.seed},
+            "settings": {**settings, "epochs": args.epochs, "val": args.val, "seed": args.seed, "qat": args.qat,
+                         "ft_impl": "fused" if args.qat else args.ft_impl},
             "data": {"positions": n, "train": n - source.n_val, "validation": source.n_val, "split": source.split,
                      **fingerprint},
             "init_from": started_from, "epochs_done": epoch, "history": history, "code": version,

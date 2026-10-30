@@ -31,3 +31,6 @@ training.log
 
 # Local build directories for experiments and baselines
 /build-*/
+
+# Local experiment outputs (match logs, candidate networks, data)
+/runs/
