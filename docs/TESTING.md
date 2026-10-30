@@ -129,12 +129,14 @@ covers move generation order and the opening playouts).
 `collect` lets NAGS choose a move with N nodes in sample positions
 (positions of real games from a PGN file, a jsonl file's `fen` fields, or
 an EPD file after random plies) and has a deeper reference (another engine,
-or NAGS with `--ref-nodes`) score that move and its own best move, each
-searched alone. A loss of at least `--threshold` is a mistake, classified
+or NAGS with `--ref-nodes`) score that move and its own best move, each by
+searching the position after it (NAGS ignores `go searchmoves`, so no tool
+may rely on it). A loss of at least `--threshold` is a mistake, classified
 by what fixes it: **time** (NAGS with 4N or 16N finds a move within half the
-threshold), **selectivity** (NAGS searching only the reference's move with
-the same N scores it above its own choice: ordering, pruning or reductions
-kept it from searching that move as deeply), or **evaluation** (neither).
+threshold), **selectivity** (NAGS, searching the positions after both moves
+with N nodes each, values the reference's move higher: ordering, pruning or
+reductions at the root kept it from searching that move as deeply), or
+**evaluation** (neither). `reclassify` recomputes NAGS's side of stored rows.
 `summary` counts the classes by phase and by the reference move's kind and
 writes the mistakes as an EPD suite (`bm` = the reference's move) for
 `tools/suite.py run`. The census and what it decides are in

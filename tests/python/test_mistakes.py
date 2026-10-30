@@ -19,22 +19,21 @@ GOOD, BAD, OTHER = chess.Move.from_uci("f1b5"), chess.Move.from_uci("h2h3"), che
 
 
 class Scripted:
-    """A stand-in engine: analyse() answers from a function of (limit, root moves)."""
+    """A stand-in engine: analyse() answers from a function of (limit, the move that led here or None)."""
 
     def __init__(self, answer):
         self.answer = answer
 
     def analyse(self, board, limit, root_moves=None, game=None):
-        move, cp = self.answer(limit, root_moves)
+        assert root_moves is None  # no engine is asked to restrict its root moves (NAGS ignores searchmoves)
+        last = board.peek() if board.move_stack else None
+        move, cp = self.answer(limit, last)
         return {"pv": [move], "score": chess.engine.PovScore(chess.engine.Cp(cp), board.turn)}
 
 
-class Pair:
+class Pair(mistakes.Engines):
     def __init__(self, nags, ref):
         self.nags, self.ref = nags, ref
-
-    def search(self, eng, board, limit, moves=None):
-        return eng.analyse(board, limit, root_moves=moves)
 
 
 def _args(**kw):
@@ -43,34 +42,33 @@ def _args(**kw):
     return argparse.Namespace(**base)
 
 
-def _reference(limit, moves):
-    if moves == [BAD]:
-        return BAD, -40
-    if moves == [OTHER]:
-        return OTHER, 20
-    return GOOD, 60
+def _reference(limit, last):
+    # At the root: the best move is GOOD. After a move: the score for the opponent (minus the move's value).
+    values = {GOOD: 60, BAD: -40, OTHER: 20}
+    return (GOOD, 0) if last is None else (chess.Move.null(), -values[last])
 
 
 @pytest.mark.parametrize("cls", ["time", "selectivity", "evaluation"])
 def test_classes(cls):
-    def nags(limit, moves):
-        if moves == [GOOD]:  # the reference's move searched alone with N nodes
-            return GOOD, 30 if cls == "selectivity" else -10
+    def nags(limit, last):
+        if last is None:  # the root: NAGS plays BAD, or GOOD with 4N for the time class
+            return (GOOD, 50) if cls == "time" and limit.nodes and limit.nodes >= 4000 else (BAD, 10)
         if limit.depth == 1:
-            return (moves[0], 5)
-        if limit.nodes and limit.nodes >= 4000 and cls == "time":
-            return GOOD, 50
-        return BAD, 10
+            return chess.Move.null(), -5
+        if last == GOOD:  # the reference's move, searched as deeply as the whole budget
+            return chess.Move.null(), -30 if cls == "selectivity" else 10
+        return chess.Move.null(), -10  # NAGS's own move is worth 10
 
     row = mistakes.examine(Pair(Scripted(nags), Scripted(_reference)), FEN, _args())
     assert row["mistake"] and row["loss"] == 100 and row["move"] == "h2h3" and row["ref_move"] == "f1b5"
     assert row["class"] == cls
     assert row["fixed_by_budget"] == (4 if cls == "time" else None)
     assert row["budgets"]["16"]["loss"] == (0 if cls == "time" else 100)
+    assert row["shallow_move"] == row["shallow_ref"] == 5
 
 
 def test_small_losses_are_not_mistakes_and_scale_applies():
-    nags = lambda limit, moves: (OTHER, 0)  # noqa: E731
+    nags = lambda limit, last: (OTHER, 0)  # noqa: E731
     row = mistakes.examine(Pair(Scripted(nags), Scripted(_reference)), FEN, _args())
     assert not row["mistake"] and row["loss"] == 40 and "class" not in row
     row = mistakes.examine(Pair(Scripted(nags), Scripted(_reference)), FEN, _args(ref_scale=2.0))

@@ -292,13 +292,13 @@ claim.
 deeper reference shows where its decisions fail.
 
 **Tool.** `tools/mistakes.py collect`. NAGS chooses a move with N nodes. A deeper reference scores that
-move and its own best move, each searched alone with `searchmoves`. A loss of at least `--threshold` is a
-mistake, and each mistake is classified by what fixes it:
+move and its own best move, each by searching the position after it (NAGS ignores `searchmoves`). A loss of
+at least `--threshold` is a mistake, and each mistake is classified by what fixes it:
 
 | Class | What fixes it |
 |---|---|
 | time | more nodes (4N, 16N) find a good move |
-| selectivity | the reference's move, searched alone with the same N nodes, scores above NAGS's choice (ordering, pruning or reductions kept it from being searched as deeply) |
+| selectivity | NAGS, searching the positions after both moves with N nodes each, values the reference's move higher (ordering, pruning or reductions at the root kept it from being searched as deeply) |
 | evaluation | neither: NAGS misjudges where the move leads |
 
 `summary` breaks the classes down by phase and by kind of move, and writes the mistakes as an EPD suite
@@ -407,6 +407,28 @@ Measured on the 4-core VM (Intel Xeon, 2.1 GHz, no GPU) on 2026-10-30, with netw
   Caveats: 60 games, so the positions within a game are correlated, and this is no strength result. Only the
   PC experiment's networks and their SPRT decide. 201 of 4,683 positions (4.3%) were dropped because
   Stockfish scored them as mates, against 35 for NAGS.
+- **Mistake census (item 8):**
+  - Setup: 300 positions from the 300 ladder games above. NAGS chose with 40,000 nodes; Stockfish 16 at 1M
+    nodes was the reference (`--ref-scale 1.6`, threshold 50 cp).
+  - Result: **48 mistakes (16.0%)**. Median loss per class:
+
+    | Class | Count | Share | Median loss |
+    |---|---:|---:|---:|
+    | time | 27 | 56% (19 fixed with 4N, 8 with 16N) | 101 cp |
+    | selectivity | 10 | 21% | 154 cp |
+    | evaluation | 11 | 23% | 90 cp |
+
+  - Evaluation mistakes: NAGS's depth-1 search already prefers its own move by 62 cp (median).
+  - By phase: 23 of 99 positions with 11-20 pieces, 20 of 98 with 21-32, 5 of 103 with at most 10.
+  - 42 of the 48 reference moves are quiet.
+  - The first classification used `searchmoves`, which NAGS ignores (`src/Uci.cpp`). It reported no
+    selectivity mistakes. `mistakes.py` now values a move by searching the position after it, with any
+    engine. `mistakes.py reclassify` recomputed these 48 rows; the time class needed no change.
+  - Reading: half the mistakes at this budget are cured by more search, so time allocation still matters
+    most (`tools/decision_data.py`). The rest split evenly between root selectivity and evaluation.
+  - 48 cases support no stronger claim. The census to act on is on positions from 10+0.1 games, with more
+    of them.
+  - `runs/vm/mistakes.epd` (not committed) holds the positions as a suite.
 - **Endgames (item 7):** 75.0% of 2,100 tablebase positions right (table above).
 - **Data composition (item 3):** the network-8 self-play composition and the imbalanced book's effect
   (above).

@@ -2,22 +2,28 @@
 """Search mistakes, collected and classified by cause.
 
   collect  NAGS chooses a move in each sample position with N nodes; a deeper reference (another engine, or
-           NAGS itself with many more nodes) scores that move and its own best move by searching each one
-           alone (`searchmoves`). A position is a mistake when NAGS's move loses at least --threshold
+           NAGS itself with many more nodes) scores that move and its own best move, each by searching the
+           position after it (minus that search's score; NAGS ignores `searchmoves`, so no engine is asked
+           to restrict its root moves). A position is a mistake when NAGS's move loses at least --threshold
            centipawns by the reference. Each mistake is then classified by what fixes it:
 
              time        NAGS with more nodes (--budgets, e.g. 4N and 16N) chooses a move within half the
                          threshold of the reference's best: the search was right, only short.
-             selectivity NAGS, made to search only the reference's move with the same N nodes, scores it
-                         above the move it chose: it would have preferred the move had it searched it as
-                         deeply, so move ordering, pruning or reductions kept it from doing so.
-             evaluation  even searched alone with N nodes the reference's move scores below NAGS's choice:
-                         NAGS misjudges where it leads (the evaluation, or a horizon beyond N nodes).
+             selectivity NAGS, searching the position after the reference's move with N nodes and the
+                         position after its own move with N nodes, values the reference's move higher: it
+                         would have preferred it had it searched it as deeply, so move ordering, pruning or
+                         reductions at the root kept it from doing so.
+             evaluation  searched that way the reference's move still scores below NAGS's choice: NAGS
+                         misjudges where it leads (the evaluation, or a horizon beyond N nodes).
 
            The rows (--out, one JSON line a position) also hold NAGS's shallow (depth 1, quiescence)
            scores of both moves next to the reference's, so an evaluation mistake shows how much of it the
            static evaluation already makes, and whether the reference move is a capture, check or quiet.
-  summary  counts and mean loss per class, by phase (pieces) and by the reference move's kind, and writes
+  reclassify  recomputes NAGS's side of each mistake (selectivity or evaluation, shallow scores) with the
+           current method and --engine, keeping the reference's values: for rows collected before the method
+           changed.
+  summary  counts and loss per class (mean with each loss capped at 1000 cp, so mates do not dominate, and
+           median), by phase (pieces) and by the reference move's kind, and writes
            the mistakes as an EPD suite (bm = the reference's move) that tools/suite.py run can replay to
            check whether a change fixes them.
 
@@ -73,6 +79,16 @@ class Engines:
     def search(self, eng, board, limit, moves=None):
         return eng.analyse(board, limit, root_moves=moves, game=object())  # a new game: no table carried over
 
+    def value(self, eng, board, move, limit):
+        """The value of playing `move` for the side to move: minus a search of the position after it."""
+        child = board.copy()
+        child.push(move)
+        if child.is_checkmate():
+            return MATE
+        if child.is_game_over(claim_draw=True):
+            return 0
+        return -cp(self.search(eng, child, limit)["score"])
+
     def close(self):
         self.nags.quit()
         if self.ref is not self.nags:
@@ -91,8 +107,15 @@ def examine(eng, fen, args):
         return {"fen": fen, "error": "no principal variation", "mistake": False, "loss": 0.0,
                 "pieces": len(board.piece_map()), "ref_move_kind": "none"}
     move, ref_move = mine["pv"][0], best["pv"][0]
-    ref_best = cp(best["score"]) * scale
-    ref_mine = ref_best if move == ref_move else cp(eng.search(eng.ref, board, ref_limit, [move])["score"]) * scale
+    values = {}  # the reference's value of each move asked about
+
+    def ref_value(m):
+        if m not in values:
+            values[m] = eng.value(eng.ref, board, m, ref_limit) * scale
+        return values[m]
+
+    ref_best = ref_value(ref_move)
+    ref_mine = ref_value(move)
     loss = max(0.0, ref_best - ref_mine)
     pieces = len(board.piece_map())
     kind = ("capture" if board.is_capture(ref_move) else "promotion" if ref_move.promotion else
@@ -107,24 +130,28 @@ def examine(eng, fen, args):
     for k in args.budgets:
         info = eng.search(eng.nags, board, chess.engine.Limit(nodes=args.nodes * k))
         m = info["pv"][0]
-        value = ref_best if m == ref_move else ref_mine if m == move else \
-            cp(eng.search(eng.ref, board, ref_limit, [m])["score"]) * scale
-        row["budgets"][str(k)] = {"move": m.uci(), "loss": max(0.0, ref_best - value)}
-    # Selectivity: NAGS's score of the reference's move, searched alone with the same nodes.
-    forced = eng.search(eng.nags, board, n, [ref_move])
-    row["forced_ref_score"] = cp(forced["score"])
-    # Shallow scores of both moves (depth 1: the static evaluation and a quiescence search).
-    row["shallow_move"] = cp(eng.search(eng.nags, board, chess.engine.Limit(depth=1), [move])["score"])
-    row["shallow_ref"] = cp(eng.search(eng.nags, board, chess.engine.Limit(depth=1), [ref_move])["score"])
+        row["budgets"][str(k)] = {"move": m.uci(), "loss": max(0.0, ref_best - ref_value(m))}
+    nags_side(eng, board, move, ref_move, row, args)
+    return row
+
+
+def nags_side(eng, board, move, ref_move, row, args):
+    """Selectivity or evaluation, and the shallow scores: NAGS's values of both moves, each from a search of
+    the position after it with N nodes (and with depth 1: the evaluation and a quiescence search)."""
+    n = chess.engine.Limit(nodes=args.nodes)
+    row["nags_value_move"] = eng.value(eng.nags, board, move, n)
+    row["nags_value_ref"] = eng.value(eng.nags, board, ref_move, n)
+    row["shallow_move"] = eng.value(eng.nags, board, move, chess.engine.Limit(depth=1))
+    row["shallow_ref"] = eng.value(eng.nags, board, ref_move, chess.engine.Limit(depth=1))
+    row.pop("forced_ref_score", None)  # the earlier method's (searchmoves, which NAGS ignores)
     fixed = [k for k in args.budgets if row["budgets"][str(k)]["loss"] < args.threshold / 2]
     row["fixed_by_budget"] = min(fixed) if fixed else None
     if fixed:
         row["class"] = "time"
-    elif row["forced_ref_score"] > row["score"]:
+    elif row["nags_value_ref"] > row["nags_value_move"]:
         row["class"] = "selectivity"
     else:
         row["class"] = "evaluation"
-    return row
 
 
 def collect(args):
@@ -158,18 +185,40 @@ def collect(args):
     return summary(argparse.Namespace(rows=[args.out], epd=None, json=None, top=0))
 
 
+def reclassify(args):
+    rows = [json.loads(l) for l in Path(args.rows).read_text().splitlines() if l.strip()]
+    eng = Engines(argparse.Namespace(engine=args.engine, reference=None, option=args.option, ref_option=None))
+    try:
+        for r in rows:
+            if r.get("mistake"):
+                budgets = argparse.Namespace(nodes=r["nodes"], budgets=[int(k) for k in r["budgets"]],
+                                             threshold=args.threshold)
+                board = chess.Board(r["fen"])
+                nags_side(eng, board, chess.Move.from_uci(r["move"]), chess.Move.from_uci(r["ref_move"]), r, budgets)
+    finally:
+        eng.close()
+    with open(args.out, "w") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+    return summary(argparse.Namespace(rows=[args.out], epd=None, json=None))
+
+
+CAP = 1000  # cp: a loss counted in means at most this (mate scores would dominate them)
+
+
 def summary(args):
     rows = [json.loads(l) for p in args.rows for l in Path(p).read_text().splitlines() if l.strip()]
     if not rows:
         sys.exit("no rows")
     mistakes = [r for r in rows if r.get("mistake")]
     print(f"{len(rows)} positions, {len(mistakes)} mistakes ({len(mistakes) / len(rows):.1%}); mean loss over all "
-          f"positions {statistics.mean(r['loss'] for r in rows):.1f} cp")
+          f"positions {statistics.mean(min(CAP, r['loss']) for r in rows):.1f} cp (each capped at {CAP})")
     report = {"positions": len(rows), "mistakes": len(mistakes), "classes": {}}
     for c in CLASSES:
         part = [r for r in mistakes if r.get("class") == c]
         entry = {"count": len(part), "share": len(part) / len(mistakes) if mistakes else 0.0,
-                 "mean_loss": statistics.mean(r["loss"] for r in part) if part else None}
+                 "mean_loss": statistics.mean(min(CAP, r["loss"]) for r in part) if part else None,
+                 "median_loss": statistics.median(r["loss"] for r in part) if part else None}
         if c == "time" and part:
             entry["fixed_by"] = {str(k): sum(r["fixed_by_budget"] == k for r in part)
                                  for k in sorted({r["fixed_by_budget"] for r in part})}
@@ -178,7 +227,7 @@ def summary(args):
             entry["shallow_preference_cp"] = statistics.median(r["shallow_move"] - r["shallow_ref"] for r in part)
         report["classes"][c] = entry
         print(f"  {c:<12} {len(part):4d} ({entry['share']:.0%})"
-              + (f"  mean loss {entry['mean_loss']:.0f} cp" if part else "")
+              + (f"  loss mean {entry['mean_loss']:.0f} cp (capped), median {entry['median_loss']:.0f}" if part else "")
               + (f"  fixed by {entry['fixed_by']} x N" if entry.get("fixed_by") else "")
               + (f"  shallow search prefers NAGS's move by {entry['shallow_preference_cp']:.0f} cp (median)"
                  if entry.get("shallow_preference_cp") is not None else ""))
@@ -227,6 +276,12 @@ def main(argv=None):
     c.add_argument("--option", action="append", metavar="NAME=VALUE", help="UCI option for NAGS")
     c.add_argument("--ref-option", action="append", metavar="NAME=VALUE", help="UCI option for the reference")
     c.add_argument("--workers", type=int, default=1, help="positions examined at once (two engines each)")
+    rc = sub.add_parser("reclassify", help="recompute NAGS's side of collected mistakes with the current method")
+    rc.add_argument("rows")
+    rc.add_argument("--engine", required=True)
+    rc.add_argument("--option", action="append", metavar="NAME=VALUE")
+    rc.add_argument("--threshold", type=float, default=50.0, help="as collect's (for the time class)")
+    rc.add_argument("--out", required=True)
     c.add_argument("--out", required=True, help="rows (jsonl); an existing file is continued")
     s = sub.add_parser("summary", help="summarise collected rows")
     s.add_argument("rows", nargs="+")
@@ -235,6 +290,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.cmd == "collect":
         collect(args)
+    elif args.cmd == "reclassify":
+        reclassify(args)
     else:
         summary(args)
     return 0
