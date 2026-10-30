@@ -325,6 +325,36 @@ int main() {
         nnue::useEmbedded();
     }
 
+    // DrawScaling (off by default): scales only where the favoured side has no pawns and at most a minor
+    // piece more (and two knights against a bare king), whichever side is to move.
+    if (nnue::network()) {
+        struct Case { const char *fen; int num, den; }; // expected: scaled = raw * num / den (den 0: 0)
+        const Case cases[] = {
+            {"8/6k1/2b5/8/8/8/3RK3/8 w - - 0 1", 4, 64},      // rook against bishop
+            {"8/6k1/2b5/8/8/8/3RK3/8 b - - 0 1", 4, 64},
+            {"8/6k1/2n5/8/8/8/3RK3/8 w - - 0 1", 4, 64},      // rook against knight
+            {"8/6k1/8/8/8/8/2NNK3/8 w - - 0 1", 0, 0},        // two knights against the king
+            {"8/6k1/8/8/8/8/2B1K3/8 w - - 0 1", 0, 0},        // a lone minor piece (insufficient anyway)
+            {"8/6k1/2r5/8/8/8/2RBK3/8 w - - 0 1", 14, 64},    // rook and bishop against rook
+            {"8/6k1/8/8/8/8/2BNK3/8 w - - 0 1", 1, 1},        // bishop and knight: a win, unchanged
+            {"8/6k1/2r5/8/8/8/3QK3/8 w - - 0 1", 1, 1},       // queen against rook: unchanged
+            {"8/6k1/2b5/8/8/8/3RKP2/8 w - - 0 1", 1, 1},      // the rook's side has a pawn: unchanged
+        };
+        FastBoard p;
+        for (const Case &c : cases) {
+            CHECK(p.setFromFEN(c.fen), "bad FEN %s", c.fen);
+            eval::drawScaling = false;
+            const int raw = eval::evaluate(p);
+            eval::drawScaling = true;
+            const int scaled = eval::evaluate(p);
+            eval::drawScaling = false;
+            // The rule applies to the side the network favours, here White, the side with more material.
+            CHECK((p.sideToMove() == Color::White) == (raw > 0), "%s: the network favours Black (%d)", c.fen, raw);
+            const int want = c.den == 0 ? 0 : raw * c.num / c.den;
+            CHECK(scaled == want, "DrawScaling %s: raw %d, scaled %d, expected %d", c.fen, raw, scaled, want);
+        }
+    }
+
     // The search runs on the network (mate detection does not depend on it).
     TranspositionTable tt(16);
     Searcher<FastBoard> s(&tt);

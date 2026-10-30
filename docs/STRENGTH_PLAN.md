@@ -264,9 +264,24 @@ clock of 0) and NAGS's search score without tablebases, as 32-byte records ready
 2. Add 1-2% tablebase positions to mixture M2 (item 3).
 3. Track `measure` per material for every new network, next to the evaluation set's loss by piece
    count.
-4. In parallel, as a search experiment: scale the evaluation towards zero when the stronger side has
-   no pawns and at most a minor piece's advantage (KRvKB, KRvKN, KNNvK). Run `measure` first, then SPRT
-   [0, 10] at 3+0.03.
+4. In parallel, as an evaluation experiment, the UCI option `DrawScaling` (off by default, so the bench
+   is unchanged: 1528850; with it on, 1548643). It scales the network's score towards zero when the side
+   it favours has no pawns and at most a minor piece more: by 4/64 if the other side has at most a minor
+   piece, otherwise by 14/64, and to 0 for a lone minor piece. It also scores two knights against a bare
+   king as 0. On the same 2,100 positions with `measure` it raises the share right from 75.0% to
+   **97.5%**:
+
+   | Material | Off | On |
+   |---|---:|---:|
+   | KRvKB | 8% | 100% |
+   | KRvKN | 18% | 94% (9 wins now called draws) |
+   | KNNvK | 1% | 100% |
+   | KBvKP | 68% | 97% |
+   | KNvKP | 73% | 93% |
+   | the others | unchanged within ±2 positions | |
+
+   The SPRT, on against off in the same binary, [0, 10] at 3+0.03, decides. These endings are rare in
+   games, so a small true gain may end undecided at the cap.
 
 **Decision.** By SPRT, as always. `measure` is a regression check and a diagnostic, not a strength
 claim.

@@ -46,6 +46,7 @@ public:
         if constexpr (eval::HasNnue<BoardT>::value) {
             lines.push_back("option name UseNNUE type check default true");
             lines.push_back("option name EvalFile type string default <embedded>");
+            lines.push_back("option name DrawScaling type check default false");
         }
         return lines;
     }
@@ -68,6 +69,14 @@ public:
                 bool active = nnue::setEnabled(on);
                 message = active ? "NNUE evaluation: " + nnue::networkName()
                                  : on ? "no NNUE network loaded; using the classical evaluation" : "classical evaluation";
+                return true;
+            }
+            if (optName == "DrawScaling") {
+                bool on = false;
+                if (!uci::parseBool(value, on)) { message = "invalid DrawScaling value '" + value + "'"; return false; }
+                // Stored scores were found with the other evaluation.
+                if (tt && on != eval::drawScaling) tt->clear();
+                eval::drawScaling = on;
                 return true;
             }
             if (optName == "EvalFile") {
