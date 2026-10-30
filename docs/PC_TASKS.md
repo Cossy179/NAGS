@@ -315,7 +315,9 @@ thread.
 & $PY tools\nnue\rescore.py compare --base R9\selfplay_9101.bin --labels runs\t_sf\selfplay_9101.bin runs\t_nags\selfplay_9101.bin --names base sf nags
 ```
 `engine_seconds_per_position` in each `.teacher.json` gives the cost: change NAGS's `--nodes` (into a new
-`--out-dir`; an output made with other settings is refused) until the two agree within 10%. The `to base`
+`--out-dir`; an output made with other settings is refused) until the two agree within 10%. On the VM, with 4
+processes at once, Stockfish 16 took 374 ms a position at 200k nodes and NAGS 110 ms at 200k (3.4 times as
+fast per node), so start NAGS at about 3.4 times Stockfish's nodes. The `to base`
 column of `sf` is the factor that puts Stockfish's centipawns on NAGS's scale (about 1.6 on the VM).
 Record both node counts, both times and the compare table.
 

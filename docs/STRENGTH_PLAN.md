@@ -387,6 +387,26 @@ Measured on the 4-core VM (Intel Xeon, 2.1 GHz, no GPU) on 2026-10-30, with netw
   same results, not 32: a doubling of efficiency, probably nearly all of it network 8 (the search changes since are
   correctness fixes). The 8k rung is now too weak to
   rate against. The next ladder needs the 64k-512k rungs anchored (step 2).
+- **Teacher pilot (item 1):** 60 games of seed 9202 (4,481 positions in every set), relabelled by Stockfish 16
+  and by NAGS, each at 200,000 nodes, 4 processes at once on the 4 cores. Fit = mean squared error of
+  σ(score/K) against the game result, at each set's best K:
+
+  | Labels | Engine time / position | Best K | Fit | Fit, ≤10 pieces | Fit, 21-32 | Factor to base scale | Mean diff to base (scaled) | Correlation with base |
+  |---|---:|---:|---:|---:|---:|---:|---:|---:|
+  | NAGS, 5000 nodes (base) | - | 240 | 0.05603 | 0.01623 | 0.08383 | 1.00 | - | 1.000 |
+  | Stockfish 16, 200k | 374 ms | 158 | **0.05432** | **0.00778** | 0.08512 | 1.52 | 199 cp | 0.752 |
+  | NAGS, 200k | 110 ms | 269 | 0.05671 | 0.01352 | 0.08682 | 0.90 | 99 cp | 0.972 |
+
+  Stockfish was 3.4 times slower per node than NAGS here. Equal engine time with Stockfish at 200k is NAGS at
+  about 680k nodes, which section 10a of the PC tasks sets exactly. Its labels predict these games' results
+  better than NAGS's, although the games are NAGS's own. In endgames its error is half of NAGS's, which agrees
+  with the tablebase finding below. They are also far from NAGS's labels (correlation 0.75): different
+  information, as item 1 hoped. NAGS's own 200k labels fit the 5000-node games' results slightly worse than
+  the 5000-node labels do.
+
+  Caveats: 60 games, so the positions within a game are correlated, and this is no strength result. Only the
+  PC experiment's networks and their SPRT decide. 201 of 4,683 positions (4.3%) were dropped because
+  Stockfish scored them as mates, against 35 for NAGS.
 - **Endgames (item 7):** 75.0% of 2,100 tablebase positions right (table above).
 - **Data composition (item 3):** the network-8 self-play composition and the imbalanced book's effect
   (above).
