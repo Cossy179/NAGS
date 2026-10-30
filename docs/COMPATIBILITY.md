@@ -60,7 +60,10 @@ a header with the settings, the network's FNV-1a 64 and the search
 fingerprint (bench nodes), then one line per game with the FNV-1a 64 of its
 bytes. A shard mode run never truncates or extends an output that has no
 index, and refuses an index of other settings, another network or another
-search. `tools/nnue/shards.py` reads the same format. `--repetition third` (opt-in)
+search. `tools/nnue/shards.py` reads the same format. `--book FILE` (opt-in) starts
+games from the file's positions; without it the output is byte-identical
+(checked, text, binary and shards), and with it the shard header gains
+`book=<fnv>:<positions>`. `--repetition third` (opt-in)
 ends a game at the third occurrence of a position, as the laws do, instead
 of the first repetition; the default writes the same bytes as before, and a
 data set made with `third` has the same format (some games run longer and some
@@ -81,7 +84,11 @@ from existing weights, off by default) and `--no-data-cache`; then
 `n_train` and `split` (a resume with another training/validation split is
 refused) and the options `--eval-set`, `--eval-overlap-limit`,
 `--sync-every` and `--profile` (none of them changes what is trained:
-tested byte for byte). The validation boundary moves to a game start only
+tested byte for byte), then `--ft-impl` (default `embedding`, today's
+path; `fused` computes the same function with the same parameters) and
+`--qat` (off by default), with the checkpoint keys `qat` and `ft_impl` (a
+checkpoint without `qat` was trained without it, and resumes only without
+it). The validation boundary moves to a game start only
 in a file with a complete shard index, which no data made before
 `--first-game` has, so existing data splits exactly as before. The
 trainer writes `<out>.json`, `<file>.sha256` and `<eval>.overlap.json`

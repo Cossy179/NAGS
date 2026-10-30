@@ -100,6 +100,39 @@ the search itself, and at most about 6% from searching the in-check
 positions with a smaller budget (which would change the games). One thread
 here: 353 kept positions per second.
 
+**Start positions** (`--book FILE`, opt-in). Each game starts from a
+position of the file (one FEN or EPD position a line; the first four
+fields are read, EPD operations ignored), drawn by the game's random
+stream, before the `--random-plies`. Without it every game starts from the
+initial position and the output is byte-identical to before (checked: text,
+binary and shards). The shard header records the book's FNV-1a 64 and its
+number of positions. A book steers the data: `tools/nnue/mix.py book` draws
+positions of a kind from existing data (imbalanced material, pawn endings,
+a piece range), `tools/make_openings.py --pgn` makes one from real games,
+and `tools/mistakes.py summary --epd` from positions NAGS got wrong. 2,000
+imbalanced positions from network-8 self-play, with `--random-plies 0`, gave
+games with material two or more pawns apart in 63.6% of the positions
+instead of 35.8%. Raise `--max-opening-score` for lopsided books.
+
+**Other sources of records** (all write the 32-byte format):
+
+* `tools/nnue/rescore.py label`: the games of indexed shards again, with
+  another engine's scores (a stronger teacher, or NAGS with more nodes),
+  resumable, with a consistent index and the engine time per position in
+  `<out>.teacher.json`; `rescore.py compare` sets label sets of the same
+  games side by side (their fit to the results, the factor between their
+  scales, their differences and cost). The records hold no castling
+  rights, so the teacher gets rights wherever king and rook are at home
+  (3.8% of positions differ from the real rights).
+* `tools/nnue/tb_data.py generate`: random quiet positions of chosen
+  materials with the Syzygy result under the fifty-move rule and NAGS's
+  search score; `tb_data.py measure` is the matching endgame test
+  (`docs/STRENGTH_PLAN.md`, item 7).
+* `tools/nnue/mix.py build`: a mixture of sources in given shares, by
+  whole games, with at most `--max-copies` records of a position, in
+  random game order with an index; `mix.py report` describes a data set's
+  composition.
+
 With an output name ending in `.bin` each position is a 32-byte binary
 record instead (occupancy, 4-bit piece codes, score, result, side to move;
 the layout is at the top of `src/datagen_main.cpp`). That is about half the
@@ -238,6 +271,33 @@ backward 308, step 7, and the loss read nothing measurable (1.01x end to
 end), as expected without a GPU. Whether the per-batch read costs anything
 on the RTX 3060 is what `--profile 200` there will say; the default stays
 at 1 until it does.
+
+**The fused feature transformer** (`--ft-impl fused`, opt-in). The default
+path looks up each perspective's 32 piece slots (padding included) and,
+with king buckets, their 32 factor rows: 128 rows a position, and the
+backward pass scatters into all of them. The fused path folds the factor
+rows into the bucket rows once per batch, as the export does, and looks up
+both perspectives' pieces only, in one call. It computes the same outputs
+and gradients to float rounding (tested for every design), with the same
+parameters, so checkpoints are interchangeable and a run may switch paths
+on `--resume`. On the 4-core VM's CPU (4 threads, kb4 SCReLU, batch 16384):
+28,400 positions/s → 40,400 (backward 301 → 193 ms a batch, forward
+184 → 104). The RTX 3060's figure is for `docs/PC_TASKS.md` section 9.
+
+**Quantization-aware training** (`--qat`, opt-in; implies the fused path).
+The forward pass rounds the folded feature weights and the feature biases
+(× 255) and the output layer (× 64) to the export's integer grid, with the
+gradient of the identity (straight-through), so the network trained is the
+one the engine runs: its output equals the export's weights in floating
+point to 1e-4 cp and the engine's integer evaluation to its truncations
+(1 cp), tested for every design. The optimiser still updates float
+weights, which drift around the grid. Use it to fine-tune a trained
+network (`--init-from`); a `--qat` checkpoint resumes only with `--qat`,
+and `quant_error.py` loads it as trained, so its weight-rounding error is
+zero by design and the `loss against the labels` line (engine column) is
+the measure to compare with a plain run's export. It costs about 5% of
+training speed on the CPU. Whether it plays better is
+`docs/STRENGTH_PLAN.md`, item 2.
 
 **Exact resume and warm starts are separate.** `--resume` continues the
 same run (data, settings, optimiser and schedule state). `--init-from NET`

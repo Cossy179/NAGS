@@ -20,6 +20,17 @@ record.
 | 6 | Warm start vs from scratch: new data, three training runs, SPRTs | 1-2 days | 0 |
 | 7 | Deeper labels experiment (optional) | 1-2 days | 6a |
 | 8 | Strength at 4 threads (optional) | 6 h | 0 |
+| 9 | The fused feature transformer on the GPU (`--ft-impl fused`) | 30 min | 0 |
+| 10 | Teacher labels against NAGS's own deeper labels, equal compute | 2-3 days | 6a |
+| 11 | Quantization-aware fine-tune (arm D of section 6) | 1 h + SPRTs | 6a |
+| 12 | Data mixtures and targeted data | 2-3 days | 6, 7-piece books |
+| 13 | v3 against v4 on identical data | 3 h + SPRTs | 6a |
+| 14 | Endgame accuracy on 5-piece tablebases (optional) | 1 h | 0 |
+
+Sections 9-14 belong to the strength programme in `docs/STRENGTH_PLAN.md` (branch `claude/upbeat-volta-95lzjz`,
+which carries `integ/round3`, `pc/results` and `exp/spsa-tune`), and its decision rules are written there. Use
+a checkout of that branch (`git worktree add ..\NAGS-programme origin/claude/upbeat-volta-95lzjz`); its benches
+are `integ/round3`'s.
 
 Background: `docs/NNUE.md` (training, shards, quantization, the new options), `docs/TESTING.md` (SPRT,
 funnel, tuning, strength log), `docs/COMPATIBILITY.md` (what must not change). The VM's reports:
@@ -275,6 +286,118 @@ tools\sprt.py ... --name time4x --name time1x --tc1 12+0.12 --tc2 3+0.03 --concu
 ```
 **Record:** both results, and the nodes per second at 1 and 4 threads (`go movetime 4000` from a few
 positions).
+
+## 9. The fused feature transformer on the GPU (about 30 minutes)
+
+`--ft-impl fused` computes the same network as the default path with about a third of the gathered rows
+(docs/STRENGTH_PLAN.md, item 9). Profile both on the data of section 5 (read only):
+```powershell
+$D = "<DATA>\selfplay_*.bin"
+foreach ($impl in "embedding","fused") { & $PY tools\nnue\train.py --data $D --out runs\prof_$impl.nnue --buckets 8 --king-buckets 4 --activation screlu --device cuda --no-data-cache --profile 50 --ft-impl $impl }
+& $PY tools\nnue\train.py --data $D --out runs\prof_qat.nnue --buckets 8 --king-buckets 4 --activation screlu --device cuda --no-data-cache --profile 50 --qat
+& $PY tools\nnue\train.py --data $D --out runs\ep1_fused.nnue --buckets 8 --king-buckets 4 --activation screlu --device cuda --no-data-cache --epochs 1 --ft-impl fused
+```
+**Record:** the three profile lines (ms per phase, positions/s), and the one-epoch seconds and validation loss
+of `runs\ep1_fused.nnue.json` next to section 5's `runs\ep1_sync1.nnue.json` (389-393 s, val 0.008673).
+**Decision (pre-registered):** at least 1.2x per epoch and a validation loss within 0.5% of 0.008673 make
+`fused` the default for later runs (a code change, made on the user's instruction).
+
+## 10. Teacher labels against NAGS's own deeper labels (2-3 days of CPU; after 6a)
+
+Question: do a stronger engine's scores train a better network than NAGS's own deeper search at the same
+engine time? Use the official Stockfish build the calibrations used (`$SF`); every engine process has one
+thread.
+
+**10a. Equal time and the scale (about 30 minutes).** Label the same 20 games both ways, then compare:
+```powershell
+& $PY tools\nnue\rescore.py label --data R9\selfplay_9101.bin --engine $SF --nodes 100000 --max-games 20 --workers $C --out-dir runs\t_sf
+& $PY tools\nnue\rescore.py label --data R9\selfplay_9101.bin --engine build\Release\nags_enhanced.exe --nodes 150000 --max-games 20 --workers $C --out-dir runs\t_nags
+& $PY tools\nnue\rescore.py compare --base R9\selfplay_9101.bin --labels runs\t_sf\selfplay_9101.bin runs\t_nags\selfplay_9101.bin --names base sf nags
+```
+`engine_seconds_per_position` in each `.teacher.json` gives the cost: change NAGS's `--nodes` (into a new
+`--out-dir`; an output made with other settings is refused) until the two agree within 10%. The `to base`
+column of `sf` is the factor that puts Stockfish's centipawns on NAGS's scale (about 1.6 on the VM).
+Record both node counts, both times and the compare table.
+
+**10b. Labels** for 10% of the games of shards 9101-9108, about 10M positions (one shard at a time; the same
+command resumes):
+```powershell
+foreach ($s in 9101..9108) { & $PY tools\nnue\rescore.py label --data R9\selfplay_$s.bin --engine $SF --nodes <SF_NODES> --scale <FACTOR> --fraction 0.1 --workers $C --out-dir R9\teacher_sf }
+foreach ($s in 9101..9108) { & $PY tools\nnue\rescore.py label --data R9\selfplay_$s.bin --engine build\Release\nags_enhanced.exe --nodes <NAGS_NODES> --fraction 0.1 --workers $C --out-dir R9\teacher_nags }
+```
+The same `--fraction` and `--select-seed` (default 1) choose the same games for both.
+
+**10c. Two fine-tunes** of network 8 with identical settings:
+```powershell
+$FT = "--buckets 8 --king-buckets 4 --activation screlu --device cuda --eval-set R9\evalset_9999.bin --select-by eval:evalset_9999.bin --keep-best --init-from nets\nags.nnue --lr 1e-4 --epochs 10"
+& $PY tools\nnue\train.py --data "R9\teacher_sf\selfplay_*.bin" $FT.Split(' ') --out R9\T_sf.nnue
+& $PY tools\nnue\train.py --data "R9\teacher_nags\selfplay_*.bin" $FT.Split(' ') --out R9\T_nags.nnue
+```
+(The evaluation set's labels are NAGS's 5000-node ones, so its loss favours T_nags; it picks each run's best
+epoch, the match decides.)
+
+**10d. SPRT** [0, 10] at 3+0.03, `T_sf.best.nnue` against `T_nags.best.nnue`; if H1, `T_sf.best.nnue` against
+network 8. **Decision (pre-registered):** teacher labels are worth expanding only if T_sf beats T_nags.
+**Record:** the label runs' times, the eval-set losses, every SPRT line.
+
+## 11. Quantization-aware fine-tune (about 1 hour of GPU, then SPRTs; after 6a)
+
+Arm D of section 6: B's command with `--qat`, everything else the same:
+```powershell
+& $PY tools\nnue\train.py $COMMON.Split(' ') --out R9\D_warm_qat_e20.nnue --epochs 20 --init-from nets\nags.nnue --qat
+foreach ($x in "B_warm_e20","D_warm_qat_e20") {
+  & $PY tools\nnue\quant_error.py --net R9\$x.best.nnue --data R9\evalset_9999.bin --positions 100000
+  & $PY tools\nnue\quant_error.py --net R9\$x.nnue.ckpt --data R9\evalset_9999.bin --positions 100000
+}
+```
+The first line of each pair is the kept network as the engine runs it: its `loss against the labels`, engine
+column, is what compares B and D. The second is the last epoch's float-against-export error (for D close to the
+integer arithmetic alone, by design). Then SPRT [0, 10] at 3+0.03, D against B; if H1,
+[−5, 0] at 10+0.1. **Decision:** as `docs/STRENGTH_PLAN.md` item 2. **Record:** both quant_error reports, the
+epoch times (QAT costs about 5% on the CPU), every SPRT line.
+
+## 12. Data mixtures and targeted data (2-3 days; after 6)
+
+Targeted sources first (each a few hours of CPU):
+```powershell
+& $PY tools\nnue\mix.py report "R9\selfplay_910*.bin" --json runs\mix_r9.json
+& $PY tools\nnue\mix.py report "<DATA>\selfplay_*.bin" --json runs\mix_r8.json
+& $PY tools\nnue\mix.py book "R9\selfplay_910*.bin" --select imbalanced --count 5000 --max-score 300 --out books\imbalanced.epd
+& $PY tools\make_openings.py --engine build\Release\nags_enhanced.exe --pgn AJ-CORR-PGN-000.pgn --count 5000 --min-plies 8 --max-plies 16 --out books\corr.epd
+.\build\Release\nags_datagen.exe --out R9T\imb_9201.bin --seed 9201 --first-game 0 --games 60000 --threads $T --book books\imbalanced.epd --random-plies 2 --max-opening-score 600
+.\build\Release\nags_datagen.exe --out R9T\corr_9202.bin --seed 9202 --first-game 0 --games 60000 --threads $T --book books\corr.epd --random-plies 2
+& $PY tools\nnue\tb_data.py generate --syzygy <TB345> --material KRvKB KRvKN KBvKP KNvKP KRPvKR KBPvKB KNPvKB KRPvKB KPvKP KRvKBP --count 100000 --engine build\Release\nags_enhanced.exe --nodes 5000 --workers $T --out R9T\tb_1.bin
+```
+(`AJ-CORR-PGN-000.pgn` needs `git lfs pull`.) Then the mixtures, about 100M positions each, and the same
+training for each (network 8's design, from scratch, 20 epochs, `--eval-set R9\evalset_9999.bin --keep-best`):
+```powershell
+& $PY tools\nnue\mix.py build --source "R9\selfplay_910*.bin=1" --positions 100000000 --max-copies 4 --out MIX\m0.bin
+& $PY tools\nnue\mix.py build --source "R9\selfplay_910*.bin=0.5" --source "<DATA>\selfplay_*.bin=0.5" --positions 100000000 --max-copies 4 --out MIX\m1.bin
+& $PY tools\nnue\mix.py build --source "R9\selfplay_910*.bin=0.45" --source "<DATA>\selfplay_*.bin=0.45" --source "R9T\imb_*.bin=0.04" --source "R9T\corr_*.bin=0.04" --source "R9T\tb_*.bin=0.02" --positions 100000000 --max-copies 4 --out MIX\m2.bin
+```
+SPRTs [0, 10] at 3+0.03: m1 against m0, then m2 against the better. **Record:** each `.mix.json`, the
+eval-set losses by piece count, `tb_data.py measure` (section 14) for each network, and the SPRT lines.
+
+## 13. v3 against v4 on identical data (about 3 hours of GPU, then SPRTs; after 6a)
+
+```powershell
+& $PY tools\nnue\train.py --data "R9\selfplay_910*.bin" --buckets 8 --king-buckets 4 --activation screlu --device cuda --epochs 20 --out R9\v3_e20.nnue
+& $PY tools\nnue\train_v4.py --data "R9\selfplay_910*.bin" --buckets 8 --king-buckets 4 --activation pairwise --device cuda --epochs 20 --out R9\v4_e20.nnue
+.\build\Release\nags_enhanced.exe   # then: setoption name EvalFile value R9\v4_e20.nnue, speedtest, bench
+```
+(Section 6's A is the same v3 run with an eval set: use `A_scratch_e20.nnue` instead of training v3 again.)
+SPRT [0, 10] v4 against v3 at 20,000 nodes a move (`--nodes 20000`), then at 3+0.03; if both pass, [−5, 0]
+at 10+0.1. **Record:** both validation losses, the `speedtest` evaluate and update lines and `go nodes
+1500000` nodes/s with each network, every SPRT line.
+
+## 14. Endgame accuracy on 5-piece tablebases (optional, about 1 hour)
+
+With the 3-4-5 Syzygy tables (`<TB345>`, about 1 GB; WDL files suffice):
+```powershell
+& $PY tools\nnue\tb_data.py measure --syzygy <TB345> --material KRvKB KRvKN KNNvK KBvKP KNvKP KRPvKR KBPvKB KNPvKB KRPvKB KRvKBP KQvKRP KPvKPP --count 400 --engine build\Release\nags_enhanced.exe --nodes 10000 --workers $C --json runs\tb_net8.json
+```
+**Record:** the per-material lines. On the VM, network 8 says 75.0% of 3-4 piece results right, with KRvKB at 8%,
+KRvKN 18%, KNNvK 1% (`docs/STRENGTH_PLAN.md`, item 7).
 
 ## Reporting back
 

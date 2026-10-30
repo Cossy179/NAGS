@@ -124,6 +124,22 @@ covers move generation order and the opening playouts).
   measure and then by SPRT, not by game results credited to every move of
   a game.
 
+### Mistakes by cause (`tools/mistakes.py`)
+
+`collect` lets NAGS choose a move with N nodes in sample positions
+(positions of real games from a PGN file, a jsonl file's `fen` fields, or
+an EPD file after random plies) and has a deeper reference (another engine,
+or NAGS with `--ref-nodes`) score that move and its own best move, each
+searched alone. A loss of at least `--threshold` is a mistake, classified
+by what fixes it: **time** (NAGS with 4N or 16N finds a move within half the
+threshold), **selectivity** (NAGS searching only the reference's move with
+the same N scores it above its own choice: ordering, pruning or reductions
+kept it from searching that move as deeply), or **evaluation** (neither).
+`summary` counts the classes by phase and by the reference move's kind and
+writes the mistakes as an EPD suite (`bm` = the reference's move) for
+`tools/suite.py run`. The census and what it decides are in
+`docs/STRENGTH_PLAN.md`, item 8.
+
 ### Decisions: where more search pays (`tools/decision_data.py`)
 
 The per-decision measurement behind time management. `collect` searches

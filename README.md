@@ -193,6 +193,9 @@ The server warns if it is launched without a trained checkpoint. Its use is opti
 
 ### The research backlog
 
+The current programme, twelve lines of work with their experiments and pre-registered decision rules, is in
+[**docs/STRENGTH_PLAN.md**](docs/STRENGTH_PLAN.md).
+
 - Faster move picking and more selective search without tactical regressions
 - Better policy learning targets and legal-action representations
 - GPU measurements of the new batched inference path (implemented and tested on the CPU: MCTS 41 → 250 simulations/s), and graph construction in C++
