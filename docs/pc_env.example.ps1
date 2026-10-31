@@ -24,6 +24,8 @@ $ENG = Join-Path $ROOT 'build\Release\nags_enhanced.exe'
 $DG = Join-Path $ROOT 'build\Release\nags_datagen.exe'
 $NET8 = Join-Path $ROOT 'nets\nags.nnue'
 $OPENINGS = 'tools\openings\nags_balanced.epd'
+$FT = @()          # EDIT after section 9: @('--ft-impl', 'fused') if it adopted the fused path, else @()
+$TB345 = ''        # EDIT if present: the directory of the 3-4-5 Syzygy tables (sections 10 and 12)
 # Section 6's shards, named one by one: PowerShell passes a wildcard to a program unexpanded.
 $SHARDS = @(foreach ($shardSeed in 9101..9108) { Join-Path $R9 "selfplay_$shardSeed.bin" })
 

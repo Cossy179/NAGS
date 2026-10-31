@@ -1,407 +1,642 @@
-# Tasks for the training PC
+# Tasks for the training PC (round 4)
 
-A handoff from the cloud VM session (2026-10-26), for a Claude session on the Windows PC. `docs/NNUE.md`
-records that PC as an AMD Ryzen 5 3500X (6 cores, 6 threads), an RTX 3060 12 GB, 16 GB RAM, MSVC (VS 2019
-Build Tools) and Python 3.13 with CUDA PyTorch. Check the thread count, since the user mentioned 5; every
-command below takes it from `$T` (see "Threads"). Everything here uses branch **`integ/round3`**, which combines all the
-work of the last two rounds. CI is green on it on Linux, macOS and Windows; ctest 49/49 and pytest 359
-passed with none skipped on the VM. These are the tasks that need this PC's GPU, its data or its
-checkpoints. Work through them in order: each section says how long it takes, what to run, and what to
-record.
+The one handoff for the Windows PC: an AMD Ryzen 5 3500X (6 cores, 6 threads), an RTX 3060 12 GB, 16 GB RAM,
+MSVC (VS 2019 Build Tools) and Python 3.13 with CUDA PyTorch (`docs/NNUE.md`). It replaces every earlier
+version of this file, including the ones on `integ/round3`, `fix/round3-review` and `pc/results`.
 
-| # | Task | Time | Needs |
+**Run this code:** branch **`main`**, code commit **`26b2d6c`**. Later commits on `main` may change
+documentation only. Section R checks this: `git diff 26b2d6c HEAD -- src CMakeLists.txt cmake tools tests nets`
+must print nothing. If it prints anything, stop and ask the user before running any of it.
+
+`main` at `26b2d6c` includes:
+
+- the round-3 work: `integ/round3`, the PC's results and launcher (`pc/results`), and the safeguards of
+  `fix/round3-review`;
+- the trainer's overlap check by position, resume checks and no overwriting;
+- `sprt.py`, `reexport.py` and `quant_error.py` never overwriting;
+- datagen's cost line;
+- the strength programme's tools (`docs/STRENGTH_PLAN.md`).
+
+It does **not** include the stalemate change of `fix/round3-review` (`06f55df`, a stalemate with a piece left in
+quiescence). Its non-regression SPRT has no result yet (the table below). `main`'s benches are therefore those
+of `integ/round3`: **1417097, 1340613, 1528850, 1528850** for nags_basic, nags_fast, nags_enhanced and nags.
+
+**Training policy.** Everything NAGS learns comes from NAGS (`docs/STRENGTH_PLAN.md`):
+
+- every label and every training game is made by NAGS's own searches;
+- the only other sources are Syzygy results (exact) and start positions from opening books;
+- Stockfish is an opponent and a measuring stick only, never a teacher.
+
+## Status and order
+
+Machine time with nothing else running, from rates measured on this PC: self-play 1,465 positions/s with 6
+threads (network 7), training `kb4` 365-393 s an epoch on 201.7M positions, matches at 3+0.03 five at a time
+37-42 games a minute. A match is quoted at its game cap.
+
+| # | Task | Machine time | Status |
 |---|---|---|---|
-| 0 | Setup, build, tests, bench check | 30 min | - |
-| 1 | Cross-machine check of resumable self-play (MSVC vs the VM's GCC) | 5 min | 0 |
-| 2 | Find network 8's training checkpoint | minutes | - |
-| 3 | Network 8's real quantization error | 10 min | 2 |
-| 4 | Bias-corrected network 8: re-export, then SPRTs against network 8 | hours | 2 |
-| 5 | GPU training overhead (`--profile`, `--sync-every`) | 20 min | 0 |
-| 6 | Warm start vs from scratch: new data, three training runs, SPRTs | 1-2 days | 0 |
-| 7 | Deeper labels experiment (optional) | 1-2 days | 6a |
-| 8 | Strength at 4 threads (optional) | 6 h | 0 |
-| 9 | The fused feature transformer on the GPU (`--ft-impl fused`) | 30 min | 0 |
-| 10 | NAGS's own deeper labels against its 5000-node labels on the same games | 1-2 days | 6a |
-| 11 | Quantization-aware fine-tune (arm D of section 6; optional: H0 on the VM) | 1 h + SPRTs | 6a |
-| 12 | Data mixtures and targeted data | 2-3 days | 6, 7-piece books |
-| 13 | v3 against v4 on identical data | 3 h + SPRTs | 6a |
-| 14 | Endgame accuracy on 5-piece tablebases (optional) | 1 h | 0 |
+| 0-5 | Setup; cross-machine self-play; network 8's checkpoint; its quantization error; the bias-corrected export (H0, −2.9 ± 10.1); GPU overhead (`--sync-every`: 0.9%, the default stays 1) | - | done (`docs/PC_RESULTS.md` sections 0-5) |
+| S | The stalemate change's non-regression SPRT, rerun from 2026-10-30 21:39 (worktree `..\NAGS-fix`, `runs\stalemate_pc.cmd`) | up to about 3 h | **running or finished; result not yet in the repository** |
+| R | Round 4 setup: a new worktree on `main`, build, checks, launcher test | 1 h | after S |
+| 9 | The fused feature transformer on the RTX 3060, three times each way | 1.5 h | after R |
+| 6 | Warm start against training from scratch: R9 data, three training runs, five SPRTs | up to about 47 h | after 9 |
+| 7 | NAGS's own deeper labels at equal measured compute, in-game (exact positions) | about 2 days | after 6a |
+| 10 | Data mixtures: retained, fresh and targeted data | about 3 days | after 6 |
+| 15 | SPSA in small groups against the network chosen by then | about 14 h a group | after 6 / 7 / 10 decide the network |
+| 8 | Strength at 4 threads (optional) | 5 h | any time the CPU is free |
+| 11 | v3 against v4 on identical data (optional) | 3 h + matches | after 6a |
+| 12 | Endgame accuracy on 5-piece tablebases (optional) | 1 h | after R |
+| 13 | QAT fine-tune at scale (optional: H0 on the VM) | 1 h + matches | after 6b |
 
-Sections 9-14 belong to the strength programme in `docs/STRENGTH_PLAN.md` (branch `claude/upbeat-volta-95lzjz`,
-which carries `integ/round3`, `pc/results` and `exp/spsa-tune`), and its decision rules are written there. Use
-a checkout of that branch (`git worktree add ..\NAGS-programme origin/claude/upbeat-volta-95lzjz`); its benches
-are `integ/round3`'s.
+Outcomes not yet recorded anywhere in the repository. When each finishes, its result goes to
+`docs/PC_RESULTS.md`, and for an SPRT also to the strength log of `docs/TESTING.md`:
 
-Background: `docs/NNUE.md` (training, shards, quantization, the new options), `docs/TESTING.md` (SPRT,
-funnel, tuning, strength log), `docs/COMPATIBILITY.md` (what must not change). The VM's reports:
-https://claude.ai/artifact/UgPVqJ7i1y3QBnH3shEUow and https://claude.ai/artifact/P6AU31rz428PeYkgdCAZgp.
+| What | Where it stands | Record it in |
+|---|---|---|
+| Stalemate change, SPRT [−5, 0] at 3+0.03, cap 6000 (`fix/round3-review` `2384ebb` against `integ/round3` `7464810`) | started on the PC 2026-10-30 21:39; the VM's first run stopped undecided at 2422 games (+4.3 ± 8.6) | `pc/results` (as planned), then the user decides whether `06f55df` goes to `main` |
+| Warm start against scratch (section 6) | not started | `pc/round4` |
+| Deeper labels at equal compute (section 7) | not started | `pc/round4` |
+| Fused path on the GPU (section 9) | not run | `pc/round4` |
+| Strength at 4 threads (section 8) | not run | `pc/round4` |
 
 ## Rules for this machine (read before running anything)
 
-1. **Do not disturb a training run that is in progress.** First check for running `python` (train.py,
-   run_round.py), `nags_datagen.exe` and `nags_enhanced.exe` processes
-   (`Get-Process python, nags_datagen, nags_enhanced -ErrorAction SilentlyContinue`) and ask the user before
-   continuing if any exists. Never write into the data directory of a round that is still going.
-2. **Never overwrite or delete** `nets\nags.nnue`, existing `selfplay_*.bin` files or their `.games`
-   indexes, existing `*.ckpt` checkpoints, or `round_*.txt` logs. Every output below goes to a new file
-   or directory: `nets\candidates\`, `runs\`, and the new data directory `R9` (section 6).
-3. **Use a separate checkout**, so the checkout that a running or earlier round uses keeps its binaries:
-   `git worktree add ..\NAGS-round3 origin/integ/round3`. Build and run everything from there.
-4. **Start long runs detached from the Claude app.** On this PC a run that was a child of a packaged app
-   ended when the app updated itself (`docs/NNUE.md`). Use `Start-Process` (template below), write a log,
-   and check the log. Every long job here can be resumed with the same command (shards, `train.py --resume`,
-   `sprt.py --resume`).
-5. **Run one CPU-heavy job at a time.** `nags_datagen --threads $T` and an SPRT with
-   `--concurrency $C` each fill the CPU; running both slows the matches and makes them noisy. GPU training can run alongside data
-   generation, but not alongside an SPRT.
-6. **Only an SPRT decides strength.** Record every number as it was printed: games, W/D/L, Elo ± error,
-   LLR, the decision. Do not replace `nets\nags.nnue`, merge to `main` or push to `main`: report, and the
-   user decides.
-7. **Results go to `docs/PC_RESULTS.md`** on a new branch `pc/results` (in the new checkout:
-   `git switch -c pc/results`). Commit and push that branch only (`git push -u origin pc/results`),
-   updating it after each section, so the results survive if the session ends.
-8. **Write nothing into an earlier round's data directory.** `train.py` caches each data file's SHA-256 as
-   `<file>.sha256` next to it, so add `--no-data-cache` whenever it reads data from another round
-   (section 5).
+1. **Do not disturb a job that is running.** First check for running `python`, `nags_datagen` and
+   `nags_enhanced` processes (`Get-Process python, nags_datagen, nags_enhanced -ErrorAction SilentlyContinue`).
+   Ask the user before continuing if any exists. The stalemate SPRT (S) uses the binaries of the worktrees
+   `..\NAGS-round3` and `..\NAGS-fix`. Do not rebuild, update or delete either of them while it runs.
+2. **Never overwrite or delete** `nets\nags.nnue`, existing `selfplay_*.bin` files or their `.games` indexes,
+   existing `*.ckpt` checkpoints, or `round_*.txt` logs. Every output goes to a new file or directory:
+   `nets\candidates\`, `runs\` and `$R9`. The tools enforce this:
+   - `train.py` refuses an existing `--out` (or its `.ckpt`, `.json`, `.best.nnue`) unless `--resume`
+     continues that run.
+   - `sprt.py` refuses a `--pgnout` that holds games unless `--resume` continues that match.
+   - `reexport.py --out` and `quant_error.py --json` refuse existing files.
+   - `nags_datagen` continues a shard only under identical settings.
+   - `Start-Detached` refuses a job name that exists.
 
-**Threads.** Use every thread the CPU has:
+   If a tool refuses, do not delete its earlier output: choose another name, or resume.
+3. **Use the new worktree** `..\NAGS-main` (section R) for everything from section R on. Leave `..\NAGS-round3`
+   and `..\NAGS-fix` as they are.
+4. **Start long runs detached from the Claude app**, with `Start-Detached` or `Start-Match` (below). A process
+   started from the app's shell with `Start-Process` stays inside the app's Windows job object (`IsProcessInJob`
+   reports `True`) and ends when the app updates itself (`docs/PC_RESULTS.md`, section 4).
+   - `Resume-Detached` opens the job's `.cmd` through `explorer.exe`, which starts it outside that job (`False`).
+   - Each job is a `runs\NAME.cmd` whose output goes to `runs\NAME.log`. The job stops at the first command that
+     fails.
+   - Only one copy of a job runs at a time (`runs\NAME.lock`).
+   - After any stop, `Resume-Detached NAME` runs the same `.cmd` again. Every command in it continues where it
+     stopped: shards from their indexes, `train.py --resume`, `sprt.py --resume`.
+5. **One heavy job at a time.** Data generation, a match, and GPU training or a GPU timing never overlap: no two
+   of them run at the same time. GPU training does not run alongside data generation either. That is the
+   user's rule for this machine, and it is stricter than the GPU's limits.
+6. **Only an SPRT decides strength, and only as declared before its first game.** Copy each declaration into
+   `docs/PC_RESULTS.md`, commit and push it before the first game.
+   - H1 passes and H0 fails.
+   - A match that reaches its cap without a decision is **inconclusive, never a pass**. No more games beyond
+     the cap, no rerun of the same pair, and an Elo estimate inside the bounds is not read as a pass.
+   - Record every number as it was printed: games, W/D/L, Elo ± error, LLR, the decision, the `Forfeits:` line.
+   - Do not replace `nets\nags.nnue`, merge to `main` or push to `main`: report, and the user decides.
+7. **Results go to `docs/PC_RESULTS.md` on branch `pc/round4`**, in the new worktree. Commit and push that
+   branch only (`git push -u origin pc/round4`) after each section. The stalemate SPRT's result goes to
+   `pc/results`, where it was planned. `runs\` and `nets\candidates\` are not committed.
+8. **Write nothing into an earlier round's data directory.** `train.py` caches each data file's SHA-256 next to
+   it, so add `--no-data-cache` whenever it reads another round's data (section 9 and section 10's `$DATA8`).
+
+## Paths, threads and detached jobs: `runs\pc_env.ps1`
+
+Every PowerShell block below starts by loading `runs\pc_env.ps1`, made in section R from
+`docs\pc_env.example.ps1`:
+
 ```powershell
-$T = [Environment]::ProcessorCount   # logical processors: 6 on a Ryzen 5 3500X
-$C = $T - 1                          # games played at once in a match
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
 ```
-- Self-play (`nags_datagen`) uses `--threads $T`. Measured on this PC: 1,465 positions/s with 6 threads,
-  1,301 with 5, and no gain from more threads than the CPU has.
-- Matches (`sprt.py`) use `--concurrency $C`, that is $T − 1. Each game has one engine thinking at a time, so that
-  fills all but one thread; the last one stays for the runner and the clocks. Using every thread there
-  makes engines steal time from each other (`docs/TESTING.md`).
-- Training runs on the GPU; its CPU use is small once the data is in GPU memory.
-- Only two places use fewer threads, on purpose: the 4-thread match (section 8) plays one game at a time
-  so the engine has its 4 threads, and `bench` is single-threaded by definition.
 
-The double-quoted command string of the launch template below expands `$T` and `$C`; in a `.cmd` file, write the numbers themselves.
+It defines, with this machine's real paths (it stops if `$ROOT` or `$PY` does not exist):
 
-Detached launch template (PowerShell). Adjust the paths; `$PY` is the venv's python:
+- **Paths:**
+  - `$ROOT`: the worktree.
+  - `$PY`: the CUDA venv's `python.exe`.
+  - `$DATA8`: network 8's round directory, read only.
+  - `$R9`: section 6's new directory.
+  - `$ENG` and `$DG`: the worktree's `nags_enhanced.exe` and `nags_datagen.exe`.
+  - `$NET8`: its `nets\nags.nnue`.
+  - `$SHARDS`: the eight shard paths of section 6, each named, because PowerShell passes a wildcard to a
+    program unexpanded and `shards.py` does not expand one.
+- **Threads:**
+  - `$T`, every logical processor, for self-play (`nags_datagen --threads $T`).
+  - `$C = $T - 1` for matches (`sprt.py --concurrency $C`).
+- **Helpers:**
+  - `ConvertTo-CmdLine ARRAY`: one command line for a `.cmd` file, every argument quoted. **Commands are built
+    as PowerShell arrays, never by splitting a string.**
+  - `Start-Detached NAME LINES`: the job described in rule 4. `Resume-Detached NAME` continues it, and
+    `Test-DetachedRunning NAME` says whether it runs.
+  - `Start-Match NAME ARGS`: `Start-Detached` for `tools\sprt.py ARGS --pgnout runs\NAME.pgn --resume
+    runs\NAME.log`. Started again, the match continues from its log, and a decided SPRT reports its decision
+    without playing on.
+
+Check a job with `Get-Content runs\NAME.log -Tail 5`.
+
+## S. The stalemate change's SPRT (running; do not disturb)
+
+Started 2026-10-30 21:39 from `..\NAGS-fix\runs\stalemate_pc.cmd` under its original plan (`tools/funnel.py --kind
+fix`: SPRT [−5, 0] at 3+0.03, cap 6000, 5 at a time). Candidate: `fix/round3-review` `2384ebb`. Base:
+`integ/round3` `7464810` (`docs/PC_RESULTS.md`, "Before section 6").
+
+When it ends, record its final lines on `pc/results` as planned, and the row in `docs/TESTING.md`'s experiment
+record ("Stalemate with a piece left in quiescence"). The result is one of:
+
+- **H1:** the user decides whether `06f55df` goes into `main`. Until then this round runs on `main` as pinned
+  above, without it.
+- **H0, or inconclusive at the cap:** nothing changes.
+
+Wait for it to finish before section R starts anything heavy (rule 5).
+
+## R. Round 4 setup: a new worktree on `main` (about 1 hour)
+
 ```powershell
-$ROOT = "C:\path\to\NAGS-round3"; $PY = "C:\path\to\NAGS\.venv\Scripts\python.exe"
-New-Item -ItemType Directory -Force "$ROOT\runs" | Out-Null
-Start-Process cmd.exe -WindowStyle Minimized -ArgumentList '/c', "cd /d $ROOT && `"$PY`" tools\sprt.py ARGS >> runs\NAME.log 2>&1"
-```
-Use `>>` (append) so that a resumed run (`--resume runs\NAME.log`, same arguments) adds to the same log.
-
-## 0. Setup and checks (about 30 minutes)
-
-```powershell
+cd C:\Users\Alex\Documents\code\NAGS-round3      # the existing worktree, only to reach the repository
+$env:GIT_LFS_SKIP_SMUDGE = 1                     # no task needs the 1 GB LFS file AJ-CORR-PGN-000.pgn
 git fetch origin
-git worktree add ..\NAGS-round3 origin/integ/round3
-cd ..\NAGS-round3
+git worktree add -b pc/round4 ..\NAGS-main origin/main
+cd ..\NAGS-main
+git diff 26b2d6c HEAD -- src CMakeLists.txt cmake tools tests nets   # must print nothing (see the top)
+New-Item -ItemType Directory runs | Out-Null
+Copy-Item docs\pc_env.example.ps1 runs\pc_env.ps1
+```
+
+Edit the four `EDIT` lines of `runs\pc_env.ps1`:
+
+- `$ROOT`: this directory (`(Get-Location).Path`).
+- `$PY`: the CUDA venv's `python.exe`, as in `..\NAGS-round3\runs\pc_env.ps1`.
+- `$DATA8`: `D:\NAGS\data`, network 8's round.
+- `$R9`: a directory that does not exist yet, for example `D:\NAGS\r9`.
+
+Then:
+
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
 cmake -B build
 cmake --build build --config Release --parallel
 ctest --test-dir build --build-config Release --output-on-failure
 foreach ($e in "nags_basic","nags_fast","nags_enhanced","nags") { & ".\build\Release\$e.exe" bench | Select-String "Nodes searched" }
-& $PY -m pip install -r requirements.txt -r requirements-onnx.txt   # into the existing CUDA venv; keeps its CUDA torch
-& $PY -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+& $PY -m pip install -r requirements.txt -r requirements-onnx.txt   # keeps the venv's CUDA torch
 & $PY -m pytest -q -rs
 ```
-**Expected:** ctest 49/49. Benches **1417097, 1340613, 1528850, 1528850** for nags_basic, nags_fast,
-nags_enhanced and nags. These are `integ/round3`'s; `main` gives 1509779 for nags_enhanced. pytest:
-everything passes; the SIGINT funnel test is skipped on Windows by design. CUDA prints `True` and the GPU.
 
-**Record:** the four benches, the ctest and pytest summary lines, the torch version and device. **If a
-bench differs, stop and report it**, because section 1 and every shard depend on it.
+**Expected:**
 
-## 1. Cross-machine check of resumable self-play (about 5 minutes)
+- ctest 49/49.
+- Benches **1417097, 1340613, 1528850, 1528850**.
+- pytest: everything passes except the SIGINT funnel test, which is skipped on Windows by design.
 
-The VM (GCC, Linux) generated these 400 games; its index is in the repo,
-`docs/data/ref_seed77_n5000_g400.games`. The MSVC build should play the same games, with the same
-checksum per game, at any thread count: only the order in the file depends on the threads. Generate them
-with every thread, kill the run part-way, resume it, then compare game by game:
+**If a bench differs, stop and report it.** Then check self-play against the VM's reference games (the same 400
+games as section 1, into this worktree's `runs\xm\pc.bin`):
+
 ```powershell
-New-Item -ItemType Directory -Force runs\xm | Out-Null
-$p = Start-Process .\build\Release\nags_datagen.exe -ArgumentList "--out runs\xm\pc.bin --nodes 5000 --seed 77 --first-game 0 --games 400 --threads $T" -PassThru
-Start-Sleep 15; Stop-Process -Id $p.Id -Force       # a hard kill mid-run
-.\build\Release\nags_datagen.exe --out runs\xm\pc.bin --nodes 5000 --seed 77 --first-game 0 --games 400 --threads $T
-& $PY tools\nnue\shards.py check runs\xm\pc.bin --checksums all
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+New-Item -ItemType Directory runs\xm | Out-Null
+& $DG --out runs\xm\pc.bin --nodes 5000 --seed 77 --first-game 0 --games 400 --threads $T
 & $PY -c "import sys; sys.path.insert(0,'tools/nnue'); import shards; ref=[l.split() for l in open('docs/data/ref_seed77_n5000_g400.games').read().splitlines()[1:]]; r={int(x[0]):(x[1],x[2],x[4]) for x in ref}; h,g=shards.read_index('runs/xm/pc.bin'); p={x.number:(str(x.records),str(x.bytes),x.checksum) for x in g}; bad=sorted(k for k in r if r[k]!=p.get(k)); print('games', len(p), 'identical to the VM:', not bad, 'first differing game:', bad[:1]); print('header equal:', h==open('docs/data/ref_seed77_n5000_g400.games').readline().rstrip())"
 ```
-**Expected:** the resume prints `N already written, 400-N to play`; `shards.py check` prints
-`1 shard(s), 400 games: consistent`; the comparison prints
-`games 400 identical to the VM: True first differing game: []` and `header equal: True`. The header is:
-```
-# nags_datagen games v2 seed=77 nodes=5000 random-plies=8 max-opening-score=400 hash=16 repetition=first format=bin network=embedded network-fnv=c7c60e3d6a52e155 search=1528850
-```
-**Record:** the kill point (`N`), the time, and both comparison lines. If a game differs, rerun with
-`--threads 1` into another file: with one thread the file is in game order, and the VM's single-thread
-file had SHA-256 `5DAE2E861C56CA106CA768811DB80B25DAE5C3B2E0654DC698B1DB2B48AE7674` (1,190,240 bytes).
-Report the first differing game's index line from both. Don't go on to section 6 until it's understood:
-data from this PC and from the VM must be the same games for the same seed.
 
-## 2. Find network 8's training checkpoint (minutes)
+**Expected:** `games 400 identical to the VM: True` and `header equal: True`. The header ends `search=1528850`.
+Then test the launcher once:
 
-Network 8 (`nets\nags.nnue`, 1,581,692 bytes) was trained by `run_round.py`, design `kb4`, 20 epochs, on
-201.7M positions (seeds 9001–9024), so its checkpoint is a `net_kb4_*_e20.nnue.ckpt` in that round's data
-directory (`data\` or, for example, `D:\NAGS\data`).
 ```powershell
-Get-ChildItem -Recurse -Filter "net_kb4_*e20.nnue.ckpt" C:\, D:\ -ErrorAction SilentlyContinue | Select FullName, Length, LastWriteTime
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+Start-Detached smoke (ConvertTo-CmdLine @($PY, '-c', "import ctypes; k = ctypes.windll.kernel32; r = ctypes.c_int(); k.IsProcessInJob(k.GetCurrentProcess(), None, ctypes.byref(r)); print('smoke: in a job:', bool(r.value))"))
+Start-Sleep 5; Get-Content runs\smoke.log
 ```
-Section 4's `--check` proves which one it is: the checkpoint's plain export must equal `nets\nags.nnue`
-byte for byte. **Record:** the path, and the matching `.nnue` next to it. If none matches, say so, and
-skip sections 3 and 4.
 
-## 3. The real quantization error of network 8 (about 10 minutes)
+**Expected:** `smoke: in a job: False`. If the log is missing or says `True`, stop and report it.
 
-The VM could only estimate it. Use positions network 8 did not train on, for example the reference games
-from section 1:
+**Record:** the `git diff` check, the benches, the test lines, both comparison lines and the smoke line.
+
+## 9. The fused feature transformer on the RTX 3060 (about 1.5 hours)
+
+`--ft-impl fused` computes the same network as the default path, to float rounding, with about a third of the
+rows gathered and scattered (`docs/STRENGTH_PLAN.md`, item 9). On the VM's CPU it was 1.4x faster per batch.
+Measure it on network 8's data (read only). Do it three times, alternating, with nothing else running, as in
+section 5:
+
 ```powershell
-& $PY tools\nnue\quant_error.py --net <NET8_CKPT> --data runs\xm\ref.bin --positions 40000 --json runs\quant_net8.json
-```
-**Record:** the three lines (total, weights, arithmetic: mean, p50, p90, p99, max, bias, sign changes)
-and the per-bucket line. For comparison, on a network-8-derived fine-tuned checkpoint the VM measured a
-total of 17.0 cp mean, bias +6.9 cp, and integer arithmetic 0.51 cp.
-
-## 4. Bias-corrected network 8 and its SPRTs (hours; the cheapest possible gain)
-
-On the VM, the bias-corrected export of a checkpoint beat that checkpoint's plain export: **+13.8 ± 10.7**,
-SPRT [0, 10] at 3+0.03, H1 after 1664 games, and it passed its non-regression check at 10+0.1: SPRT
-[−5, 0], H1 after 4486 games, +3.2 ± 6.1. That was one checkpoint (a fine-tuned derivative). Network 8
-itself can be corrected without training:
-```powershell
-New-Item -ItemType Directory -Force nets\candidates | Out-Null
-& $PY tools\nnue\reexport.py --ckpt <NET8_CKPT> --data runs\xm\ref.bin --positions 20000 --out nets\candidates\net8_corrected.nnue --check nets\nags.nnue
-```
-**Expected:** `the plain export ... is nets\nags.nnue, byte for byte`, then the float-vs-engine error of
-the plain and the corrected export on 20,000 other positions. **Record:** both lines.
-
-Then the match. Both sides are `integ/round3`'s `nags_enhanced.exe`; the base plays its embedded network 8.
-Run it detached (template above):
-```
-tools\sprt.py --engine build\Release\nags_enhanced.exe --engine build\Release\nags_enhanced.exe --name net8-corrected --name net8 --option1 EvalFile=nets\candidates\net8_corrected.nnue --tc 3+0.03 --sprt 0 10 --games 8000 --concurrency $C --openings tools\openings\nags_balanced.epd --resign-adjudication 4 1000 --pgnout runs\net8c_stc.pgn
-```
-Log: `runs\net8c_stc.log`. It starts with a `Fingerprint:` line. The preflight refuses to start if the
-`EvalFile` doesn't load. Expect a few hours; 8000 games at most.
-
-**If H1:** the [−5, 0] check at 10+0.1, same command with `--tc 10+0.1 --sprt -5 0 --games 6000`, log
-`runs\net8c_ltc.log`. **If both pass,** report it: the user decides whether `net8_corrected.nnue` becomes
-`nets\nags.nnue`. If so, that is a commit with the bench change and a strength-log row in `docs/TESTING.md`,
-made on the user's instruction. **If H0 or undecided at the cap,** record it; nothing changes.
-**Record:** every final status line, the decision, and the `Forfeits:` line if any.
-
-## 5. GPU training overhead (about 20 minutes)
-
-`--sync-every N` reads the loss back from the GPU every N batches instead of every batch. The trained
-network is byte-identical (tested). Measure what it saves on the 3060, using the data network 8 was
-trained on (`<DATA>\selfplay_*.bin`, read only):
-```powershell
-$D = "<DATA>\selfplay_*.bin"
-& $PY tools\nnue\train.py --data $D --out runs\prof_a.nnue --buckets 8 --king-buckets 4 --activation screlu --device cuda --no-data-cache --profile 50
-& $PY tools\nnue\train.py --data $D --out runs\prof_b.nnue --buckets 8 --king-buckets 4 --activation screlu --device cuda --no-data-cache --profile 50 --sync-every 100
-```
-`--profile` writes nothing. Its output gives time per phase (data, forward, backward, step, loss read) and
-end to end with the loss read every batch versus every 100. Then one real epoch each way (writes
-`runs\ep1_*.nnue`; about 6 minutes each):
-```powershell
-& $PY tools\nnue\train.py --data $D --out runs\ep1_sync1.nnue --buckets 8 --king-buckets 4 --activation screlu --device cuda --no-data-cache --epochs 1
-& $PY tools\nnue\train.py --data $D --out runs\ep1_sync100.nnue --buckets 8 --king-buckets 4 --activation screlu --device cuda --no-data-cache --epochs 1 --sync-every 100
-(Get-FileHash runs\ep1_sync1.nnue).Hash -eq (Get-FileHash runs\ep1_sync100.nnue).Hash
-```
-**Expected:** the last line prints `True` (same network). **Record:** both profiles, the epoch seconds
-(`runs\ep1_*.nnue.json`, `history[0].seconds`), and the comparison. If `--sync-every 100` saves 3% or
-more of the epoch time, report that it should become run_round's default for GPU training; the default is
-still 1.
-
-## 6. Warm start against training from scratch (about 1–2 days: the main GPU experiment)
-
-Question: does starting from network 8's weights (`--init-from`) on new data give a network at least as
-strong as training from scratch, in less GPU time?
-
-**6a. New data (about 20 hours with 6 threads, 22 with 5; resumable).** Make a new directory `R9` on the data drive (for
-example `D:\NAGS\r9`). In it, generate eight shards of 150,000 games with seeds never used for training
-(9101–9108), about 104M positions, plus a fixed evaluation set from seed 9999:
-```
-.\build\Release\nags_datagen.exe --out R9\selfplay_9101.bin --seed 9101 --first-game 0 --games 150000 --threads $T
-... the same for 9102 to 9108, one after the other ...
-.\build\Release\nags_datagen.exe --out R9\evalset_9999.bin --seed 9999 --first-game 0 --games 3000 --threads $T
-```
-Run them as one detached `.cmd` that loops over the seeds. After a stop, run the same `.cmd` again: each
-shard resumes from its index, and finished ones report `150000 already written, 0 to play`. Then:
-```powershell
-& $PY tools\nnue\shards.py check R9\selfplay_910*.bin --checksums all
-```
-**Expected:** `8 shard(s), 1200000 games: consistent`. The evaluation set must not be named
-`selfplay*`, so nothing trains on it. **Record:** positions per second, total positions, the check.
-
-**6b. Three training runs on the same data (about an hour each on the 3060).** All three use network 8's
-design, the evaluation set, and the best epoch kept:
-```powershell
-$COMMON = "--data R9\selfplay_910*.bin --buckets 8 --king-buckets 4 --activation screlu --device cuda --eval-set R9\evalset_9999.bin --select-by eval:evalset_9999.bin --keep-best"
-# A: from scratch, 20 epochs
-& $PY tools\nnue\train.py $COMMON.Split(' ') --out R9\A_scratch_e20.nnue --epochs 20
-# B: from network 8's weights, 20 epochs (fresh optimiser and schedule)
-& $PY tools\nnue\train.py $COMMON.Split(' ') --out R9\B_warm_e20.nnue --epochs 20 --init-from nets\nags.nnue
-# C: from network 8's weights, 10 epochs (half the GPU time)
-& $PY tools\nnue\train.py $COMMON.Split(' ') --out R9\C_warm_e10.nnue --epochs 10 --init-from nets\nags.nnue
-```
-Each can be resumed with `--resume` and the same arguments. The training/validation split is by complete
-games, since these shards have indexes; the log says `split by games`. **Record from each `<out>.json`:**
-the best epoch and its evaluation-set loss, the loss by piece count, the seconds per epoch and in total,
-and the validation loss.
-
-**6c. Matches (hours each, one at a time).** Each network at its best epoch (`R9\X.best.nnue`) against
-network 8, then the warm runs against scratch:
-```
-tools\sprt.py --engine build\Release\nags_enhanced.exe --engine build\Release\nags_enhanced.exe --name A --name net8 --option1 EvalFile=R9\A_scratch_e20.best.nnue --tc 3+0.03 --sprt 0 10 --games 8000 --concurrency $C --openings tools\openings\nags_balanced.epd --resign-adjudication 4 1000
-(the same for B and C)
-tools\sprt.py ... --name B --name A --option1 EvalFile=R9\B_warm_e20.best.nnue --option2 EvalFile=R9\A_scratch_e20.best.nnue --sprt -5 5 --games 8000 ...
-tools\sprt.py ... --name C --name A --option1 EvalFile=R9\C_warm_e10.best.nnue --option2 EvalFile=R9\A_scratch_e20.best.nnue --sprt -5 5 --games 8000 ...
-```
-**Acceptance:** warm starts become the recommended way to train only if B or C is not worse than A
-(C vs A H1 or undecided in [−5, 5], with C at half the GPU time), and the network that beats network 8
-does so by SPRT. **Record:** all final status lines and decisions, and GPU minutes per run. A network that
-beats network 8 is a candidate for `nets\nags.nnue`, which is the user's decision (rule 6).
-
-## 7. Deeper labels for informative positions (optional, after 6; about 1–2 days of CPU)
-
-The VM measured (100 games): positions where the static eval and the 5000-node score differ by 200 cp or
-more (`disagree:200`) are 16.8% of positions. Relabelling them with 40,000 nodes changes their labels by
-210.7 cp on average. A random 15.6% (`random:0.168`, equal cost) changes by 66.6 cp. Whether those labels
-train a better network is untested. Use the same seeds as three of the section 6 shards, so the games are
-identical and only the labels differ:
-```
-.\build\Release\nags_datagen.exe --out R9\relabel_dis\selfplay_9101.bin --seed 9101 --first-game 0 --games 150000 --threads $T --relabel-nodes 40000 --relabel-select disagree:200
-.\build\Release\nags_datagen.exe --out R9\relabel_rnd\selfplay_9101.bin --seed 9101 --first-game 0 --games 150000 --threads $T --relabel-nodes 40000 --relabel-select random:<FRACTION>
-(seeds 9101–9103 for both)
-```
-Take `<FRACTION>` from the end line of the `disagree` run (`relabelled X of Y positions (Z%)`), so that
-the two arms cost the same. Then train three networks identically from scratch (design and options as A,
-`--epochs 20`) on: the plain shards 9101–9103 from section 6, the `disagree` ones and the `random` ones.
-Compare their evaluation-set losses, then SPRT `disagree` against `random` ([0, 10], 3+0.03).
-**Record:** the relabel fractions and mean changes, the time per shard, the losses, and the SPRT.
-
-## 8. Multithreaded strength at 4 threads (optional, about 6 hours)
-
-The VM measured that Threads=2 against 1 gives +107.5 ± 14.0, and that double the time gives +165.4 ± 14.9.
-So a second thread is worth about 65% of a time doubling. The 6-core PC can measure 4 threads:
-```
-tools\sprt.py --engine build\Release\nags_enhanced.exe --engine build\Release\nags_enhanced.exe --name threads4 --name threads1 --option1 Threads=4 --tc 3+0.03 --concurrency 1 --games 1000 --openings tools\openings\nags_balanced.epd --resign-adjudication 4 1000
-tools\sprt.py ... --name time4x --name time1x --tc1 12+0.12 --tc2 3+0.03 --concurrency $C --games 1000 ...
-```
-**Record:** both results, and the nodes per second at 1 and 4 threads (`go movetime 4000` from a few
-positions).
-
-## 9. The fused feature transformer on the GPU (about 30 minutes)
-
-`--ft-impl fused` computes the same network as the default path with about a third of the gathered rows
-(docs/STRENGTH_PLAN.md, item 9). Profile both on the data of section 5 (read only):
-```powershell
-$D = "<DATA>\selfplay_*.bin"
-foreach ($impl in "embedding","fused") { & $PY tools\nnue\train.py --data $D --out runs\prof_$impl.nnue --buckets 8 --king-buckets 4 --activation screlu --device cuda --no-data-cache --profile 50 --ft-impl $impl }
-& $PY tools\nnue\train.py --data $D --out runs\prof_qat.nnue --buckets 8 --king-buckets 4 --activation screlu --device cuda --no-data-cache --profile 50 --qat
-& $PY tools\nnue\train.py --data $D --out runs\ep1_fused.nnue --buckets 8 --king-buckets 4 --activation screlu --device cuda --no-data-cache --epochs 1 --ft-impl fused
-```
-**Record:** the three profile lines (ms per phase, positions/s), and the one-epoch seconds and validation loss
-of `runs\ep1_fused.nnue.json` next to section 5's `runs\ep1_sync1.nnue.json` (389-393 s, val 0.008673).
-**Decision (pre-registered):** at least 1.2x per epoch and a validation loss within 0.5% of 0.008673 make
-`fused` the default for later runs (a code change, made on the user's instruction).
-
-## 10. NAGS's own deeper labels (1-2 days of CPU; after 6a)
-
-Question: do deeper NAGS labels for the same games train a better network than its 5000-node labels? Only
-NAGS labels anything (`docs/STRENGTH_PLAN.md`, the policy at the top, and item 1).
-
-**10a. Labels** for 10% of the games of shards 9101-9108, about 10M positions, at 40,000 nodes (8 times the
-base). Run one shard at a time; the same command resumes:
-```powershell
-foreach ($s in 9101..9108) { & $PY tools\nnue\rescore.py label --data R9\selfplay_$s.bin --engine build\Release\nags_enhanced.exe --nodes 40000 --fraction 0.1 --workers $T --out-dir R9\deep40k }
-& $PY tools\nnue\rescore.py compare --base R9\selfplay_9101.bin --labels R9\deep40k\selfplay_9101.bin --names base5k deep40k --json runs\deep_compare.json
-```
-`engine_seconds_per_position` in each `.teacher.json` gives the cost. NAGS's labels need no `--scale`.
-
-**10b. The base labels of the same games.** The deeper shards hold the chosen games only. Write the same games
-with their original labels by relabelling them at the base's own budget, 5000 nodes, into `R9\base5k`: the same
-`--fraction` and `--select-seed` choose the same games. This is cheap, and close to but not exactly the
-original labels (no table carried over from the game).
-
-**10c. Two fine-tunes** of network 8 with identical settings:
-```powershell
-$FT = "--buckets 8 --king-buckets 4 --activation screlu --device cuda --eval-set R9\evalset_9999.bin --select-by eval:evalset_9999.bin --keep-best --init-from nets\nags.nnue --lr 1e-4 --epochs 10"
-& $PY tools\nnue\train.py --data "R9\deep40k\selfplay_*.bin" $FT.Split(' ') --out R9\D_deep40k.nnue
-& $PY tools\nnue\train.py --data "R9\base5k\selfplay_*.bin" $FT.Split(' ') --out R9\B_base5k.nnue
-```
-The evaluation set's labels are 5000-node ones, so its loss favours B. It picks each run's best epoch; the
-match decides.
-
-**10d. SPRT** [0, 10] at 3+0.03, `D_deep40k.best.nnue` against `B_base5k.best.nnue`. **Decision (pre-registered):**
-if H1, the equal-CPU follow-up in `docs/STRENGTH_PLAN.md` item 1 decides how later rounds label. Otherwise deeper
-labels are dropped for now. **Record:** the label times, compare's table, the eval-set losses, every SPRT line.
-
-## 11. Quantization-aware fine-tune (optional; about 1 hour of GPU, then SPRTs; after 6a)
-
-On the VM a QAT fine-tune lost its SPRT against the same fine-tune without QAT (H0, −10.9 ± 14.3, 922 games;
-`docs/STRENGTH_PLAN.md`, item 2), so run this only alongside section 6 when the GPU is free: it tests QAT at
-scale, where the outcome could differ.
-
-Arm D of section 6: B's command with `--qat`, everything else the same:
-```powershell
-& $PY tools\nnue\train.py $COMMON.Split(' ') --out R9\D_warm_qat_e20.nnue --epochs 20 --init-from nets\nags.nnue --qat
-foreach ($x in "B_warm_e20","D_warm_qat_e20") {
-  & $PY tools\nnue\quant_error.py --net R9\$x.best.nnue --data R9\evalset_9999.bin --positions 100000
-  & $PY tools\nnue\quant_error.py --net R9\$x.nnue.ckpt --data R9\evalset_9999.bin --positions 100000
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+$D8 = @(Get-ChildItem -LiteralPath $DATA8 -Filter 'selfplay*.bin' | Sort-Object Name | ForEach-Object FullName)
+"$($D8.Count) files: $($D8[0]) ... $($D8[-1])"
+$TRAIN8 = @($PY, 'tools\nnue\train.py', '--data') + $D8 + @('--buckets', 8, '--king-buckets', 4, '--activation', 'screlu', '--device', 'cuda', '--no-data-cache')
+$lines = @()
+foreach ($r in 1..3) {
+    foreach ($impl in 'embedding', 'fused') { $lines += ConvertTo-CmdLine ($TRAIN8 + @('--out', 'runs\prof.nnue', '--profile', 200, '--ft-impl', $impl)) }
 }
+foreach ($r in 1..3) {
+    foreach ($impl in 'embedding', 'fused') { $lines += ConvertTo-CmdLine ($TRAIN8 + @('--out', "runs\ep1_${impl}_r$r.nnue", '--epochs', 1, '--ft-impl', $impl)) }
+}
+Start-Detached fused_timing $lines
 ```
-The first line of each pair is the kept network as the engine runs it: its `loss against the labels`, engine
-column, is what compares B and D. The second is the last epoch's float-against-export error (for D close to the
-integer arithmetic alone, by design). Then SPRT [0, 10] at 3+0.03, D against B; if H1,
-[−5, 0] at 10+0.1. **Decision:** as `docs/STRENGTH_PLAN.md` item 2. **Record:** both quant_error reports, the
-epoch times (QAT costs about 5% on the CPU), every SPRT line.
 
-## 12. Data mixtures and targeted data (2-3 days; after 6)
-
-Targeted sources first (each a few hours of CPU):
-```powershell
-& $PY tools\nnue\mix.py report "R9\selfplay_910*.bin" --json runs\mix_r9.json
-& $PY tools\nnue\mix.py report "<DATA>\selfplay_*.bin" --json runs\mix_r8.json
-& $PY tools\nnue\mix.py book "R9\selfplay_910*.bin" --select imbalanced --count 5000 --max-score 300 --out books\imbalanced.epd
-& $PY tools\make_openings.py --engine build\Release\nags_enhanced.exe --pgn AJ-CORR-PGN-000.pgn --count 5000 --min-plies 8 --max-plies 16 --out books\corr.epd
-.\build\Release\nags_datagen.exe --out R9T\imb_9201.bin --seed 9201 --first-game 0 --games 60000 --threads $T --book books\imbalanced.epd --random-plies 2 --max-opening-score 600
-.\build\Release\nags_datagen.exe --out R9T\corr_9202.bin --seed 9202 --first-game 0 --games 60000 --threads $T --book books\corr.epd --random-plies 2
-& $PY tools\nnue\tb_data.py generate --syzygy <TB345> --material KRvKB KRvKN KBvKP KNvKP KRPvKR KBPvKB KNPvKB KRPvKB KPvKP KRvKBP --count 100000 --engine build\Release\nags_enhanced.exe --nodes 5000 --workers $T --out R9T\tb_1.bin
-```
-(`AJ-CORR-PGN-000.pgn` needs `git lfs pull`. It supplies start positions only, like any opening book: the games
-from them and every label are NAGS's own, and the tablebase positions carry exact results.) Then the mixtures, about 100M positions each, and the same
-training for each (network 8's design, from scratch, 20 epochs, `--eval-set R9\evalset_9999.bin --keep-best`):
-```powershell
-& $PY tools\nnue\mix.py build --source "R9\selfplay_910*.bin=1" --positions 100000000 --max-copies 4 --out MIX\m0.bin
-& $PY tools\nnue\mix.py build --source "R9\selfplay_910*.bin=0.5" --source "<DATA>\selfplay_*.bin=0.5" --positions 100000000 --max-copies 4 --out MIX\m1.bin
-& $PY tools\nnue\mix.py build --source "R9\selfplay_910*.bin=0.45" --source "<DATA>\selfplay_*.bin=0.45" --source "R9T\imb_*.bin=0.04" --source "R9T\corr_*.bin=0.04" --source "R9T\tb_*.bin=0.02" --positions 100000000 --max-copies 4 --out MIX\m2.bin
-```
-SPRTs [0, 10] at 3+0.03: m1 against m0, then m2 against the better. **Record:** each `.mix.json`, the
-eval-set losses by piece count, `tb_data.py measure` (section 14) for each network, and the SPRT lines.
-
-## 13. v3 against v4 on identical data (about 3 hours of GPU, then SPRTs; after 6a)
+When it has finished:
 
 ```powershell
-& $PY tools\nnue\train.py --data "R9\selfplay_910*.bin" --buckets 8 --king-buckets 4 --activation screlu --device cuda --epochs 20 --out R9\v3_e20.nnue
-& $PY tools\nnue\train_v4.py --data "R9\selfplay_910*.bin" --buckets 8 --king-buckets 4 --activation pairwise --device cuda --epochs 20 --out R9\v4_e20.nnue
-.\build\Release\nags_enhanced.exe   # then: setoption name EvalFile value R9\v4_e20.nnue, speedtest, bench
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+Select-String -Path runs\fused_timing.log -Pattern '^profile:'
+foreach ($r in 1..3) { foreach ($i in 'embedding', 'fused') { $h = (Get-Content -Raw "runs\ep1_${i}_r$r.nnue.json" | ConvertFrom-Json).history[0]; "$i r$r seconds $($h.seconds) val $($h.val)" } }
 ```
-(Section 6's A is the same v3 run with an eval set: use `A_scratch_e20.nnue` instead of training v3 again.)
-SPRT [0, 10] v4 against v3 at 20,000 nodes a move (`--nodes 20000`), then at 3+0.03; if both pass, [−5, 0]
-at 10+0.1. **Record:** both validation losses, the `speedtest` evaluate and update lines and `go nodes
-1500000` nodes/s with each network, every SPRT line.
 
-## 14. Endgame accuracy on 5-piece tablebases (optional, about 1 hour)
+**Decision (declared here):** `fused` becomes the default of later runs (`run_round.py`, and the commands below)
+only if both hold:
 
-With the 3-4-5 Syzygy tables (`<TB345>`, about 1 GB; WDL files suffice):
+1. its epoch is at least 1.2 times as fast as `embedding`'s in each of the three pairs;
+2. each fused validation loss is within 0.5% of its pair's.
+
+The two paths round differently, so the networks are not byte-identical. Otherwise the default stays
+`embedding`.
+
+**Record:** the six profile lines, the six epoch times and validation losses, and the decision.
+
+The training commands of sections 6, 7 and 10 use `$FT`. Set it on its `EDIT` line in `runs\pc_env.ps1`, so that
+every shell has it: `@('--ft-impl', 'fused')` if this section adopted the fused path, otherwise `@()`.
+
+## 6. Warm start against training from scratch (up to about 47 hours: the main GPU experiment)
+
+Question: does starting from network 8's weights (`--init-from`) on new data give a network at least as strong as
+training from scratch, in less GPU time?
+
+**6a. New data (about 20-24 hours; resumable).** In the new directory `$R9`:
+
+- eight shards of 150,000 games with seeds never used for training (9101-9108), about 104M positions;
+- a fixed evaluation set from seed 9999 (3,000 games, about 262,000 positions), generated first.
+
+All of them use `--record-state on`, so the records are exact positions: castling rights, en passant and move
+counters in the reserved bytes, which the trainer ignores. Any later offline relabelling of them is then exact
+(`tools/nnue/rescore.py` refuses records without that state):
+
 ```powershell
-& $PY tools\nnue\tb_data.py measure --syzygy <TB345> --material KRvKB KRvKN KNNvK KBvKP KNvKP KRPvKR KBPvKB KNPvKB KRPvKB KRvKBP KQvKRP KPvKPP --count 400 --engine build\Release\nags_enhanced.exe --nodes 10000 --workers $C --json runs\tb_net8.json
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+New-Item -ItemType Directory -Path $R9 | Out-Null    # fails if it exists: $R9 must be new
+$lines = @(ConvertTo-CmdLine @($DG, '--out', "$R9\evalset_9999.bin", '--seed', 9999, '--first-game', 0, '--games', 3000, '--threads', $T, '--record-state', 'on'))
+foreach ($s in 9101..9108) {
+    $lines += ConvertTo-CmdLine @($DG, '--out', "$R9\selfplay_$s.bin", '--seed', $s, '--first-game', 0, '--games', 150000, '--threads', $T, '--record-state', 'on')
+}
+Start-Detached r9_datagen $lines
 ```
-**Record:** the per-material lines. On the VM, network 8 says 75.0% of 3-4 piece results right, with KRvKB at 8%,
-KRvKN 18%, KNNvK 1% (`docs/STRENGTH_PLAN.md`, item 7).
+
+Read the rate from the log after an hour (the `games ... positions/s` lines) and re-estimate: 104.4M positions ÷
+rate. After a stop, `Resume-Detached r9_datagen`. Then:
+
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+& $PY tools\nnue\shards.py check $SHARDS --checksums all
+& $PY tools\nnue\shards.py check "$R9\evalset_9999.bin" --checksums all
+```
+
+**Expected:** `8 shard(s), 1200000 games: consistent` and `1 shard(s), 3000 games: consistent`. Every header
+ends `... search=1528850 state=1`.
+
+**Record:** positions per second, total positions, the checks, and each `searches in this run` line.
+
+**6b. Three training runs on the same data, one after the other.** A and B take about 1 hour each, C half that.
+All three use network 8's design, the evaluation set, and the best epoch kept:
+
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+$TRAIN = @($PY, 'tools\nnue\train.py', '--data') + $SHARDS + @('--buckets', 8, '--king-buckets', 4,
+          '--activation', 'screlu', '--device', 'cuda', '--eval-set', "$R9\evalset_9999.bin",
+          '--select-by', 'eval:evalset_9999.bin', '--keep-best', '--resume') + $FT
+Start-Detached r9_train @(
+    (ConvertTo-CmdLine ($TRAIN + @('--out', "$R9\A_scratch_e20.nnue", '--epochs', 20))),
+    (ConvertTo-CmdLine ($TRAIN + @('--out', "$R9\B_warm_e20.nnue", '--epochs', 20, '--init-from', $NET8))),
+    (ConvertTo-CmdLine ($TRAIN + @('--out', "$R9\C_warm_e10.nnue", '--epochs', 10, '--init-from', $NET8)))
+)
+```
+
+`--resume` makes each line start its run or continue it. A resume refuses other data, settings or evaluation
+setup. The log says `split by games`.
+
+**Record from each `<out>.json`:**
+
+- the best epoch and its evaluation-set loss;
+- the loss by piece count;
+- the seconds per epoch and in total (the GPU time);
+- the validation loss.
+
+**6c. Matches, declared before the first one (up to about 4 hours each, one at a time).** Copy this declaration
+into `docs/PC_RESULTS.md`, commit and push it before the first game:
+
+> *Every match: both sides `nags_enhanced.exe` of `main` at `26b2d6c` with the network named, 3+0.03, `$C` games
+> at a time, `tools\openings\nags_balanced.epd`, resign adjudication 4 moves at 1000 cp, α = β = 0.05, at most
+> 8,000 games.*
+>
+> 1. *A, B and C each against network 8: SPRT [0, 10]. H1 = stronger than network 8. Only these can make a network
+>    a candidate for `nets\nags.nnue` (the user's decision).*
+> 2. *Warm start against scratch, non-regression: C against A and B against A, each SPRT [−5, 0]. H1 = passes (not
+>    worse than A by 5 Elo, at the stated error rates). H0 = fails. 8,000 games without a decision =
+>    inconclusive, which is not a pass.*
+> 3. *Warm starts become the recommended way to train only if C against A passes and C's GPU time is at most about
+>    half of A's (from the manifests). If only B against A passes, a warm start is no worse at the same cost and
+>    saves nothing: no recommendation. If neither passes, no recommendation.*
+> 4. *An inconclusive or failed match stays as it is (rule 6). A further test is declared (pair, bounds, time
+>    control, cap) in `docs/PC_RESULTS.md` and pushed before its first game.*
+
+The matches, each started when the one before has finished:
+
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+$NET = @{ A = "$R9\A_scratch_e20.best.nnue"; B = "$R9\B_warm_e20.best.nnue"; C = "$R9\C_warm_e10.best.nnue" }
+$M = @('--engine', $ENG, '--engine', $ENG, '--tc', '3+0.03', '--concurrency', $C, '--openings', $OPENINGS,
+       '--resign-adjudication', 4, 1000, '--games', 8000)
+Start-Match r9_A_vs_net8 ($M + @('--name', 'A', '--name', 'net8', '--option1', "EvalFile=$($NET.A)", '--sprt', 0, 10))
+# then, one at a time:
+# Start-Match r9_B_vs_net8 ($M + @('--name', 'B', '--name', 'net8', '--option1', "EvalFile=$($NET.B)", '--sprt', 0, 10))
+# Start-Match r9_C_vs_net8 ($M + @('--name', 'C', '--name', 'net8', '--option1', "EvalFile=$($NET.C)", '--sprt', 0, 10))
+# Start-Match r9_C_vs_A ($M + @('--name', 'C', '--name', 'A', '--option1', "EvalFile=$($NET.C)", '--option2', "EvalFile=$($NET.A)", '--sprt', -5, 0))
+# Start-Match r9_B_vs_A ($M + @('--name', 'B', '--name', 'A', '--option1', "EvalFile=$($NET.B)", '--option2', "EvalFile=$($NET.A)", '--sprt', -5, 0))
+```
+
+For each next match, run the block again with its `Start-Match` line in place of the first. The load line, `$NET`
+and `$M` are needed in every new shell.
+
+**Record:**
+
+- every final status line;
+- each decision as declared (H1, H0, or inconclusive at the cap);
+- the `Forfeits:` line, if any;
+- each network's GPU minutes.
+
+## 7. NAGS's own deeper labels at equal measured compute (about 2 days; after 6a)
+
+Question: are deeper labels for chosen positions worth their compute, compared with spending the same compute on
+more games?
+
+The labels are made **during play**. `nags_datagen --relabel-nodes N --relabel-select RULE` plays exactly the
+games of the plain run and searches the chosen positions again with N nodes, with a second searcher. The
+positions are therefore exact; nothing is reconstructed from records.
+
+**What the VM measured** (300 games of seed 9201, 4 threads):
+
+- `disagree:200` chose 16.2% of the positions and changed their labels by 210.6 cp on average.
+- A random 16.4% changed by 65.9 cp.
+- The deeper searches cost about as much again as the games: relabelling took 114-120 thread-seconds against
+  105-111 for the moves.
+
+Every run ends with `searches in this run: game moves N nodes, S thread-seconds; relabelling M nodes (x% of all),
+R thread-seconds (y% of all)`. A resumed shard prints one such line per sitting, so add them up. Arms are
+compared at equal **measured** compute, not at equal fractions of positions.
+
+**7a. Pilot: the price of each arm (about 30 minutes).** Run 2,000 games of seed 9201 (no other arm uses it):
+
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+New-Item -ItemType Directory runs\relabel_pilot | Out-Null
+$P = @('--seed', 9201, '--first-game', 0, '--games', 2000, '--threads', $T, '--record-state', 'on')
+& $DG --out runs\relabel_pilot\plain.bin @P
+& $DG --out runs\relabel_pilot\dis.bin @P --relabel-nodes 40000 --relabel-select disagree:200
+```
+
+From the `dis` run, take the fraction relabelled (`relabelled X of Y positions (Z%)`) as a first `random:Z/100`.
+Run `--out runs\relabel_pilot\rnd1.bin` with it.
+
+Then scale the fraction by the ratio of the two runs' relabelling thread-seconds and nodes, and run `rnd2.bin`,
+`rnd3.bin` and so on. Stop when the random arm's relabelling thread-seconds and nodes are both within 5% of the
+`dis` arm's.
+
+Also note the cost ratio of a relabelled game to a plain one: `(S + R) / S_plain`.
+
+**7b. The arms (about 33 hours).** Both relabelled arms use seeds 9101-9103, so the games are those of section 6's
+shards and only the labels differ:
+
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+$FRACTION = '0.165'   # the pilot's matched random fraction
+New-Item -ItemType Directory "$R9\relabel_dis", "$R9\relabel_rnd" | Out-Null
+$ARMS = [ordered]@{ relabel_dis = 'disagree:200'; relabel_rnd = "random:$FRACTION" }
+$lines = @()
+foreach ($s in 9101..9103) {
+    foreach ($dir in $ARMS.Keys) {
+        $lines += ConvertTo-CmdLine @($DG, '--out', "$R9\$dir\selfplay_$s.bin", '--seed', $s, '--first-game', 0,
+                                      '--games', 150000, '--threads', $T, '--record-state', 'on',
+                                      '--relabel-nodes', 40000, '--relabel-select', $ARMS[$dir])
+    }
+}
+Start-Detached r9_relabel $lines
+```
+
+**The plain arm at equal compute** is made of section 6's shards:
+
+- Take as many of 9101-9108, in order, as cost what the `disagree` arm cost in total. That total is its game and
+  relabelling thread-seconds from the `r9_relabel` log, compared with 6a's per-shard cost.
+- Round to the nearer whole shard. At the VM's ratio that is 3 × 2.2 = 6.6 shards, so seven.
+- Record each arm's actual total.
+- Also train on the plain shards 9101-9103 (equal games, less compute), for reference.
+
+**7c. Training (about 3 hours).** Four networks, each trained as A in 6b (from scratch, 20 epochs, the same
+evaluation set, `--keep-best --resume`, `$FT`). Outputs go in `$R9\relabel_runs\`:
+
+| Network | Shards |
+|---|---|
+| `dis` | the `relabel_dis` shards |
+| `rnd` | the `relabel_rnd` shards |
+| `plain3` | 9101-9103 |
+| `plainK` | the equal-compute plain shards |
+
+Compare their evaluation-set losses; a loss decides nothing.
+
+**7d. Matches, declared in `docs/PC_RESULTS.md` and pushed before the first.** Both use 6c's match settings, and no
+decision at the cap is inconclusive:
+
+1. `dis` against `rnd`, SPRT [0, 10] at 3+0.03, at most 8,000 games: does choosing the positions beat choosing them
+   at random, at the same cost?
+2. `dis` against `plainK`, SPRT [0, 10]: does the relabelling beat spending the same compute on more games?
+
+Deeper labels become the way later rounds label only if `dis` beats `plainK` (H1).
+
+**Record:** the pilot lines, every shard's `relabelled ...` and `searches in this run` lines, each arm's total
+thread-seconds, the losses, and the matches as declared.
+
+## 10. Data mixtures: retained, fresh and targeted data (about 3 days; after 6)
+
+The question of `docs/STRENGTH_PLAN.md` item 3. `tools/nnue/mix.py build` keeps each unit's identity:
+
+- a whole game (`seed:game@file`);
+- independent positions (tablebase data);
+- a block of a file without an index. Network 8's old data has no index, so its records are taken in 1,024-record
+  blocks, written first, and the trainer splits validation after them (`docs/NNUE.md`).
+
+A damaged index, or one that does not cover its file, is refused.
+
+**10a. Targeted sources (each a few hours of CPU, one at a time).**
+
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+New-Item -ItemType Directory books, "$R9\targeted" | Out-Null
+$D8 = @(Get-ChildItem -LiteralPath $DATA8 -Filter 'selfplay*.bin' | Sort-Object Name | ForEach-Object FullName)
+& $PY tools\nnue\mix.py report @SHARDS --json runs\mix_r9.json
+& $PY tools\nnue\mix.py report @D8 --json runs\mix_r8.json
+& $PY tools\nnue\mix.py book @SHARDS --select imbalanced --count 5000 --max-score 300 --out books\imbalanced.epd
+& $DG --out "$R9\targeted\imb_9201.bin" --seed 9201 --first-game 0 --games 60000 --threads $T --record-state on --book books\imbalanced.epd --random-plies 2 --max-opening-score 600
+```
+
+**Tablebase endgames,** if the 3-4-5 Syzygy tables are on this machine (`$TB345` in `runs\pc_env.ps1`,
+about 1 GB; WDL files suffice). The results are exact, and the scores are NAGS's search without tablebases:
+
+```powershell
+& $PY tools\nnue\tb_data.py generate --syzygy $TB345 --material KRvKB KRvKN KBvKP KNvKP KRPvKR KBPvKB KNPvKB KRPvKB KPvKP KRvKBP --count 100000 --engine $ENG --nodes 5000 --workers $T --out "$R9\targeted\tb_1.bin"
+```
+
+**Opening variety** from human games uses start positions only, like any opening book. The games played from them
+and every label are NAGS's. It needs `git lfs pull` for `AJ-CORR-PGN-000.pgn`:
+
+```powershell
+& $PY tools\make_openings.py --engine $ENG --pgn AJ-CORR-PGN-000.pgn --count 5000 --min-plies 8 --max-plies 16 --out books\corr.epd
+& $DG --out "$R9\targeted\corr_9202.bin" --seed 9202 --first-game 0 --games 60000 --threads $T --record-state on --book books\corr.epd --random-plies 2
+```
+
+**10b. Three mixtures of about 100M positions, each trained like A in 6b** (from scratch, 20 epochs, the
+evaluation set, `--keep-best --resume`, `$FT`):
+
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+New-Item -ItemType Directory "$R9\mix" | Out-Null
+& $PY tools\nnue\mix.py build --source "$R9\selfplay_910?.bin=1" --positions 100000000 --max-copies 4 --out "$R9\mix\m0.bin"
+& $PY tools\nnue\mix.py build --source "$R9\selfplay_910?.bin=0.5" --source "$DATA8\selfplay_*.bin=0.5" --positions 100000000 --max-copies 4 --out "$R9\mix\m1.bin"
+& $PY tools\nnue\mix.py build --source "$R9\selfplay_910?.bin=0.45" --source "$DATA8\selfplay_*.bin=0.45" --source "$R9\targeted\imb_*.bin=0.04" --source "$R9\targeted\corr_*.bin=0.04" --source "$R9\targeted\tb_*.bin=0.02" --positions 100000000 --max-copies 4 --out "$R9\mix\m2.bin"
+```
+
+`mix.py` expands the quoted wildcards itself. It reads `$DATA8`'s files without writing anything next to them, but
+train.py on a mixture writes `<mixture>.sha256` only in `$R9\mix`. If the tablebase or corr sources were not made,
+leave their `--source` out and give their shares to the others.
+
+**10c. Matches, declared and pushed before the first:** m1 against m0, then m2 against the better of the two. Both
+are SPRT [0, 10] at 3+0.03 with 6c's settings.
+
+**Record:** each `.mix.json` (shares, records by kind), the evaluation-set losses by piece count, section 12's
+endgame accuracy for each network if the tables are here, and the matches as declared.
+
+## 15. SPSA in small groups (about 14 hours a group; after the network is chosen)
+
+`docs/STRENGTH_PLAN.md` item 4. The tuning build makes the search constants of `src/Tune.h` UCI options; with
+their defaults it benches like the normal build:
+
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+cmake -B build-tune -DNAGS_TUNE=ON
+cmake --build build-tune --config Release --target nags_enhanced --parallel
+& .\build-tune\Release\nags_enhanced.exe bench | Select-String "Nodes searched"   # 1528850
+$TUNE = Join-Path $ROOT 'build-tune\Release\nags_enhanced.exe'
+Start-Detached spsa_A (ConvertTo-CmdLine @($PY, 'tools\spsa.py', '--engine', $TUNE, '--params', 'LmrBase', 'LmrDivisor', 'LmrHistoryDivisor', '--iterations', 2000, '--pairs', 4, '--tc', '3+0.03', '--concurrency', $C, '--state', 'runs\spsa_A.json'))
+```
+
+The groups, by the names in `src/Tune.h`, run one at a time:
+
+| Group | Parameters |
+|---|---|
+| A | `LmrBase LmrDivisor LmrHistoryDivisor` |
+| B | `RfpMargin FutilityMargin` |
+| C | `NmpBase NmpDivisor` |
+| D | `SeeQuietMargin SeeCaptureMargin HistoryPruneMargin` |
+| E | `SingularMargin DoubleExtensionMargin AspirationWindow` |
+
+`spsa.py` tunes the network the build embeds, and has no option for another. So tune after the chosen network has
+become `nets\nags.nnue` (the user's decision), in a build made after that.
+
+**Declared validation for each group:**
+
+1. SPRT [0, 10] at 3+0.03 of the tuned values against the defaults in the tuning build. It uses openings not used
+   in tuning: `tools\make_openings.py --engine $ENG --seed 2 --count 500 --out books\validation.epd`, then
+   `--openings books\validation.epd`. The 500 openings of `nags_balanced.epd` are all used by a 2,000-iteration
+   run.
+2. If H1: the values copied into `src/Tune.h` on a branch, and the normal build's SPRT [0, 10] at 3+0.03.
+3. Then [−5, 0] at 10+0.1.
+
+A group whose values fail any step is not tuned again without a new hypothesis. A change to `src/Tune.h` is a code
+change for the user to merge.
+
+## 8. Strength at 4 threads (optional, about 5 hours)
+
+The VM measured Threads=2 against 1 at +107.5 ± 14.0, and double the time at +165.4 ± 14.9, so a second thread is
+worth about 65% of a time doubling. Here: two fixed-length matches of 1,000 games, one game at a time for the
+4-thread one:
+
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+$M = @('--engine', $ENG, '--engine', $ENG, '--openings', $OPENINGS, '--resign-adjudication', 4, 1000, '--games', 1000)
+Start-Match threads4 ($M + @('--name', 'threads4', '--name', 'threads1', '--option1', 'Threads=4', '--tc', '3+0.03', '--concurrency', 1))
+# when it has finished:
+# Start-Match time4x ($M + @('--name', 'time4x', '--name', 'time1x', '--tc1', '12+0.12', '--tc2', '3+0.03', '--concurrency', $C))
+```
+
+Nodes per second at 1 and 4 threads, 4 seconds from the start position, with nothing else running:
+
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+foreach ($th in 1, 4) { & $PY -c "import chess, chess.engine, sys; e = chess.engine.SimpleEngine.popen_uci(sys.argv[1]); e.configure({'Threads': int(sys.argv[2])}); i = e.analyse(chess.Board(), chess.engine.Limit(time=4)); print(sys.argv[2], 'threads:', i.get('nps'), 'nodes/s'); e.quit()" $ENG $th }
+```
+
+**Record:** both results and the nodes per second.
+
+## 11. v3 against v4 on identical data (optional; about 3 hours of GPU, then matches; after 6a)
+
+Section 6's A is the v3 network. Train v4 on the same shards with the same epochs:
+
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+Start-Detached r9_v4 (ConvertTo-CmdLine (@($PY, 'tools\nnue\train_v4.py', '--data') + $SHARDS + @('--buckets', 8, '--king-buckets', 4, '--activation', 'pairwise', '--device', 'cuda', '--epochs', 20, '--resume', '--out', "$R9\v4_e20.nnue")))
+```
+
+Run `speedtest` and `go nodes 1500000` from a middlegame, with each network loaded by `EvalFile`.
+
+**Declared matches:**
+
+1. v4 against A, SPRT [0, 10] at 20,000 nodes a move (`--nodes 20000`).
+2. If H1: at 3+0.03.
+3. If that passes too: [−5, 0] at 10+0.1.
+
+v4 becomes the default design only if step 2 passes.
+
+**Record:** both validation losses, the `speedtest` lines, nodes per second with each network, and every match.
+
+## 12. Endgame accuracy on 5-piece tablebases (optional, about 1 hour)
+
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+& $PY tools\nnue\tb_data.py measure --syzygy $TB345 --material KRvKB KRvKN KNNvK KBvKP KNvKP KRPvKR KBPvKB KNPvKB KRPvKB KRvKBP KQvKRP KPvKPP --count 400 --engine $ENG --nodes 10000 --workers $C --json runs\tb_net8.json
+```
+
+On the VM network 8 said 75.0% of 3-4 piece results right; KRvKB was 8%, KRvKN 18% and KNNvK 1%.
+
+**Record:** the per-material lines, and the same for each new network (`--option EvalFile=...`).
+
+## 13. QAT fine-tune at scale (optional; after 6b)
+
+On the VM a QAT fine-tune lost its SPRT against the same fine-tune without QAT: H0, −10.9 ± 14.3 after 922 games.
+Run this only when the GPU is free. It tests QAT at scale, where the result could differ.
+
+Arm D is B's command with `--qat` added. QAT implies the fused path, so leave out `$FT`:
+
+```powershell
+Invoke-Expression (Get-Content -Raw runs\pc_env.ps1)
+$TRAIN = @($PY, 'tools\nnue\train.py', '--data') + $SHARDS + @('--buckets', 8, '--king-buckets', 4, '--activation', 'screlu', '--device', 'cuda', '--eval-set', "$R9\evalset_9999.bin", '--select-by', 'eval:evalset_9999.bin', '--keep-best', '--resume')
+Start-Detached r9_qat (ConvertTo-CmdLine ($TRAIN + @('--out', "$R9\D_warm_qat_e20.nnue", '--epochs', 20, '--init-from', $NET8, '--qat')))
+```
+
+Then compare the two kept networks as the engine runs them. This writes the reports into `runs\`; an existing one
+is refused:
+
+```powershell
+foreach ($x in 'B_warm_e20', 'D_warm_qat_e20') { & $PY tools\nnue\quant_error.py --net "$R9\$x.best.nnue" --data "$R9\evalset_9999.bin" --positions 100000 --json "runs\qe_$x.json" }
+```
+
+**Declared match:** D against B, SPRT [0, 10] at 3+0.03, with 6c's settings.
 
 ## Reporting back
 
-Create `docs/PC_RESULTS.md` on branch `pc/results` (from `integ/round3`) with one section per task above.
-For each: the commands as run (with the real paths), the printed results (copied, not paraphrased),
-anything that failed or differed from "Expected" and what was done about it, and the time taken. Push
-after each section. When an SPRT finishes, also add its row in the strength-log format of
-`docs/TESTING.md`, for example:
-`| what | SPRT [0, 10], 3+0.03, <concurrency> at a time on the Windows PC | H1 after N games (+W =D -L) | +x ± y | bench |`.
+Results go to `docs/PC_RESULTS.md` on `pc/round4`, one section per task, each with:
+
+- the commands as run, with the real paths;
+- the printed results, copied, not paraphrased;
+- anything that differed from "Expected", and what was done about it;
+- the time taken.
+
+Push after each section, and push each declaration before its first game. When an SPRT finishes, also add its row
+in the strength-log format of `docs/TESTING.md`, for example
+`| what | SPRT [0, 10], 3+0.03, 5 at a time on the Windows PC | H1 after N games (+W =D -L) | +x ± y | bench |`.

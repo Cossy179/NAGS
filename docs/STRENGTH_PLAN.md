@@ -30,7 +30,7 @@ The rules of `docs/TESTING.md` hold throughout:
 - Every test is recorded, whether it passes or fails.
 
 What must not change is in `docs/COMPATIBILITY.md`. Commands for the training PC are in
-`docs/PC_TASKS.md` (sections 9-14). This round's VM measurements are under "Results so far" at the end.
+`docs/PC_TASKS.md` (round 4, pinned to `main` `26b2d6c`). This round's VM measurements are under "Results so far" at the end.
 
 | # | Line of work | What exists now | Next experiment | Where |
 |---|---|---|---|---|
@@ -70,20 +70,21 @@ The records hold no castling rights, en-passant square or move counters. `rescor
 kings and rooks on their home squares, which differs from the real rights in 3.8% of positions (25,177
 positions of 300 games). `--relabel-nodes` labels during play and needs no such inference.
 
-**Experiments.**
+**Experiment** (`docs/PC_TASKS.md` §7). Deeper labels are made during play, so the positions are exact:
 
-1. `docs/PC_TASKS.md` §7: the same games with `disagree:200` and with a random share of equal cost, each
-   trained from scratch. SPRT [0, 10] of one against the other.
-2. §10, deeper labels for a 10% sample of the R9 games (§6a):
-   - Relabel them with `nags_enhanced` at 40,000 nodes (8 times the base), about 10M positions.
-   - Fine-tune network 8 twice with identical settings (`--init-from nets/nags.nnue`, 10 epochs, lr 1e-4):
-     on those games with their 5000-node labels (B) and with the deeper labels (D).
-   - SPRT [0, 10] at 3+0.03, D against B.
+- `--relabel-nodes 40000 --relabel-select disagree:200` and a random share of equal **measured** compute (datagen's
+  cost line), on the games of seeds 9101-9103;
+- a plain arm of as many more R9 shards as cost the same in total;
+- each trained from scratch with identical settings.
 
-**Decision.** If D beats B (H1), deeper labels carry information more games do not. The follow-up then
-spends the same CPU both ways: deeper labels on a sample, or that many more 5000-node games. Only that
-equal-compute match decides how future rounds label their data. If D does not beat B, depth beyond 5000
-nodes is not worth its cost as a label, and the work goes to data composition (item 3) instead.
+SPRT [0, 10] at 3+0.03: `dis` against `rnd`, then `dis` against the equal-compute plain arm.
+
+**Decision.** Deeper labels become the way later rounds label only if they beat the same compute spent on more
+games (`dis` against `plainK`, H1). Otherwise depth beyond 5000 nodes is not worth its cost as a label, and the
+work goes to data composition (item 3).
+
+Offline relabelling of existing shards (`rescore.py`) reads only shards made with `--record-state on`, which the R9
+shards are. It stays a measuring tool until this in-game experiment has decided.
 
 ## 2. Quantization-aware training
 
@@ -110,7 +111,7 @@ evaluation's loss against the labels, which compares two networks' exports on eq
 - VM, now: network 8 fine-tuned on 5.4M fresh positions, plain (P) and with `--qat` (Q), with identical
   settings otherwise. Measure the export's loss on a held-out evaluation set, then play SPRT [0, 10]
   Q against P at 3+0.03.
-- PC (§11): the same on R9, as arm D next to §6's B (warm start, 20 epochs) and C (warm start, 10
+- PC (§13): the same on R9, as arm D next to §6's B (warm start, 20 epochs) and C (warm start, 10
   epochs).
 
 **Decision.** `--qat` becomes the recommended setting for the last epochs of a training run only if
@@ -154,18 +155,20 @@ positions instead of 35.8%. Other targeted sources:
 - `tools/make_openings.py --pgn` on human or correspondence games (unfamiliar openings);
 - `tools/nnue/tb_data.py generate` (endgames, item 7).
 
-**Experiment** (§12). Four mixtures of the same size, about 100M positions, each trained with the same
+**Experiment** (§10). Mixtures of the same size, about 100M positions, each trained with the same
 design and settings:
 
 | Mixture | Contents |
 |---|---|
 | M0 | R9 only |
 | M1 | 50% R9, 50% network 8's data |
-| M2 | M1 with 10% replaced by targeted data: imbalanced and unfamiliar-opening books, mistake positions, tablebase endgames |
-| M3 | M2 with `--max-copies 1` |
+| M2 | M1 with 10% replaced by targeted data: imbalanced and unfamiliar-opening books, tablebase endgames |
+| M3 (later, if M2 wins) | M2 with `--max-copies 1` |
 
 Compare evaluation-set losses by piece count and the endgame accuracy (item 7), then play SPRTs of M1
-against M0, and of M2 against the better of the two.
+against M0, and of M2 against the better of the two. Network 8's old data has no game index. `mix.py` takes it
+in blocks that it writes first, and the trainer splits validation after them, so none of its games is on both
+sides of the split.
 
 **Decision.** A composition is adopted for the next round only by SPRT. A mixture that wins on loss but
 not in games changes nothing.
@@ -205,7 +208,7 @@ untrained networks. Trained networks are sparser, so faster. The 512-wide v3 net
 lost 48 Elo to its speed. A v4 network has to evaluate well enough to pay for its speed, and only a
 like-for-like comparison shows whether it does.
 
-**Experiment** (§13). Train `train.py` (v3, network 8's design) and `train_v4.py` (pairwise, 16-32) on
+**Experiment** (§11). Train `train.py` (v3, network 8's design) and `train_v4.py` (pairwise, 16-32) on
 the same R9 data, with the same epochs, batch and learning rate, both from scratch. Then:
 
 1. fixed-node SPRT [0, 10] at 20,000 nodes: the quality of the evaluation alone;
@@ -335,11 +338,12 @@ same outputs and gradients to float rounding, with the same parameters and check
 switch paths on `--resume`. On the 4-core VM (kb4 + SCReLU, batch 16384): 28,400 → 40,400
 positions/s; backward 301 → 193 ms a batch; forward 184 → 104 ms. QAT adds about 5%.
 
-**Experiment** (§9). `--profile 50` on the 3060 with each path, then one epoch each with the same seed:
-compare the seconds and the validation loss.
+**Experiment** (§9). `--profile 200` on the 3060 with each path, then one epoch each, three times, alternating.
 
-**Decision.** If the fused path is at least 1.2× faster per epoch and its validation loss after one epoch
-is within 0.5% of the embedding path's, it becomes `run_round.py`'s default. Precision experiments
+**Decision.** The fused path becomes `run_round.py`'s default only if both hold in each of the three pairs:
+
+1. it is at least 1.2× faster per epoch;
+2. its validation loss after one epoch is within 0.5% of the embedding path's. Precision experiments
 (bf16) come after, and only for the output layer: the accumulators sum about 30 weights at a resolution
 of 1/255, more than bf16's 8-bit mantissa can hold.
 
@@ -348,7 +352,7 @@ of 1/255, more than bf16's 8-bit mantissa can hold.
 **Why.** A second thread is worth about 65% of a time doubling (+107.5 against +165.4). Lazy SMP loses to
 redundant work and contention in the shared table, and aggregate nodes per second overstates its value.
 
-**Experiment** (PC §8, then §14).
+**Experiment** (PC §8).
 
 1. Measure at 1, 2 and 4 threads on 20 positions: nodes per second, time to depth 20, and the fraction
    of TT probes that hit an entry written by another thread (a `NAGS_STATS` counter to add).
@@ -469,6 +473,6 @@ Measured on the 4-core VM (Intel Xeon, 2.1 GHz, no GPU) on 2026-10-30, with netw
   - This is the second time a smaller export error did not play better. The first was the bias-corrected
     export, −2.9 ± 10.1. Rounding is not a bottleneck at network 8's level that these fixes can buy back.
     `--qat` stays an option, not a recommendation, per the decision rule.
-  - The PC's arm D (§11) is now optional. It is still cheap next to §6's B (an hour of GPU), and it tests
+  - The PC's arm D (§13) is now optional. It is still cheap next to §6's B (an hour of GPU), and it tests
     QAT at scale (104M positions, 20 epochs), where the outcome could differ. If it is run and fails too,
     this line of work is closed.
