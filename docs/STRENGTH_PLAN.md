@@ -12,6 +12,16 @@ network 7 rated −13 ± 37 at 256k nodes against sf16 at 8k-32k. That figure is
 refreshing it for network 8 is the first measurement (item 11, step 1). It is also the best reason to
 judge every change by the quality of its decisions per node, not only by self-play.
 
+**Everything NAGS learns comes from NAGS.** Its training labels and the moves of its training games come
+from NAGS's own searches, so NAGS stays its own engine and can enter any tournament or rating list. Other
+engines (Stockfish's ladder, calibrations, suites, the mistake census) are opponents and measuring sticks
+only. No score, move or position chosen by another engine goes into training data. Two exact sources are
+allowed:
+
+- Syzygy tablebase results: the game-theoretic result of a position under the rules, which NAGS already
+  probes in play.
+- Start positions from human games (opening books).
+
 The rules of `docs/TESTING.md` hold throughout:
 
 - Only an SPRT decides strength. Gain tests use [0, 10] at 3+0.03 with an 8,000-game cap.
@@ -24,7 +34,7 @@ What must not change is in `docs/COMPATIBILITY.md`. Commands for the training PC
 
 | # | Line of work | What exists now | Next experiment | Where |
 |---|---|---|---|---|
-| 1 | Stronger teacher | `tools/nnue/rescore.py` (any UCI engine, resumable, equal-compute comparison); `nags_datagen --relabel-nodes` | teacher vs NAGS's own deeper labels at equal engine time, on the same games | PC (CPU days) |
+| 1 | A stronger teacher: NAGS searching deeper | `nags_datagen --relabel-nodes/--relabel-select`; `tools/nnue/rescore.py` with `nags_enhanced` | deeper NAGS labels against NAGS's 5000-node labels on the same games, then at equal CPU against more games | PC (CPU days) |
 | 2 | Quantization-aware training | `train.py --qat`; `quant_error.py` reports the export's loss | VM: H0, −10.9 ± 14.3 against a plain fine-tune; at scale on R9 only if cheap | PC (optional) |
 | 3 | Data composition | `tools/nnue/mix.py` (report, build, book); `nags_datagen --book` | mixtures of retained and fresh data, with and without targeted books | PC |
 | 4 | Search tuning for network 8 | `src/Tune.h` + `tools/spsa.py` (`exp/spsa-tune`, merged here) | SPSA in groups of 2-4 parameters, then SPRTs on other openings and at 10+0.1 | VM or PC (CPU) |
@@ -37,48 +47,43 @@ What must not change is in `docs/COMPATIBILITY.md`. Commands for the training PC
 | 11 | Independent testing | `tools/ladder.py`, `tools/calibrate.py`, `tools/suite.py` | network 8 on the node ladder; higher rungs; other engines; more openings; longer controls | VM / PC |
 | 12 | GNN / hybrid, conditional | the neural baseline protocol (`docs/TESTING.md`) | nothing until a network trained at scale passes its readiness step | - |
 
-## 1. Learn from a stronger teacher
+## 1. Learn from a stronger teacher: NAGS searching deeper
 
-**Why.** Every network so far learned from NAGS's own 5000-node searches. More of those positions
-teach more of the same judgement, including its errors. A stronger engine's scores are different
-information. But a stronger teacher's labels cost more per position, so they have to beat NAGS's own
-deeper labels at the same cost, not just its shallow ones.
+**Why.** Every network so far learned from NAGS's 5000-node searches. More of those positions teach more
+of the same judgement, including its errors. A deeper search by NAGS itself is a stronger teacher that keeps
+the engine its own (see the policy above). Its labels cost more per position, though, so they have to beat
+the same CPU time spent on more 5000-node games.
 
-**Tools.** `tools/nnue/rescore.py label` rescores whole games of indexed shards with any UCI engine at a
-fixed limit, one engine process per worker. It writes a new shard with a consistent index and records
-the engine time per position in `<out>.teacher.json`. `rescore.py compare` joins the base shard with
-relabelled versions of it and reports four things for each label set:
+**Tools.**
 
-- its fit to the game results: the sigmoid scale K and the error at that scale;
-- the factor that puts it on the base's scale, to use as `--scale`;
-- the mean difference from the base once scaled;
-- its cost per position.
+- `nags_datagen --relabel-nodes N --relabel-select disagree:CP|random:P` relabels chosen positions with a
+  deeper search while the games are played. Measured on 100 games: `disagree:200` chooses 16.8% of the
+  positions and changes their labels by 210.7 cp on average; a random 15.6% changes by 66.6 cp
+  (`docs/NNUE.md`).
+- `tools/nnue/rescore.py label` relabels whole games of existing indexed shards with `nags_enhanced` at
+  any node count, resumably. `rescore.py compare` sets label sets of the same games side by side: their fit
+  to the game results, the factor between their scales, their difference and their cost per position.
+  The tool accepts any UCI engine, so it can measure how far other engines' scores differ. By the policy,
+  only NAGS's labels are trained on.
 
-Limits of the records: they hold no castling rights, en-passant square or move counters. Castling is
-inferred from kings and rooks on their home squares, which differs from the real rights in 3.8% of
-positions (measured on 25,177 positions of 300 games). Positions the teacher scores as mate are dropped,
-as `nags_datagen` drops them.
+The records hold no castling rights, en-passant square or move counters. `rescore.py` infers castling from
+kings and rooks on their home squares, which differs from the real rights in 3.8% of positions (25,177
+positions of 300 games). `--relabel-nodes` labels during play and needs no such inference.
 
-**Experiment** (`docs/PC_TASKS.md` §10). It uses a 10% sample of the R9 games (§6a): about 10M
-positions with base labels from 5000 nodes. Relabel the same games twice:
+**Experiments.**
 
-- **T:** Stockfish (or another stronger engine) at a node count that takes about t ms a position on the
-  PC.
-- **N:** `nags_enhanced` at the node count that takes the same t, so engine time is equal. The VM's
-  pilot gives the ratio (below).
+1. `docs/PC_TASKS.md` §7: the same games with `disagree:200` and with a random share of equal cost, each
+   trained from scratch. SPRT [0, 10] of one against the other.
+2. §10, deeper labels for a 10% sample of the R9 games (§6a):
+   - Relabel them with `nags_enhanced` at 40,000 nodes (8 times the base), about 10M positions.
+   - Fine-tune network 8 twice with identical settings (`--init-from nets/nags.nnue`, 10 epochs, lr 1e-4):
+     on those games with their 5000-node labels (B) and with the deeper labels (D).
+   - SPRT [0, 10] at 3+0.03, D against B.
 
-Then:
-
-1. Run `compare`, and use its factor as T's `--scale`.
-2. Fine-tune network 8 three times with identical settings (`--init-from nets/nags.nnue`, 10 epochs,
-   lr 1e-4): on the base labels (B), on T and on N.
-3. Play SPRT [0, 10] at 3+0.03: T against N. If T passes, play T against network 8.
-
-**Decision.** Teacher labels are expanded to more data only if T beats N (H1). Equal compute is the
-point: if NAGS's own deeper search does as well, it is the cheaper way to get the same information, and
-it keeps the engine's lineage its own. If T passes, the shard headers and sidecar files name the teacher
-and its settings. Before such a network is released, check whether the rating lists NAGS may enter accept
-networks trained on another engine's evaluations.
+**Decision.** If D beats B (H1), deeper labels carry information more games do not. The follow-up then
+spends the same CPU both ways: deeper labels on a sample, or that many more 5000-node games. Only that
+equal-compute match decides how future rounds label their data. If D does not beat B, depth beyond 5000
+nodes is not worth its cost as a label, and the work goes to data composition (item 3) instead.
 
 ## 2. Quantization-aware training
 
@@ -144,7 +149,8 @@ though they would be in data from a narrow book.
 A book of 2,000 imbalanced positions gave games with material two or more pawns apart in 63.6% of
 positions instead of 35.8%. Other targeted sources:
 
-- the EPD of `tools/mistakes.py summary` (positions NAGS got wrong);
+- the EPD of `tools/mistakes.py summary`, positions NAGS got wrong (collected with NAGS itself as the
+  reference, the default, when the positions go into training);
 - `tools/make_openings.py --pgn` on human or correspondence games (unfamiliar openings);
 - `tools/nnue/tb_data.py generate` (endgames, item 7).
 
@@ -314,7 +320,8 @@ class decides what to work on next:
 
 - time: the soft limit (`tools/decision_data.py` measures allocations);
 - selectivity: the pruning or reduction rule involved, tested with `NAGS_STATS` counters and SPRT;
-- evaluation: the mistake positions go into the data (item 3) and the teacher labels (item 1).
+- evaluation: the mistake positions go into the data (item 3), found again with NAGS as the reference and
+  labelled by NAGS's deeper search (item 1).
 
 ## 9. Optimise the measured training bottleneck
 
@@ -391,7 +398,9 @@ Measured on the 4-core VM (Intel Xeon, 2.1 GHz, no GPU) on 2026-10-30, with netw
   same results, not 32: a doubling of efficiency, probably nearly all of it network 8 (the search changes since are
   correctness fixes). The 8k rung is now too weak to
   rate against. The next ladder needs the 64k-512k rungs anchored (step 2).
-- **Teacher pilot (item 1):** 60 games of seed 9202 (4,481 positions in every set), relabelled by Stockfish 16
+- **Label pilot (item 1, a measurement only):** under the policy above, Stockfish's labels are not trained on.
+  The pilot shows how NAGS's own deeper labels relate to its 5000-node ones, and how far another engine's
+  scores are from both. 60 games of seed 9202 (4,481 positions in every set), relabelled by Stockfish 16
   and by NAGS, each at 200,000 nodes, 4 processes at once on the 4 cores. Fit = mean squared error of
   σ(score/K) against the game result, at each set's best K:
 

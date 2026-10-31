@@ -117,7 +117,9 @@ instead of 35.8%. Raise `--max-opening-score` for lopsided books.
 **Other sources of records** (all write the 32-byte format):
 
 * `tools/nnue/rescore.py label`: the games of indexed shards again, with
-  another engine's scores (a stronger teacher, or NAGS with more nodes),
+  NAGS's scores from a deeper search (NAGS is the only source of training
+  labels: `docs/STRENGTH_PLAN.md`; another engine can be given to measure
+  how its scores differ, never to train on),
   resumable, with a consistent index and the engine time per position in
   `<out>.teacher.json`; `rescore.py compare` sets label sets of the same
   games side by side (their fit to the results, the factor between their

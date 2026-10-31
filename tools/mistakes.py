@@ -31,6 +31,10 @@
       --source games.pgn --positions 400 --nodes 40000 --ref-nodes 2000000 --workers 3 --out mistakes.jsonl
   python tools/mistakes.py summary mistakes.jsonl --epd mistakes.epd
 
+When the mistakes go into training data (a book for nags_datagen --book), collect them with NAGS itself as the
+reference (no --reference, deeper --ref-nodes): nothing NAGS trains on may come from another engine
+(docs/STRENGTH_PLAN.md). Another engine as the reference is for diagnosis only.
+
 Positions come from a PGN file's games (real decisions; the default for this measurement), a jsonl file's
 'fen' fields, or an EPD file after random plies (tools/suite.py's sampling). Every search starts from a new
 game (ucinewgame), so the results do not depend on the order. With another engine as the reference its

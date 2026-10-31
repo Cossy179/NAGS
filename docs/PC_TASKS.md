@@ -21,7 +21,7 @@ record.
 | 7 | Deeper labels experiment (optional) | 1-2 days | 6a |
 | 8 | Strength at 4 threads (optional) | 6 h | 0 |
 | 9 | The fused feature transformer on the GPU (`--ft-impl fused`) | 30 min | 0 |
-| 10 | Teacher labels against NAGS's own deeper labels, equal compute | 2-3 days | 6a |
+| 10 | NAGS's own deeper labels against its 5000-node labels on the same games | 1-2 days | 6a |
 | 11 | Quantization-aware fine-tune (arm D of section 6; optional: H0 on the VM) | 1 h + SPRTs | 6a |
 | 12 | Data mixtures and targeted data | 2-3 days | 6, 7-piece books |
 | 13 | v3 against v4 on identical data | 3 h + SPRTs | 6a |
@@ -302,45 +302,36 @@ of `runs\ep1_fused.nnue.json` next to section 5's `runs\ep1_sync1.nnue.json` (38
 **Decision (pre-registered):** at least 1.2x per epoch and a validation loss within 0.5% of 0.008673 make
 `fused` the default for later runs (a code change, made on the user's instruction).
 
-## 10. Teacher labels against NAGS's own deeper labels (2-3 days of CPU; after 6a)
+## 10. NAGS's own deeper labels (1-2 days of CPU; after 6a)
 
-Question: do a stronger engine's scores train a better network than NAGS's own deeper search at the same
-engine time? Use the official Stockfish build the calibrations used (`$SF`); every engine process has one
-thread.
+Question: do deeper NAGS labels for the same games train a better network than its 5000-node labels? Only
+NAGS labels anything (`docs/STRENGTH_PLAN.md`, the policy at the top, and item 1).
 
-**10a. Equal time and the scale (about 30 minutes).** Label the same 20 games both ways, then compare:
+**10a. Labels** for 10% of the games of shards 9101-9108, about 10M positions, at 40,000 nodes (8 times the
+base). Run one shard at a time; the same command resumes:
 ```powershell
-& $PY tools\nnue\rescore.py label --data R9\selfplay_9101.bin --engine $SF --nodes 100000 --max-games 20 --workers $C --out-dir runs\t_sf
-& $PY tools\nnue\rescore.py label --data R9\selfplay_9101.bin --engine build\Release\nags_enhanced.exe --nodes 150000 --max-games 20 --workers $C --out-dir runs\t_nags
-& $PY tools\nnue\rescore.py compare --base R9\selfplay_9101.bin --labels runs\t_sf\selfplay_9101.bin runs\t_nags\selfplay_9101.bin --names base sf nags
+foreach ($s in 9101..9108) { & $PY tools\nnue\rescore.py label --data R9\selfplay_$s.bin --engine build\Release\nags_enhanced.exe --nodes 40000 --fraction 0.1 --workers $T --out-dir R9\deep40k }
+& $PY tools\nnue\rescore.py compare --base R9\selfplay_9101.bin --labels R9\deep40k\selfplay_9101.bin --names base5k deep40k --json runs\deep_compare.json
 ```
-`engine_seconds_per_position` in each `.teacher.json` gives the cost: change NAGS's `--nodes` (into a new
-`--out-dir`; an output made with other settings is refused) until the two agree within 10%. On the VM, with 4
-processes at once, Stockfish 16 took 374 ms a position at 200k nodes and NAGS 110 ms at 200k (3.4 times as
-fast per node), so start NAGS at about 3.4 times Stockfish's nodes. The `to base`
-column of `sf` is the factor that puts Stockfish's centipawns on NAGS's scale (about 1.6 on the VM).
-Record both node counts, both times and the compare table.
+`engine_seconds_per_position` in each `.teacher.json` gives the cost. NAGS's labels need no `--scale`.
 
-**10b. Labels** for 10% of the games of shards 9101-9108, about 10M positions (one shard at a time; the same
-command resumes):
-```powershell
-foreach ($s in 9101..9108) { & $PY tools\nnue\rescore.py label --data R9\selfplay_$s.bin --engine $SF --nodes <SF_NODES> --scale <FACTOR> --fraction 0.1 --workers $C --out-dir R9\teacher_sf }
-foreach ($s in 9101..9108) { & $PY tools\nnue\rescore.py label --data R9\selfplay_$s.bin --engine build\Release\nags_enhanced.exe --nodes <NAGS_NODES> --fraction 0.1 --workers $C --out-dir R9\teacher_nags }
-```
-The same `--fraction` and `--select-seed` (default 1) choose the same games for both.
+**10b. The base labels of the same games.** The deeper shards hold the chosen games only. Write the same games
+with their original labels by relabelling them at the base's own budget, 5000 nodes, into `R9\base5k`: the same
+`--fraction` and `--select-seed` choose the same games. This is cheap, and close to but not exactly the
+original labels (no table carried over from the game).
 
 **10c. Two fine-tunes** of network 8 with identical settings:
 ```powershell
 $FT = "--buckets 8 --king-buckets 4 --activation screlu --device cuda --eval-set R9\evalset_9999.bin --select-by eval:evalset_9999.bin --keep-best --init-from nets\nags.nnue --lr 1e-4 --epochs 10"
-& $PY tools\nnue\train.py --data "R9\teacher_sf\selfplay_*.bin" $FT.Split(' ') --out R9\T_sf.nnue
-& $PY tools\nnue\train.py --data "R9\teacher_nags\selfplay_*.bin" $FT.Split(' ') --out R9\T_nags.nnue
+& $PY tools\nnue\train.py --data "R9\deep40k\selfplay_*.bin" $FT.Split(' ') --out R9\D_deep40k.nnue
+& $PY tools\nnue\train.py --data "R9\base5k\selfplay_*.bin" $FT.Split(' ') --out R9\B_base5k.nnue
 ```
-(The evaluation set's labels are NAGS's 5000-node ones, so its loss favours T_nags; it picks each run's best
-epoch, the match decides.)
+The evaluation set's labels are 5000-node ones, so its loss favours B. It picks each run's best epoch; the
+match decides.
 
-**10d. SPRT** [0, 10] at 3+0.03, `T_sf.best.nnue` against `T_nags.best.nnue`; if H1, `T_sf.best.nnue` against
-network 8. **Decision (pre-registered):** teacher labels are worth expanding only if T_sf beats T_nags.
-**Record:** the label runs' times, the eval-set losses, every SPRT line.
+**10d. SPRT** [0, 10] at 3+0.03, `D_deep40k.best.nnue` against `B_base5k.best.nnue`. **Decision (pre-registered):**
+if H1, the equal-CPU follow-up in `docs/STRENGTH_PLAN.md` item 1 decides how later rounds label. Otherwise deeper
+labels are dropped for now. **Record:** the label times, compare's table, the eval-set losses, every SPRT line.
 
 ## 11. Quantization-aware fine-tune (optional; about 1 hour of GPU, then SPRTs; after 6a)
 
@@ -374,7 +365,8 @@ Targeted sources first (each a few hours of CPU):
 .\build\Release\nags_datagen.exe --out R9T\corr_9202.bin --seed 9202 --first-game 0 --games 60000 --threads $T --book books\corr.epd --random-plies 2
 & $PY tools\nnue\tb_data.py generate --syzygy <TB345> --material KRvKB KRvKN KBvKP KNvKP KRPvKR KBPvKB KNPvKB KRPvKB KPvKP KRvKBP --count 100000 --engine build\Release\nags_enhanced.exe --nodes 5000 --workers $T --out R9T\tb_1.bin
 ```
-(`AJ-CORR-PGN-000.pgn` needs `git lfs pull`.) Then the mixtures, about 100M positions each, and the same
+(`AJ-CORR-PGN-000.pgn` needs `git lfs pull`. It supplies start positions only, like any opening book: the games
+from them and every label are NAGS's own, and the tablebase positions carry exact results.) Then the mixtures, about 100M positions each, and the same
 training for each (network 8's design, from scratch, 20 epochs, `--eval-set R9\evalset_9999.bin --keep-best`):
 ```powershell
 & $PY tools\nnue\mix.py build --source "R9\selfplay_910*.bin=1" --positions 100000000 --max-copies 4 --out MIX\m0.bin

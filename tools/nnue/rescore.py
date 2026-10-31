@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Teacher labels: rescore nags_datagen shards with another UCI engine, and compare label sets.
+"""Deeper labels: rescore nags_datagen shards with a UCI engine, and compare label sets.
+
+NAGS's training labels come from NAGS only (docs/STRENGTH_PLAN.md: the engine stays its own, for any tournament).
+The teacher for training data is nags_enhanced with more nodes; another engine may be given to `label` and
+`compare` to measure how its scores differ, but such labels are not trained on.
 
   label    relabels whole games of indexed shards (nags_datagen --first-game) with any UCI engine at a fixed
            limit (nodes, depth or move time), one engine process per --workers, and writes them as a new shard
@@ -13,12 +17,9 @@
            that predicts them best and the error at that K), the scale that puts each set on the base's
            (--scale for label), the mean difference between sets once scaled, and each set's cost per position.
 
-  python tools/nnue/rescore.py label --data data/selfplay_9101.bin --engine /usr/games/stockfish \\
-      --nodes 200000 --fraction 0.05 --workers 5 --out-dir data/teacher_sf16
   python tools/nnue/rescore.py label --data data/selfplay_9101.bin --engine build/nags_enhanced \\
-      --nodes 400000 --fraction 0.05 --workers 5 --out-dir data/teacher_nags
-  python tools/nnue/rescore.py compare --base data/selfplay_9101.bin \\
-      --labels data/teacher_sf16/selfplay_9101.bin data/teacher_nags/selfplay_9101.bin
+      --nodes 40000 --fraction 0.1 --workers 5 --out-dir data/deep40k
+  python tools/nnue/rescore.py compare --base data/selfplay_9101.bin --labels data/deep40k/selfplay_9101.bin
 
 Limits of the 32-byte records: they hold no castling rights, en-passant square or move counters. A position is
 given to the teacher with castling rights wherever the king and rook stand on their original squares, no
