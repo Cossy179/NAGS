@@ -4,13 +4,18 @@
   report  the composition of 32-byte record files (a random sample of --sample records): pieces on the board,
           material balance and imbalances, pawn endings, queenless positions, |score| and results, and how
           many positions occur more than once.
-  build   a mixture of sources in given shares of --positions, by whole games (from nags_datagen shard
-          indexes; files without one are taken in blocks of 1024 consecutive records), with at most
-          --max-copies records of any position (the board and side to move) kept, so near-identical
-          opening positions do not swamp the rest. The games are written in random order with an index
-          (one line per game), so train.py's validation split (the file's tail) is a sample of the whole
-          mixture and falls between games. <out>.mix.json records the sources, their files, the shares
-          asked for and obtained, the duplicates removed, and the composition of the result.
+  build   a mixture of sources in given shares of --positions, by units that keep what they are: whole
+          games (from nags_datagen shard indexes), independent positions (tb_data.py's index) and, for a file
+          with no index at all, blocks of 1024 consecutive records, which may hold parts of games. At most
+          --max-copies records of any position (the board, side to move, castling and en passant) are kept,
+          so near-identical opening positions do not swamp the rest. The output has a version 3 index
+          (tools/nnue/shards.py): every unit with its kind and origin (seed:game@file, or the file and record
+          where a block starts), so a game is still known as that game. Blocks are written first, the games
+          and positions after them in random order: train.py splits validation (the file's tail) only after
+          the last block, so no game of a file without an index can reach both sides, and the validation set
+          is a sample of the rest. An index that is damaged, or that does not cover its file, is refused, not
+          read as a file without one. <out>.mix.json records the sources, their files, the shares asked for
+          and obtained, the records of each kind, the duplicates removed, and the composition of the result.
 
   book    start positions for nags_datagen --book, drawn from record files by kind: 'imbalanced' (material
           two or more pawns apart, or level material with different pieces), 'level-different' (only the
@@ -47,7 +52,7 @@ import shards  # noqa: E402
 RECORD_BYTES = 32
 BLOCK = 1024  # records taken together from a file without an index
 VALUES = np.array([1, 3, 3, 5, 9, 0], np.int64)  # P N B R Q K
-Unit = namedtuple("Unit", "path offset records result origin")
+Unit = namedtuple("Unit", "path offset records result kind origin")
 
 
 def expand(pattern):
@@ -58,19 +63,37 @@ def expand(pattern):
 
 
 def units_of(path):
-    """The file's games (from its shard index) or, without a usable index, blocks of BLOCK records."""
+    """(units, header or None) of a file: the games of its nags_datagen index (v2), the units of a version 3
+    index (games, independent positions in chunks of up to BLOCK records, blocks), or, for a file with no index,
+    blocks of BLOCK records (kind b). A damaged index, or one that does not cover the file, stops the run: read as
+    blocks, its games could cross the validation split."""
     size = os.path.getsize(path)
     if size % RECORD_BYTES:
         sys.exit(f"{path}: the size is not a multiple of {RECORD_BYTES} bytes")
+    name = os.path.basename(path).replace(" ", "_")
+    if not os.path.exists(shards.index_path(path)):
+        n = size // RECORD_BYTES
+        return [Unit(path, s * RECORD_BYTES, min(BLOCK, n - s), None, "b", f"@{name}:{s}")
+                for s in range(0, n, BLOCK)], None
     try:
         header, games = shards.read_index(path)
-        if sum(g.bytes for g in games) == size:
-            seed = shards.header_fields(header).get("seed")
-            return [Unit(path, g.offset, g.records, g.result, f"{seed}:{g.number}") for g in games], True
-    except (OSError, ValueError):
-        pass
-    n = size // RECORD_BYTES
-    return [Unit(path, s * RECORD_BYTES, min(BLOCK, n - s), None, None) for s in range(0, n, BLOCK)], False
+    except (OSError, ValueError) as e:
+        sys.exit(f"{path}: {e}. Repair or regenerate it (nags_datagen continues a shard from its index); a damaged "
+                 "index is not read as a file without one")
+    indexed = sum(g.bytes for g in games)
+    if indexed != size:
+        sys.exit(f"{path}: its index lists {indexed} bytes, the file has {size} (an unfinished shard: run its "
+                 "nags_datagen command again to finish it)")
+    units = []
+    for g in games:
+        origin = g.origin if g.kind != "g" or "@" in g.origin else f"{g.origin}@{name}"
+        if g.kind == "p" and g.records > BLOCK:  # independent positions may be taken in any chunks
+            for k in range(0, g.records, BLOCK):
+                units.append(Unit(path, g.offset + k * RECORD_BYTES, min(BLOCK, g.records - k), None, "p",
+                                  f"{origin}+{k}"))
+        else:
+            units.append(Unit(path, g.offset, g.records, g.result if g.kind == "g" else None, g.kind, origin))
+    return units, header
 
 
 _maps = {}
@@ -84,10 +107,11 @@ def read_unit(u):
 
 
 def position_keys(recs):
-    """64-bit keys of the positions (occupancy, pieces and side to move; not the score or result)."""
+    """64-bit keys of the positions: occupancy, pieces, side to move and, where recorded (--record-state), the
+    castling rights and en-passant square; not the score, the result or the move counters."""
     r = np.ascontiguousarray(recs).copy()
     r[:, 24:27] = 0
-    r[:, 28:] = 0
+    r[:, 29:] = 0
     w = r.view("<u8").reshape(-1, 4)
     with np.errstate(over="ignore"):
         h = w[:, 0] * np.uint64(0x9E3779B97F4A7C15)
@@ -244,14 +268,15 @@ def build(args):
     sources = [parse_source(s) for s in args.source]
     total_w = sum(w for _, w in sources)
     rng = np.random.default_rng(args.seed)
-    chosen, info = [], []
+    chosen, info, states = [], [], []
     for k, (pattern, w) in enumerate(sources):
         paths = expand(pattern)
         units, indexed = [], True
         for p in paths:
-            u, ok = units_of(p)
+            u, header = units_of(p)
             units.extend(u)
-            indexed &= ok
+            indexed &= header is not None
+            states.append(header is not None and shards.header_fields(header).get("state") == "1")
         want = round(args.positions * w / total_w)
         order = rng.permutation(len(units))
         got, take = 0, []
@@ -264,12 +289,17 @@ def build(args):
         info.append({"pattern": pattern, "share": w / total_w, "files": [
             {"name": os.path.basename(p), "size": os.path.getsize(p)} for p in paths],
             "indexed": indexed, "available": int(available), "wanted": int(want), "taken": int(got),
-            "short": got < want})
+            "short": got < want, "kinds_taken": {kd: int(sum(u.records for u in take if u.kind == kd))
+                                                 for kd in shards.KINDS if any(u.kind == kd for u in take)}})
         if got < want:
             print(f"source {pattern}: {available} positions, fewer than its share ({want}): all taken", flush=True)
         chosen.extend((k, u) for u in take)
-    order = rng.permutation(len(chosen))
-    chosen = [chosen[i] for i in order]
+    # Blocks first (their order among themselves random), then the games and positions in random order: the
+    # validation split falls after the last block, so a game that a file without an index holds in pieces
+    # stays on the training side whole.
+    blocks = [c for c in chosen if c[1].kind == "b"]
+    rest = [c for c in chosen if c[1].kind != "b"]
+    chosen = [blocks[i] for i in rng.permutation(len(blocks))] + [rest[i] for i in rng.permutation(len(rest))]
     # Pass 1: position keys in output order; keep the first --max-copies of each.
     keys = np.concatenate([position_keys(read_unit(u)) for _, u in chosen]) if chosen else np.zeros(0, np.uint64)
     keep = np.ones(len(keys), bool)
@@ -285,27 +315,33 @@ def build(args):
         sys.exit(f"{out} exists: a mixture is written once (choose another name)")
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     digest = hashlib.sha256(json.dumps([info, args.positions, args.max_copies, args.seed]).encode()).hexdigest()[:16]
-    header = (shards.HEADER + f"seed=mix-{digest} format=bin mix-sources={len(sources)} "
-              f"max-copies={args.max_copies} mix-seed={args.seed}")
+    header = (shards.HEADER3 + f"seed=mix-{digest} format=bin mix-sources={len(sources)} "
+              f"max-copies={args.max_copies} mix-seed={args.seed}" + (" state=1" if states and all(states) else ""))
     pos, number, removed = 0, 0, [0] * len(sources)
     written = [0] * len(sources)
+    by_kind = {kd: 0 for kd in shards.KINDS}
     with open(out + ".tmp", "wb") as data, open(shards.index_path(out) + ".tmp", "w", newline="\n") as idx:
         idx.write(header + "\n")
-        for k, u in chosen:
-            recs = read_unit(u)
-            mask = keep[pos : pos + len(recs)]
-            pos += len(recs)
-            recs = recs[mask]
-            removed[k] += int((~mask).sum())
-            if not len(recs):
-                continue
-            blob = recs.tobytes()
-            data.write(blob)
-            result = u.result if u.result is not None else 0.5  # a block is not a game; its result is not used
-            res = "0.5" if result == 0.5 else str(int(result))
-            idx.write(f"{number} {len(recs)} {len(blob)} {res} {shards.fnv1a(blob):016x}\n")
-            written[k] += len(recs)
-            number += 1
+        for g in range(0, len(chosen), 4096):  # the checksums of a group of units at once
+            group = []
+            for k, u in chosen[g : g + 4096]:
+                recs = read_unit(u)
+                mask = keep[pos : pos + len(recs)]
+                pos += len(recs)
+                recs = recs[mask]
+                removed[k] += int((~mask).sum())
+                if len(recs):
+                    group.append((k, u, recs.tobytes()))
+            for (k, u, blob), checksum in zip(group, shards.fnv1a_many([b for _, _, b in group])):
+                data.write(blob)
+                # Only a game has a result; positions and blocks carry 0.5, which nothing reads.
+                result = u.result if u.result is not None else 0.5
+                res = "0.5" if result == 0.5 else str(int(result))
+                idx.write(f"{number} {len(blob) // RECORD_BYTES} {len(blob)} {res} {checksum:016x} {u.kind} "
+                          f"{u.origin}\n")
+                written[k] += len(blob) // RECORD_BYTES
+                by_kind[u.kind] += len(blob) // RECORD_BYTES
+                number += 1
     os.replace(out + ".tmp", out)
     os.replace(shards.index_path(out) + ".tmp", shards.index_path(out))
     for k, s in enumerate(info):
@@ -314,11 +350,14 @@ def build(args):
     for s in info:
         s["share_written"] = s["written"] / total if total else 0.0
     result = {"out": os.path.basename(out), "positions": int(total), "units": number, "max_copies": args.max_copies,
-              "seed": args.seed, "sources": info,
+              "seed": args.seed, "sources": info, "records_by_kind": {shards.KINDS[k]: v for k, v in by_kind.items()},
+              "blocks_first": by_kind["b"],
               "composition": composition(sample([out], args.sample, args.seed))}
     with open(out + ".mix.json", "w") as fh:
         json.dump(result, fh, indent=1)
-    print(f"wrote {out}: {total} positions in {number} games or blocks")
+    print(f"wrote {out}: {total} positions in {number} units ("
+          + ", ".join(f"{shards.KINDS[k]}s {v}" for k, v in by_kind.items() if v) + ")"
+          + (f"; the {by_kind['b']} records in blocks come first and stay on the training side" if by_kind["b"] else ""))
     for s in info:
         print(f"  {s['pattern']}: share {s['share']:.1%} asked, {s['share_written']:.1%} written ({s['written']} "
               f"positions, {s['duplicates_removed']} duplicates removed{', short' if s['short'] else ''})")

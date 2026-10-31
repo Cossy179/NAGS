@@ -162,10 +162,15 @@ and without the option the output is byte-identical to before.
   materials with the Syzygy result under the fifty-move rule and NAGS's
   search score; `tb_data.py measure` is the matching endgame test
   (`docs/STRENGTH_PLAN.md`, item 7).
-* `tools/nnue/mix.py build`: a mixture of sources in given shares, by
-  whole games, with at most `--max-copies` records of a position, in
-  random game order with an index; `mix.py report` describes a data set's
-  composition.
+* `tools/nnue/mix.py build`: a mixture of sources in given shares, with at
+  most `--max-copies` records of a position, and a version 3 index that
+  keeps each unit's kind and origin: a whole game (`seed:game@file`), a run
+  of independent positions (tablebase data), or a block of 1,024 records of
+  a file with no index, which may hold parts of games. Blocks are written
+  first and the trainer splits validation only after the last one, so no
+  game of such a file is on both sides. A damaged index, or one that does
+  not cover its file, is refused rather than read as no index. `mix.py
+  report` describes a data set's composition.
 
 With an output name ending in `.bin` each position is a 32-byte binary
 record instead (occupancy, 4-bit piece codes, score, result, side to move;

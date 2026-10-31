@@ -8,6 +8,15 @@ are in the data file. `check` verifies each shard against its data (sizes and ch
 against each other: the same header apart from the seed (settings, network, search) and no game of a seed
 twice. Shards that pass were made by one build and one network and hold every game once, wherever they were
 generated.
+
+Version 3 (written by tools/nnue/mix.py and tools/nnue/tb_data.py, never by nags_datagen) adds two fields to every
+line, so that a file that is not one engine's self-play still says what its units are:
+
+    <unit> <records> <bytes> <result> <checksum> <kind> <origin>
+
+kind g is a whole game (origin <seed>:<game>@<file>), p a run of independent positions (any record boundary
+inside it is a safe place to split), and b a block of consecutive records of a file that had no index (it may hold
+parts of games that continue in its neighbouring blocks: no boundary next to a block is known to be safe).
 """
 
 import argparse
@@ -16,15 +25,42 @@ import re
 import sys
 from collections import namedtuple
 
-Game = namedtuple("Game", "number records bytes result checksum offset")
+Game = namedtuple("Game", "number records bytes result checksum offset kind origin", defaults=("g", None))
 _LINE = re.compile(r"(\d+) (\d+) (\d+) (0|0\.5|1) ([0-9a-f]{16})")
+_LINE3 = re.compile(r"(\d+) (\d+) (\d+) (0|0\.5|1) ([0-9a-f]{16}) ([gpb]) (\S+)")
 HEADER = "# nags_datagen games v2 "
+HEADER3 = "# nags_datagen games v3 "
+KINDS = {"g": "game", "p": "independent positions", "b": "block of a file without an index"}
 
 
 def fnv1a(data, h=0xCBF29CE484222325):
     for b in data:
         h = ((h ^ b) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
     return h
+
+
+def fnv1a_many(blobs, group=4096):
+    """fnv1a of each bytes object, vectorised across them (the same values; a pure Python loop over the bytes of
+    a 100M-position mixture would take hours)."""
+    import numpy as np
+    out = [0] * len(blobs)
+    order = sorted(range(len(blobs)), key=lambda i: len(blobs[i]))
+    prime = np.uint64(0x100000001B3)
+    for g in range(0, len(order), group):
+        ids = order[g : g + group]
+        lengths = np.array([len(blobs[i]) for i in ids])
+        width = int(lengths.max()) if len(ids) else 0
+        buf = np.zeros((len(ids), width), np.uint64)
+        for row, i in enumerate(ids):
+            buf[row, : len(blobs[i])] = np.frombuffer(blobs[i], np.uint8)
+        h = np.full(len(ids), 0xCBF29CE484222325, np.uint64)
+        with np.errstate(over="ignore"):
+            for col in range(width):
+                live = lengths > col
+                h = np.where(live, (h ^ buf[:, col]) * prime, h)
+        for row, i in enumerate(ids):
+            out[i] = int(h[row])
+    return out
 
 
 def index_path(data_path):
@@ -38,25 +74,38 @@ def read_index(data_path):
     with open(index_path(data_path), "rb") as fh:
         text = fh.read().decode("ascii", errors="replace")
     lines = [l[:-1] if l.endswith("\r") else l for l in text.split("\n")[:-1]]  # after the last newline: unfinished
-    if not lines or not lines[0].startswith(HEADER):
-        raise ValueError(f"{index_path(data_path)}: not a nags_datagen shard index (v2)")
+    v3 = bool(lines) and lines[0].startswith(HEADER3)
+    if not lines or not (v3 or lines[0].startswith(HEADER)):
+        raise ValueError(f"{index_path(data_path)}: not a nags_datagen shard index (v2 or v3)")
+    seed = header_fields(lines[0]).get("seed")
     games, seen, offset = [], set(), 0
     for i, line in enumerate(lines[1:], start=2):
-        m = _LINE.fullmatch(line)
+        m = (_LINE3 if v3 else _LINE).fullmatch(line)
         if not m:
             raise ValueError(f"{index_path(data_path)}: damaged line {i}: {line!r}")
         number, records, size = int(m.group(1)), int(m.group(2)), int(m.group(3))
         if number in seen:
             raise ValueError(f"{index_path(data_path)}: game {number} listed twice")
         seen.add(number)
-        games.append(Game(number, records, size, float(m.group(4)), m.group(5), offset))
+        kind, origin = (m.group(6), m.group(7)) if v3 else ("g", f"{seed}:{number}")
+        games.append(Game(number, records, size, float(m.group(4)), m.group(5), offset, kind, origin))
         offset += size
     return lines[0], games
 
 
+def game_ids(games):
+    """{(seed, game)} of the whole games among the units: their self-play identity, whatever file they are in."""
+    out = set()
+    for g in games:
+        if g.kind == "g" and g.origin and ":" in g.origin:
+            seed, _, rest = g.origin.partition(":")
+            out.add((seed, int(rest.split("@")[0])))
+    return out
+
+
 def header_fields(header):
-    """{name: value} of an index header."""
-    return dict(f.split("=", 1) for f in header[len(HEADER):].split())
+    """{name: value} of an index header (v2 or v3: both prefixes are the same length)."""
+    return dict(f.split("=", 1) for f in header[len(HEADER):].split() if "=" in f)
 
 
 def check(paths, verify="tail"):
@@ -82,11 +131,10 @@ def check(paths, verify="tail"):
                     fh.seek(g.offset)
                     if f"{fnv1a(fh.read(g.bytes)):016x}" != g.checksum:
                         problems.append(f"{p}: game {g.number} does not match its checksum")
-        seed = header_fields(header).get("seed")
-        for g in games:
-            if (seed, g.number) in owner:
-                problems.append(f"game {g.number} of seed {seed} is in both {owner[seed, g.number]} and {p}")
-            owner.setdefault((seed, g.number), p)
+        for key in game_ids(games):
+            if key in owner:
+                problems.append(f"game {key[1]} of seed {key[0]} is in both {owner[key]} and {p}")
+            owner.setdefault(key, p)
     distinct = {}
     for p, h in headers.items():
         f = header_fields(h)

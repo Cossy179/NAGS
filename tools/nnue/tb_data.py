@@ -7,8 +7,9 @@
             100 plies to a capture or pawn move (a cursed win or blessed loss) is a draw, as it is at a
             halfmove clock of 0. The score is NAGS's search at --nodes without tablebases (what the network
             is trained to predict), and a position it scores as mate is dropped, as nags_datagen does. Writes
-            32-byte records (no game index: the positions are independent) and <out>.tb.json with the counts
-            by material and result.
+            32-byte records with their state (exact positions), a version 3 index that marks them as
+            independent positions (tools/nnue/shards.py), and <out>.tb.json with the counts by material and
+            result.
   measure   the same kind of positions, a sample per material: does NAGS's score at --nodes (no tablebases)
             say the tablebase's result? A score beyond +-band is a win or a loss, within it a draw. Reports
             the share right per material and how it errs (draws scored as wins, wins scored as draws, ...):
@@ -38,6 +39,7 @@ import chess.syzygy
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import shards  # noqa: E402
 import train  # noqa: E402
 
 RESULTS = ("loss", "draw", "win")  # for the side to move
@@ -153,6 +155,15 @@ def generate(args):
     recs = train.encode(feats, stm, score, result)
     recs[:, 30] = 1  # the state bytes (nags_datagen --record-state): no castling, no en passant, clocks 0 and 1
     recs.tofile(args.out)
+    # A version 3 index (tools/nnue/shards.py): the records are independent positions, so a validation split may
+    # fall anywhere among them, and mix.py keeps them as positions, never as blocks of games.
+    name = os.path.basename(args.out).replace(" ", "_")
+    chunks = [recs[i : i + 1024].tobytes() for i in range(0, len(recs), 1024)]
+    with open(shards.index_path(args.out), "w", newline="\n") as idx:
+        idx.write(shards.HEADER3 + f"seed=tb-{args.seed} format=bin kind=positions nodes={args.nodes} state=1 "
+                  f"materials={','.join(args.material)}\n")
+        for n, (blob, checksum) in enumerate(zip(chunks, shards.fnv1a_many(chunks))):
+            idx.write(f"{n} {len(blob) // 32} {len(blob)} 0.5 {checksum:016x} p tb-{args.seed}@{name}:{n * 1024}\n")
     with open(args.out + ".tb.json", "w") as fh:
         json.dump({"materials": counts, "nodes": args.nodes, "engine": args.engine, "options": args.option or [],
                    "seed": args.seed, "quiet": not args.any, "positions": len(rows)}, fh, indent=1)

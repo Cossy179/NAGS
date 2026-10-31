@@ -104,14 +104,93 @@ def test_a_file_without_an_index_is_taken_in_blocks(tmp_path):
     a = _shard(tmp_path / "a" / "s.bin", 34, 30)
     plain = tmp_path / "plain.bin"
     plain.write_bytes(a.read_bytes())  # no index next to it
-    units, indexed = mix.units_of(str(plain))
-    assert not indexed and sum(u.records for u in units) == plain.stat().st_size // 32
+    units, header = mix.units_of(str(plain))
+    assert header is None and {u.kind for u in units} == {"b"}
+    assert sum(u.records for u in units) == plain.stat().st_size // 32
     out = tmp_path / "m.bin"
     mix.main(["build", "--source", f"{plain}=1", "--positions", "100000", "--max-copies", "0", "--out", str(out)])
     assert sorted(map(bytes, np.fromfile(out, np.uint8).reshape(-1, 32))) == \
         sorted(map(bytes, np.fromfile(plain, np.uint8).reshape(-1, 32)))
     info = json.loads(Path(str(out) + ".mix.json").read_text())
     assert info["sources"][0]["indexed"] is False and info["sources"][0]["short"] is True
+    header, units = shards.read_index(str(out))
+    assert header.startswith(shards.HEADER3) and {u.kind for u in units} == {"b"}
+    assert all(u.origin.startswith("@plain.bin:") for u in units)
+    # Blocks only: no safe game boundary, so the trainer splits by records and says so.
+    n = out.stat().st_size // 32
+    assert train.game_boundary([str(out)], [n], n - n // 10) == (n - n // 10, "records")
+
+
+@needs_datagen
+def test_blocks_never_reach_the_validation_side(tmp_path):
+    """The reported problem: blocks of a file without an index were written as if they were games, so the
+    trainer could split validation between two blocks of one game. Now blocks come first, and the boundary
+    moves only to a unit start after the last block."""
+    games = _shard(tmp_path / "g" / "s.bin", 35, 40)
+    plain = tmp_path / "plain.bin"
+    plain.write_bytes(_shard(tmp_path / "p" / "s.bin", 36, 40).read_bytes())  # its index left behind
+    out = tmp_path / "m.bin"
+    mix.main(["build", "--source", f"{games}=1", "--source", f"{plain}=1", "--positions", "100000",
+              "--max-copies", "0", "--out", str(out)])
+    header, units = shards.read_index(str(out))
+    kinds = [u.kind for u in units]
+    last_block = max(i for i, k in enumerate(kinds) if k == "b")
+    assert set(kinds[: last_block + 1]) == {"b"} and set(kinds[last_block + 1 :]) == {"g"}
+    n = out.stat().st_size // 32
+    first_game = units[last_block + 1].offset // 32
+    for target in (first_game - 5, first_game + 3, n - 50, n // 3):
+        boundary, split = train.game_boundary([str(out)], [n], target)
+        assert split == "games" and boundary >= first_game
+        assert boundary in {u.offset // 32 for u in units[last_block + 1 :]}
+    # The games keep their identity: the same (seed, game) as in the shard they came from.
+    assert shards.game_ids(units) == shards.game_ids(shards.read_index(str(games))[1])
+    assert all(u.origin.endswith("@s.bin") for u in units if u.kind == "g")
+    assert shards.check([str(out)], verify="all") == []
+
+
+@needs_datagen
+def test_an_evaluation_set_is_recognised_inside_a_mixture(tmp_path):
+    a = _shard(tmp_path / "a" / "s.bin", 37, 20)
+    out = tmp_path / "m.bin"
+    mix.main(["build", "--source", f"{a}=1", "--positions", "100000", "--max-copies", "0", "--out", str(out)])
+    ov = train.eval_overlap(str(a), [str(out)], "x", cache=False)
+    assert ov["games_in_training_data"] == 20  # by origin, although the mixture's own seed is mix-...
+
+
+@needs_datagen
+def test_damaged_or_partial_indexes_are_refused(tmp_path):
+    a = _shard(tmp_path / "a" / "s.bin", 38, 10)
+    lines = Path(shards.index_path(str(a))).read_text().splitlines()
+    Path(shards.index_path(str(a))).write_text("\n".join(lines[:3] + ["3 x y"] + lines[4:]) + "\n")
+    with pytest.raises(SystemExit, match="damaged"):
+        mix.main(["build", "--source", f"{a}=1", "--positions", "10", "--out", str(tmp_path / "m1.bin")])
+    b = _shard(tmp_path / "b" / "s.bin", 39, 10)
+    with open(b, "ab") as fh:
+        fh.write(b"\0" * 32)  # bytes the index does not list (a game cut off while written)
+    with pytest.raises(SystemExit, match="unfinished"):
+        mix.main(["build", "--source", f"{b}=1", "--positions", "10", "--out", str(tmp_path / "m2.bin")])
+
+
+def test_independent_positions_split_anywhere(tmp_path):
+    recs = _records([("4k3/8/8/8/8/8/8/R3K3 w - - 0 1", 100 + i, 1.0) for i in range(3000)])
+    data = tmp_path / "tb.bin"
+    recs.tofile(data)
+    chunks = [recs[i : i + 1024].tobytes() for i in range(0, len(recs), 1024)]
+    with open(shards.index_path(str(data)), "w") as fh:
+        fh.write(shards.HEADER3 + "seed=tb-1 format=bin kind=positions\n")
+        for n, (blob, c) in enumerate(zip(chunks, shards.fnv1a_many(chunks))):
+            fh.write(f"{n} {len(blob) // 32} {len(blob)} 0.5 {c:016x} p tb-1@tb.bin:{n * 1024}\n")
+    assert train.game_boundary([str(data)], [3000], 2900) == (2900, "games")
+    out = tmp_path / "m.bin"
+    mix.main(["build", "--source", f"{data}=1", "--positions", "1500", "--max-copies", "0", "--out", str(out)])
+    _, units = shards.read_index(str(out))
+    assert {u.kind for u in units} == {"p"} and len(units) == 2  # taken in chunks, still positions
+
+
+def test_fnv1a_many_is_fnv1a():
+    import os as _os
+    blobs = [_os.urandom(k) for k in (0, 1, 31, 32, 900, 32, 4000)]
+    assert shards.fnv1a_many(blobs) == [shards.fnv1a(b) for b in blobs]
 
 
 def test_book_selects_kinds(tmp_path):

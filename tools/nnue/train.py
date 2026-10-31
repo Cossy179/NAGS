@@ -365,7 +365,12 @@ def game_boundary(paths, counts, target):
     """(n_train, split): the validation boundary moved from record `target` to the nearest start of a game in
     the file it falls in, using that file's nags_datagen shard index (<file>.games), so that no game has
     positions on both sides ("games"). Without a usable index the boundary stays and one game may be split
-    ("records")."""
+    ("records").
+
+    A version 3 index (tools/nnue/mix.py, tb_data.py) says what each unit is. Inside independent positions any
+    boundary is safe. Next to a block of a file that had no index none is known to be: its games may continue in
+    other blocks. So the validation side may hold no block, and only unit starts after the last block qualify
+    (mix.py writes the blocks first); a file with no such start splits by records, as one without an index."""
     offset = 0
     for path, count in zip(paths, counts):
         if offset + count <= target:
@@ -382,10 +387,17 @@ def game_boundary(paths, counts, target):
             print(f"validation: {os.path.basename(path)} has no complete game index, so the boundary may cut one "
                   "game (nags_datagen --first-game writes one)", flush=True)
             return target, "records"
-        starts = [g.offset // RECORD_BYTES for g in games] + [count]
+        last_block = max((i for i, g in enumerate(games) if g.kind == "b"), default=-1)
+        unit = next(i for i, g in enumerate(games) if local < (g.offset + g.bytes) // RECORD_BYTES)
+        if unit > last_block and games[unit].kind == "p":
+            return target, "games"  # inside independent positions: no game to cut
+        starts = [g.offset // RECORD_BYTES for i, g in enumerate(games) if i > last_block] + [count]
+        starts = [st for st in starts if offset + st < sum(counts)]  # keep some validation
+        if not starts:
+            print(f"validation: {os.path.basename(path)} holds blocks of files without a game index up to its end, "
+                  "so the boundary may cut a game", flush=True)
+            return target, "records"
         best = min(starts, key=lambda s: (abs(s - local), s))
-        if offset + best >= sum(counts):  # keep some validation
-            best = max(s for s in starts if offset + s < sum(counts))
         return offset + best, "games"
     return target, "games"
 
@@ -433,15 +445,14 @@ def eval_overlap(eval_path, paths, data_sha, cache=True):
                  or file_sha256(p, cache=True) == eval_sha]
     shared_games = 0
     try:
-        eh, eg = shards.read_index(eval_path)
-        mine = {(shards.header_fields(eh).get("seed"), g.number) for g in eg}
+        _, eg = shards.read_index(eval_path)
+        mine = shards.game_ids(eg)  # (seed, game): a mixture's index keeps its games' origins
         for p in paths:
             try:
-                th, tg = shards.read_index(p)
+                _, tg = shards.read_index(p)
             except (OSError, ValueError):
                 continue
-            seed = shards.header_fields(th).get("seed")
-            shared_games += sum((seed, g.number) in mine for g in tg)
+            shared_games += len(shards.game_ids(tg) & mine)
     except (OSError, ValueError):
         pass
     raw = np.fromfile(eval_path, np.uint8)

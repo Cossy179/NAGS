@@ -63,7 +63,13 @@ a header with the settings, the network's FNV-1a 64 and the search
 fingerprint (bench nodes), then one line per game with the FNV-1a 64 of its
 bytes. A shard mode run never truncates or extends an output that has no
 index, and refuses an index of other settings, another network or another
-search. `tools/nnue/shards.py` reads the same format. `--book FILE` (opt-in) starts
+search. `tools/nnue/shards.py` reads the same format, and a version 3 index that only
+`tools/nnue/mix.py` and `tools/nnue/tb_data.py` write (never `nags_datagen`): two
+more fields a line, the unit's kind (`g` a game, `p` independent positions, `b`
+a block of a file without an index) and its origin (`seed:game@file`), so a
+mixture's games keep their identity; the trainer splits validation only after
+the last block, and finds an evaluation set's games in a mixture by origin.
+Version 2 files read exactly as before. `--book FILE` (opt-in) starts
 games from the file's positions; without it the output is byte-identical
 (checked, text, binary and shards), and with it the shard header gains
 `book=<fnv>:<positions>`. `--repetition third` (opt-in)

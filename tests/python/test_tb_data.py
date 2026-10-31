@@ -14,6 +14,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools" / "nnue"))
 import rescore  # noqa: E402
+import shards  # noqa: E402
 import tb_data  # noqa: E402
 import train  # noqa: E402
 
@@ -68,6 +69,9 @@ def test_generate_writes_records_with_the_tablebase_result(tmp_path):
             assert r[26] / 2 == white
     feats, stm, score, result = train.decode(__import__("torch").from_numpy(recs))
     assert len(feats) == len(recs)
+    header, units = shards.read_index(str(out))  # independent positions, exact, and a consistent index
+    assert header.startswith(shards.HEADER3) and " state=1" in header and {u.kind for u in units} == {"p"}
+    assert shards.check([str(out)], verify="all") == []
 
 
 @pytest.mark.skipif(_engine() is None, reason="nags_enhanced not built")
