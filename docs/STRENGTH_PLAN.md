@@ -30,7 +30,7 @@ What must not change is in `docs/COMPATIBILITY.md`. Commands for the training PC
 | 4 | Search tuning for network 8 | `src/Tune.h` + `tools/spsa.py` (`exp/spsa-tune`, merged here) | SPSA in groups of 2-4 parameters, then SPRTs on other openings and at 10+0.1 | VM or PC (CPU) |
 | 5 | The v4 architecture, properly | `train_v4.py`, engine support for format 4 | v3 and v4 on identical data: fixed-node quality and equal-time strength | PC |
 | 6 | Richer cheap input features | design notes below | one feature family at a time, update/refresh cost first | later |
-| 7 | Endgame supervision | `tools/nnue/tb_data.py` (generate, measure) | tablebase positions in the training mix; endgame accuracy tracked per material | PC + VM |
+| 7 | Endgame supervision | `tools/nnue/tb_data.py` (generate, measure) | tablebase positions in the training mix (a hand-written draw scaling lost: H0, −14.1 ± 15.5) | PC + VM |
 | 8 | Search mistakes, systematically | `tools/mistakes.py` (collect, summary, EPD) | a census on positions from real games; the largest class decides the next change | VM |
 | 9 | The training bottleneck | `train.py --ft-impl fused` | the 3060's `--profile` for each path; adopt the faster one | PC (20 min) |
 | 10 | Parallel search, measured | Threads=2: +107.5 ± 14.0 (time doubling +165.4) | nodes/s, time to depth and redundant work at 1/2/4 threads; equal-time SPRT at 4 | PC |
@@ -264,12 +264,11 @@ clock of 0) and NAGS's search score without tablebases, as 32-byte records ready
 2. Add 1-2% tablebase positions to mixture M2 (item 3).
 3. Track `measure` per material for every new network, next to the evaluation set's loss by piece
    count.
-4. In parallel, as an evaluation experiment, the UCI option `DrawScaling` (off by default, so the bench
-   is unchanged: 1528850; with it on, 1548643). It scales the network's score towards zero when the side
-   it favours has no pawns and at most a minor piece more: by 4/64 if the other side has at most a minor
-   piece, otherwise by 14/64, and to 0 for a lone minor piece. It also scores two knights against a bare
-   king as 0. On the same 2,100 positions with `measure` it raises the share right from 75.0% to
-   **97.5%**:
+4. In parallel, an evaluation experiment, now done: the UCI option `DrawScaling` (commit `72f5a7c`, removed
+   again after its SPRT). It scaled the network's score towards zero when the side it favours has no pawns
+   and at most a minor piece more: by 4/64 if the other side has at most a minor piece, otherwise by 14/64,
+   and to 0 for a lone minor piece. It also scored two knights against a bare king as 0. On the same 2,100
+   positions with `measure` it raised the share right from 75.0% to 97.5%:
 
    | Material | Off | On |
    |---|---:|---:|
@@ -280,8 +279,13 @@ clock of 0) and NAGS's search score without tablebases, as 32-byte records ready
    | KNvKP | 73% | 93% |
    | the others | unchanged within ±2 positions | |
 
-   The SPRT, on against off in the same binary, [0, 10] at 3+0.03, decides. These endings are rare in
-   games, so a small true gain may end undecided at the cap.
+   **SPRT, on against off in the same binary, [0, 10] at 3+0.03: H0** after 838 games, +183 =438 −217,
+   **−14.1 ± 15.5**. Right endgame verdicts did not make a stronger engine.
+
+   Not tested, a new hypothesis: the rule also fires where only the other side has pawns (rook against
+   bishop and pawns), and the score jumps when the last pawn goes, which can unsettle the search. A narrower
+   rule would scale only when neither side has pawns. It is not worth a test before the data route (step 2)
+   has been tried, which teaches the network these positions instead.
 
 **Decision.** By SPRT, as always. `measure` is a regression check and a diagnostic, not a strength
 claim.

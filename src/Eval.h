@@ -143,40 +143,13 @@ void materialAndPhase(const BoardT &b, int &score, int &phase) {
 // stores scores in 16 bits; a network's output is not bounded by its format.
 constexpr int kEvalLimit = 30000;
 
-// DrawScaling (UCI option, off by default): the network's score is scaled
-// towards zero where the side it favours has no pawns and at most a minor
-// piece more than the other side (the classical rule: a lone minor piece
-// cannot win, rook against minor piece and similar are mostly drawn), and
-// for two knights against a bare king. Network 8 scores most such draws as
-// wins (tools/nnue/tb_data.py measure: KRvKB 8% right, KNNvK 1%).
-inline bool drawScaling = false;
-
-// `v`: the network's score for the side to move.
-template <class BoardT>
-int scaleDrawish(const BoardT &b, int v) {
-    const Color us = b.sideToMove();
-    const Color strong = v > 0 ? us : opposite(us), weak = opposite(strong);
-    if (b.pieceBB(strong, PAWN)) return v;
-    auto minors = [&](Color c) { return popcount(b.pieceBB(c, KNIGHT)) + popcount(b.pieceBB(c, BISHOP)); };
-    auto material = [&](Color c) { // non-pawn material in pawns
-        return 3 * minors(c) + 5 * popcount(b.pieceBB(c, ROOK)) + 9 * popcount(b.pieceBB(c, QUEEN));
-    };
-    const int ms = material(strong), mw = material(weak);
-    if (ms - mw <= 3) return ms < 5 ? 0 : v * (mw <= 3 ? 4 : 14) / 64;
-    if (ms == 6 && popcount(b.pieceBB(strong, KNIGHT)) == 2 && mw == 0 && !b.pieceBB(weak, PAWN)) return 0;
-    return v;
-}
-
 // Score in centipawns from the side to move's point of view: the NNUE
 // network when one is active (FastBoard), otherwise the hand-written terms.
 template <class BoardT>
 int evaluate(const BoardT &b) {
     if constexpr (HasNnue<BoardT>::value) {
-        if (nnue::network()) {
-            const int v = std::clamp(nnue::evaluate(b.accumulator(), b.sideToMove(), b.occupancy()), -kEvalLimit,
-                                     kEvalLimit);
-            return drawScaling ? scaleDrawish(b, v) : v;
-        }
+        if (nnue::network())
+            return std::clamp(nnue::evaluate(b.accumulator(), b.sideToMove(), b.occupancy()), -kEvalLimit, kEvalLimit);
     }
     int score, phase; // phase: 24 = all pieces on the board, 0 = bare kings and pawns
     if constexpr (HasIncrementalEval<BoardT>::value) {
