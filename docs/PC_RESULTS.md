@@ -162,3 +162,51 @@ identical to the VM's game for game, and network 8's checkpoint found. Network 8
 quantization (bias +5.8 cp, 21 cp in the opening bucket). The bias-corrected export removes the bias but
 does not play better than network 8 (H0, −2.9 ± 10.1 after 1770 games), so `nets\nags.nnue` stays.
 `--sync-every 100` saves 0.9% on the 3060, below the 3% threshold. Sections 6-8 wait for the user.
+
+## Before section 6: review findings (2026-10-30)
+
+**Branch handoff.** The revised `PC_TASKS.md` (on `fix/round3-review` `2384ebb`) says to merge
+`origin/integ/round3` before section 6, but `integ/round3` is still `7464810` (2026-10-26): its 10 newer
+commits, including `docs/pc_env.example.ps1`, are only on `fix/round3-review`. Following the instructions as
+written would leave the PC on the old code. `fix/round3-review` also holds an engine change whose gate is
+undecided (the stalemate test with a piece left in quiescence, `06f55df`: bench 1528850 → 1584695 with the
+two new bench endgames), so it was not merged here yet: section 6 runs on it only if its non-regression SPRT
+passes (the user's decision), otherwise the user decides.
+
+**The stalemate change's non-regression SPRT, rerun on the PC.** The VM's run stopped undecided at 2422 games
+(+608 =1236 −578, +4.3 ± 8.6, LLR +1.77) and its log stayed on the VM, so it cannot be resumed here; it is run
+again from the start under its original plan (`tools/funnel.py --kind fix`: SPRT [−5, 0] at 3+0.03, cap 6000),
+5 games at a time. Candidate: `fix/round3-review` `2384ebb` in a separate worktree `..\NAGS-fix` (benches
+1479785 / 1372714 / 1584695 / 1584695, ctest 49/49). Base: this worktree's `integ/round3` `7464810` build
+(1528850), whose engine sources are those of the VM run's base `fa21bd2` (`git diff fa21bd2 7464810 -- src/
+CMakeLists.txt nets/` is empty). Started 2026-10-30 21:39 from `..\NAGS-fix\runs\stalemate_pc.cmd` (through
+`explorer.exe`); funnel: `stalemate-piece: bench 1584695 against 1528850; stages nonreg [-5, 0] 3+0.03 cap 6000`.
+Result: below when it finishes.
+
+**Detached-job helpers fixed** (`docs/pc_env.example.ps1`, added here from `fix/round3-review` with these
+changes):
+- `Start-Detached` checks every command's exit code: the first one other than 0 stops the job and is logged
+  (`[NAME] command 2 of 3 exited with code 7: stopped, the commands after it did not run`). Negative codes
+  (crashes) count too. Redirections in the generated lines come first (`>>"log" echo ...`), since
+  `echo ... code 7>> log` would redirect handle 7.
+- One copy at a time: the `.cmd` holds `runs\NAME.lock` open for writing while it runs (`9>"lock" call :job`).
+  A second copy cannot open it and exits with code 3, noted in `runs\NAME.refused.log` (the running copy holds
+  `runs\NAME.log` open, so the note cannot go there) and shown for 10 s. `Resume-Detached` refuses a running
+  job before starting anything (`Test-DetachedRunning`). The lock needs no cleanup: Windows releases it when
+  the job's processes end, however they end.
+- `$SHARDS`'s loop variable was `$s`, which (PowerShell names ignore case) overwrote a caller's `$S`.
+
+Tested on this PC in a scratch directory (not the worktrees):
+
+| Test | Result |
+|---|---|
+| commands exiting 0, 7, then 0 | the first ran, the second logged `exited with code 7: stopped`, the third did not run |
+| a command exiting with −1073741819 (access violation) | logged with that code, the next did not run |
+| all commands exit 0 | all ran, `[NAME] all 2 commands finished` |
+| `Resume-Detached` on a running job | refused: `long is running (runs\long.lock is in use)` |
+| the `.cmd` started a second time directly (`cmd /c`) and through `explorer.exe` while the first ran | both exited at once (exit code 3 for the direct one), two lines in `long2.refused.log`; the job ran once |
+| only the `.cmd`'s `cmd.exe` killed while its program ran | the program kept running and the lock stayed held until it ended, then was released |
+| `$S` set before loading the file | kept |
+
+Exiting with STATUS_CONTROL_C_EXIT (−1073741510) makes `cmd` ask "Terminate batch job (Y/N)?" itself, as for a
+real Ctrl+C: the window then waits for the answer.
