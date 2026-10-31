@@ -22,7 +22,7 @@ record.
 | 8 | Strength at 4 threads (optional) | 6 h | 0 |
 | 9 | The fused feature transformer on the GPU (`--ft-impl fused`) | 30 min | 0 |
 | 10 | Teacher labels against NAGS's own deeper labels, equal compute | 2-3 days | 6a |
-| 11 | Quantization-aware fine-tune (arm D of section 6) | 1 h + SPRTs | 6a |
+| 11 | Quantization-aware fine-tune (arm D of section 6; optional: H0 on the VM) | 1 h + SPRTs | 6a |
 | 12 | Data mixtures and targeted data | 2-3 days | 6, 7-piece books |
 | 13 | v3 against v4 on identical data | 3 h + SPRTs | 6a |
 | 14 | Endgame accuracy on 5-piece tablebases (optional) | 1 h | 0 |
@@ -342,7 +342,11 @@ epoch, the match decides.)
 network 8. **Decision (pre-registered):** teacher labels are worth expanding only if T_sf beats T_nags.
 **Record:** the label runs' times, the eval-set losses, every SPRT line.
 
-## 11. Quantization-aware fine-tune (about 1 hour of GPU, then SPRTs; after 6a)
+## 11. Quantization-aware fine-tune (optional; about 1 hour of GPU, then SPRTs; after 6a)
+
+On the VM a QAT fine-tune lost its SPRT against the same fine-tune without QAT (H0, −10.9 ± 14.3, 922 games;
+`docs/STRENGTH_PLAN.md`, item 2), so run this only alongside section 6 when the GPU is free: it tests QAT at
+scale, where the outcome could differ.
 
 Arm D of section 6: B's command with `--qat`, everything else the same:
 ```powershell

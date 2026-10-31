@@ -25,7 +25,7 @@ What must not change is in `docs/COMPATIBILITY.md`. Commands for the training PC
 | # | Line of work | What exists now | Next experiment | Where |
 |---|---|---|---|---|
 | 1 | Stronger teacher | `tools/nnue/rescore.py` (any UCI engine, resumable, equal-compute comparison); `nags_datagen --relabel-nodes` | teacher vs NAGS's own deeper labels at equal engine time, on the same games | PC (CPU days) |
-| 2 | Quantization-aware training | `train.py --qat`; `quant_error.py` reports the export's loss | QAT fine-tune vs plain fine-tune, same data and settings | VM (small), PC (R9) |
+| 2 | Quantization-aware training | `train.py --qat`; `quant_error.py` reports the export's loss | VM: H0, −10.9 ± 14.3 against a plain fine-tune; at scale on R9 only if cheap | PC (optional) |
 | 3 | Data composition | `tools/nnue/mix.py` (report, build, book); `nags_datagen --book` | mixtures of retained and fresh data, with and without targeted books | PC |
 | 4 | Search tuning for network 8 | `src/Tune.h` + `tools/spsa.py` (`exp/spsa-tune`, merged here) | SPSA in groups of 2-4 parameters, then SPRTs on other openings and at 10+0.1 | VM or PC (CPU) |
 | 5 | The v4 architecture, properly | `train_v4.py`, engine support for format 4 | v3 and v4 on identical data: fixed-node quality and equal-time strength | PC |
@@ -450,5 +450,12 @@ Measured on the 4-core VM (Intel Xeon, 2.1 GHz, no GPU) on 2026-10-30, with netw
   - Rounding costs P 12.6 cp on average (bias +3.5) and 0.000058 of loss. Q's export recovers 70% of that
     loss. Q's own weight-rounding error is 0 by construction; only the 0.51 cp of integer arithmetic is left.
   - Both fine-tunes have a lower loss than network 8 on positions like their training data. That is no
-    strength claim: an evaluation set from the same engine and settings favours them. The SPRT of Q against
-    P decides QAT.
+    strength claim: an evaluation set from the same engine and settings favours them.
+  - **The SPRT: H0.** Q against P, [0, 10] at 3+0.03: +200 =493 −229 after 922 games, **−10.9 ± 14.3**
+    (LLR −2.95).
+  - This is the second time a smaller export error did not play better. The first was the bias-corrected
+    export, −2.9 ± 10.1. Rounding is not a bottleneck at network 8's level that these fixes can buy back.
+    `--qat` stays an option, not a recommendation, per the decision rule.
+  - The PC's arm D (§11) is now optional. It is still cheap next to §6's B (an hour of GPU), and it tests
+    QAT at scale (104M positions, 20 epochs), where the outcome could differ. If it is run and fails too,
+    this line of work is closed.
