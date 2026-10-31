@@ -16,7 +16,8 @@
           two or more pawns apart, or level material with different pieces), 'level-different' (only the
           latter), 'pawn-endings', 'queenless' or 'pieces:LO-HI'; --max-score keeps starts the search does not
           already call decided (nags_datagen skips openings beyond its --max-opening-score). Castling rights
-          are inferred (tools/nnue/rescore.py, record_fen).
+          and the en-passant square are those recorded (nags_datagen --record-state on); a record without them
+          starts without any (nothing is guessed: a different but legal start position).
 
   python tools/nnue/mix.py report data/selfplay_*.bin
   python tools/nnue/mix.py book data/selfplay_*.bin --select imbalanced --count 5000 --max-score 300 \
@@ -208,7 +209,8 @@ def book(args):
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w", newline="\n") as fh:
         for r in picked:
-            fh.write(" ".join(rescore.record_fen(r).split()[:4]) + "\n")
+            state = rescore.record_state(r)  # castling and en passant as recorded; without a record of them, none
+            fh.write(f"{rescore.record_board_fen(r)} {state[0] if state else '-'} {state[1] if state else '-'}\n")
     print(f"{int(mask.sum())} of {len(recs)} sampled positions are '{args.select}'"
           + (f" within {args.max_score} cp" if args.max_score is not None else "")
           + f"; wrote {len(picked)} distinct ones to {args.out}")

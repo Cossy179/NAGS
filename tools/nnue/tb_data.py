@@ -150,7 +150,9 @@ def generate(args):
     rows = [rows[i] for i in order]
     feats, stm, score, result = train.parse_chunk([f"{f} | {s} | {r}" for f, s, r in rows])
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    train.encode(feats, stm, score, result).tofile(args.out)
+    recs = train.encode(feats, stm, score, result)
+    recs[:, 30] = 1  # the state bytes (nags_datagen --record-state): no castling, no en passant, clocks 0 and 1
+    recs.tofile(args.out)
     with open(args.out + ".tb.json", "w") as fh:
         json.dump({"materials": counts, "nodes": args.nodes, "engine": args.engine, "options": args.option or [],
                    "seed": args.seed, "quiet": not args.any, "positions": len(rows)}, fh, indent=1)

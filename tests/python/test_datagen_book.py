@@ -34,8 +34,8 @@ def test_games_start_from_the_book(tmp_path):
     raw = np.fromfile(out, np.uint8).reshape(-1, 32)
     # No random plies and one start position: every game is the same game, and starts there.
     assert len({g.checksum for g in games}) == 1
-    first = rescore.record_fen(raw[0])
-    assert first.split()[:2] == START.split()[:2]
+    first = rescore.record_board_fen(raw[0])
+    assert first.split() == START.split()[:2]
 
 
 def test_without_a_book_nothing_changes(tmp_path):

@@ -18,7 +18,14 @@
 //   int16  score            centipawns, White's point of view
 //   uint8  result           0 = Black won, 1 = draw, 2 = White won
 //   uint8  side to move     0 = White, 1 = Black
-//   uint8  reserved[4]      0
+//   uint8  reserved[4]      0, or with --record-state the rest of the
+//                           position (shard header: state=1):
+//     uint8  castling + en passant: bits 0-3 the rights K Q k q, bits 4-6
+//            the en-passant file, bit 7 set when there is an en-passant
+//            square (kept only when a capture there is legal; its rank
+//            follows from the side to move)
+//     uint8  halfmove clock (fifty-move counter, at most 255)
+//     uint16 fullmove number (at least 1, so a record with state is never 0)
 //
 //   nags_datagen --out data/selfplay.txt --games 10000 --threads 3 --nodes 5000
 //
@@ -104,6 +111,7 @@ struct Options {
     int relabelThreshold = 0;       // "disagree:T": |static evaluation - search score| >= T centipawns
     double relabelFraction = 0.0;
     std::string bookPath;           // --book: start positions, one FEN or EPD line each
+    bool recordState = false;       // --record-state: castling, en passant and the move counters in the record
     std::vector<std::string> book;
     uint64_t bookFnv = 0;           // FNV-1a 64 of the file's bytes, for the shard header
 };
@@ -115,7 +123,7 @@ struct Record {
 };
 
 // The binary record of a position, except for the result byte.
-std::array<unsigned char, 32> packPosition(const FastBoard &b, int score) {
+std::array<unsigned char, 32> packPosition(const FastBoard &b, int score, bool state = false) {
     std::array<unsigned char, 32> r{};
     const uint64_t occ = b.occupancy();
     for (int i = 0; i < 8; ++i) r[i] = static_cast<unsigned char>((occ >> (8 * i)) & 0xFF);
@@ -131,6 +139,14 @@ std::array<unsigned char, 32> packPosition(const FastBoard &b, int score) {
     r[24] = static_cast<unsigned char>(s & 0xFF);
     r[25] = static_cast<unsigned char>(s >> 8);
     r[27] = b.sideToMove() == Color::White ? 0 : 1;
+    if (state) { // the rest of the position, so the record is the exact position (--record-state)
+        const int ep = b.getEpSquare();
+        r[28] = static_cast<unsigned char>((b.getCastlingRights() & 15) | (ep >= 0 ? 0x80 | ((ep & 7) << 4) : 0));
+        r[29] = static_cast<unsigned char>(std::clamp(b.getHalfmoveClock(), 0, 255));
+        const int full = std::clamp(b.getFullmoveNumber(), 1, 65535);
+        r[30] = static_cast<unsigned char>(full & 0xFF);
+        r[31] = static_cast<unsigned char>(full >> 8);
+    }
     return r;
 }
 
@@ -141,7 +157,7 @@ void usage() {
     std::cerr << "usage: nags_datagen --out FILE [--games N] [--threads N] [--nodes N] [--random-plies N]\n"
                  "                    [--max-opening-score CP] [--hash MB] [--seed N] [--repetition first|third]\n"
                  "                    [--first-game N] [--relabel-nodes N --relabel-select disagree:CP|random:P]\n"
-                 "                    [--book FILE]\n";
+                 "                    [--book FILE] [--record-state on]\n";
 }
 
 uint64_t fnv1a(const unsigned char *data, size_t n, uint64_t h = 0xcbf29ce484222325ULL);
@@ -214,6 +230,11 @@ bool parseArgs(int argc, char **argv, Options &o) {
         }
         if (a == "--book") {
             o.bookPath = v;
+            continue;
+        }
+        if (a == "--record-state") {
+            if (v != "on" && v != "off") { std::cerr << "--record-state: on or off\n"; return false; }
+            o.recordState = v == "on";
             continue;
         }
         if (a == "--repetition") {
@@ -352,7 +373,7 @@ bool playGame(const Options &o, std::mt19937_64 &rng, Searcher<FastBoard> &searc
             }
         }
         if (keep)
-            records.push_back(o.binary ? Record{{}, packPosition(board, label), label}
+            records.push_back(o.binary ? Record{{}, packPosition(board, label, o.recordState), label}
                                        : Record{board.getFEN(), {}, label});
         board.makeMove(r.bestMove);
     }
@@ -428,6 +449,7 @@ const std::string &shardHeader(const Options &o) {
         else h << " network=" << nnue::networkName();
         h << " search=" << searchFingerprint();
         if (!o.book.empty()) h << " book=" << hex64(o.bookFnv) << ":" << o.book.size();
+        if (o.recordState && o.binary) h << " state=1";
         if (o.relabelNodes)
             h << " relabel=" << o.relabelNodes << "@"
               << (o.relabelRandom ? "random:" + std::to_string(o.relabelFraction)

@@ -128,18 +128,36 @@ imbalanced positions from network-8 self-play, with `--random-plies 0`, gave
 games with material two or more pawns apart in 63.6% of the positions
 instead of 35.8%. Raise `--max-opening-score` for lopsided books.
 
+**Exact positions** (`--record-state on`, opt-in, binary output). A
+record's four reserved bytes then hold the rest of the position: the
+castling rights (bits 0-3 of byte 28, K Q k q), the en-passant file (bits
+4-6, with bit 7 set when there is a square, kept only when a capture there
+is legal; its rank follows from the side to move), the halfmove clock (byte
+29) and the fullmove number (bytes 30-31, at least 1, so a record with state
+is never all zero there). The shard header says `state=1`. The trainer
+ignores those bytes, so the data trains exactly as without them; checked on
+3,248 positions of 40 games against the text output's FENs, field for field,
+and without the option the output is byte-identical to before.
+
 **Other sources of records** (all write the 32-byte format):
 
 * `tools/nnue/rescore.py label`: the games of indexed shards again, with
   NAGS's scores from a deeper search (NAGS is the only source of training
   labels: `docs/STRENGTH_PLAN.md`; another engine can be given to measure
-  how its scores differ, never to train on),
-  resumable, with a consistent index and the engine time per position in
-  `<out>.teacher.json`; `rescore.py compare` sets label sets of the same
-  games side by side (their fit to the results, the factor between their
-  scales, their differences and cost). The records hold no castling
-  rights, so the teacher gets rights wherever king and rook are at home
-  (3.8% of positions differ from the real rights).
+  how its scores differ, never to train on). It reads only shards written
+  with `--record-state on`, whose records are exact positions (below), and
+  refuses others: a plain record lacks the castling rights, en-passant
+  square and move counters, and inferring the rights from the pieces got
+  them wrong in 3.8% of positions. For plain shards the in-game path,
+  `--relabel-nodes N --relabel-select random:1` with the shard's seed and
+  game range, plays the same games and labels every position exactly. Each
+  game's positions, engine seconds and nodes go to `<out>.teacher.games`
+  before its index line, so a stopped and resumed run counts its work once
+  (`<out>.teacher.json`); the header fingerprints the source's content, the
+  engine binary and every file-valued option (an `EvalFile` replaced at the
+  same path is refused on resume). `rescore.py compare` sets label sets of
+  the same games side by side (their fit to the results, the factor between
+  their scales, their differences and cost).
 * `tools/nnue/tb_data.py generate`: random quiet positions of chosen
   materials with the Syzygy result under the fifty-move rule and NAGS's
   search score; `tb_data.py measure` is the matching endgame test

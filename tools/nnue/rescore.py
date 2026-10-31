@@ -21,12 +21,23 @@ The teacher for training data is nags_enhanced with more nodes; another engine m
       --nodes 40000 --fraction 0.1 --workers 5 --out-dir data/deep40k
   python tools/nnue/rescore.py compare --base data/selfplay_9101.bin --labels data/deep40k/selfplay_9101.bin
 
-Limits of the 32-byte records: they hold no castling rights, en-passant square or move counters. A position is
-given to the teacher with castling rights wherever the king and rook stand on their original squares, no
-en-passant square and a halfmove clock of 0. A position where the teacher finds a mate is dropped (--mate drop,
-the default), as nags_datagen keeps no mate scores; --mate clamp keeps it at +-cap. The game results stay those of
-the self-play games, which the base engine played: a teacher's fit to them is a hint, not a strength measure.
-Only networks trained on each label set and played against each other decide (docs/STRENGTH_PLAN.md, item 1).
+Exact positions only. A plain 32-byte record holds the pieces and the side to move but not the castling rights,
+the en-passant square or the move counters, so it does not say which position it was, and none of that is
+guessed. `label` reads shards written with `nags_datagen --record-state on` (header `state=1`), whose records
+carry the rest of the position in their reserved bytes, and refuses any other. For shards without it, relabel
+during play instead: `nags_datagen --relabel-nodes N --relabel-select random:1` with the shard's seed and game
+range plays the same games and labels every position with the deeper search (docs/NNUE.md).
+
+Accounting survives a stop: each game's positions, mate drops, engine seconds and nodes are appended to
+<out>.teacher.games before the game's index line, and <out>.teacher.json is computed from that file for the
+games the index holds, so a resumed run counts all of its work once. The header fingerprints what the labels
+depend on: the source shard's content (SHA-256), the engine binary, and every option whose value is a file (an
+EvalFile replaced at the same path is a different teacher), so a resume with any of them changed is refused.
+
+A position where the teacher finds a mate is dropped (--mate drop, the default), as nags_datagen keeps no mate
+scores; --mate clamp keeps it at +-cap. The game results stay those of the self-play games: a label set's fit to
+them is a hint, not a strength measure. Only networks trained on each label set and played against each other
+decide (docs/STRENGTH_PLAN.md, item 1).
 """
 
 import argparse
@@ -61,9 +72,31 @@ def record_board(rec):
     return placement, "b" if rec[27] else "w"
 
 
-def record_fen(rec):
-    """A FEN for a record: castling rights inferred from kings and rooks on their original squares, no en-passant
-    square, halfmove clock 0 (the records hold none of these)."""
+def record_state(rec):
+    """(castling, en passant, halfmove clock, fullmove number) as FEN fields from a record's reserved bytes
+    (nags_datagen --record-state on), or None for a record written without them."""
+    rec = bytes(rec)
+    full = rec[30] | rec[31] << 8
+    if full == 0:
+        return None
+    c = rec[28]
+    castle = "".join(ch for bit, ch in ((1, "K"), (2, "Q"), (4, "k"), (8, "q")) if c & bit) or "-"
+    ep = "-" if not c & 0x80 else "abcdefgh"[(c >> 4) & 7] + ("6" if rec[27] == 0 else "3")
+    return castle, ep, rec[29], full
+
+
+def with_state(rec, castling="", ep_file=None, halfmove=0, fullmove=1):
+    """A record with its state bytes set (castling as 'KQkq' letters, ep_file 0-7 or None)."""
+    out = bytearray(rec)
+    out[28] = sum(bit for bit, ch in ((1, "K"), (2, "Q"), (4, "k"), (8, "q")) if ch in castling) | (
+        0x80 | ep_file << 4 if ep_file is not None else 0)
+    out[29] = min(255, halfmove)
+    out[30:32] = max(1, min(65535, fullmove)).to_bytes(2, "little")
+    return bytes(out)
+
+
+def record_board_fen(rec):
+    """The placement and side to move of a record, as the first two FEN fields."""
     placement, stm = record_board(rec)
     ranks = []
     for r in range(7, -1, -1):
@@ -76,12 +109,17 @@ def record_fen(rec):
             row += (str(empty) if empty else "") + c
             empty = 0
         ranks.append(row + (str(empty) if empty else ""))
-    castle = ""
-    for king, rook, ksq, rsq, flag in (("K", "R", 4, 7, "K"), ("K", "R", 4, 0, "Q"),
-                                       ("k", "r", 60, 63, "k"), ("k", "r", 60, 56, "q")):
-        if placement.get(ksq) == king and placement.get(rsq) == rook:
-            castle += flag
-    return f"{'/'.join(ranks)} {stm} {castle or '-'} - 0 1"
+    return f"{'/'.join(ranks)} {stm}"
+
+
+def record_fen(rec):
+    """The record's exact position as a FEN. A record without state (written without --record-state) raises
+    ValueError: its castling rights, en-passant square and move counters are unknown, and are not guessed."""
+    state = record_state(rec)
+    if state is None:
+        raise ValueError("a record without its state (castling, en passant, move counters): written without "
+                         "nags_datagen --record-state on")
+    return f"{record_board_fen(rec)} {state[0]} {state[1]} {state[2]} {state[3]}"
 
 
 def record_score(rec):
@@ -94,8 +132,7 @@ def with_score(rec, score):
     return bytes(out)
 
 
-def engine_sha256(cmd):
-    path = shutil.which(cmd[0]) or cmd[0]
+def file_sha256(path):
     try:
         h = hashlib.sha256()
         with open(path, "rb") as fh:
@@ -104,6 +141,15 @@ def engine_sha256(cmd):
         return h.hexdigest()
     except OSError:
         return None
+
+
+def engine_sha256(cmd):
+    return file_sha256(shutil.which(cmd[0]) or cmd[0])
+
+
+def option_files(options):
+    """{option: SHA-256} of the options whose value is a file (an EvalFile, a book): what the engine reads."""
+    return {k: file_sha256(v) for k, v in sorted(options.items()) if v and os.path.isfile(v)}
 
 
 def parse_options(items):
@@ -131,16 +177,17 @@ class Labeler:
         self.name = self.engine.id.get("name", os.path.basename(cmd[0]))
 
     def game(self, number, records, scale, cap, mate):
-        """(labelled records, engine seconds, dropped) for one game's records (a list of 32-byte bytes)."""
+        """(labelled records, engine seconds, dropped, nodes) for one game's records (a list of 32-byte bytes)."""
         import chess
         import chess.engine
-        out, seconds, dropped = [], 0.0, 0
+        out, seconds, dropped, nodes = [], 0.0, 0, 0
         key = object()  # python-chess sends ucinewgame when the game object changes
         for rec in records:
             board = chess.Board(record_fen(rec))
             t0 = time.perf_counter()
             info = self.engine.analyse(board, self.limit, game=key)
             seconds += time.perf_counter() - t0
+            nodes += int(info.get("nodes", 0))
             score = info["score"].white()
             if score.is_mate():
                 if mate == "drop":
@@ -150,7 +197,7 @@ class Labeler:
             else:
                 value = max(-cap, min(cap, round(score.score() * scale)))
             out.append(with_score(rec, value))
-        return out, seconds, dropped
+        return out, seconds, dropped, nodes
 
     def close(self):
         self.engine.quit()
@@ -168,6 +215,29 @@ def select_games(games, fraction, max_games, seed):
     return [games[i] for i in pick]
 
 
+def accounting_path(out):
+    return out + ".teacher.games"
+
+
+def read_accounting(out, keep):
+    """{game: (positions, dropped, engine seconds, nodes)} from <out>.teacher.games for the games in `keep` (the
+    index's), rewriting the file without the others (games cut by a stop, to be labelled again)."""
+    path, rows = accounting_path(out), {}
+    if os.path.exists(path):
+        with open(path) as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) == 5 and line.endswith("\n"):
+                    g = int(parts[0])
+                    if g in keep:
+                        rows[g] = (int(parts[1]), int(parts[2]), float(parts[3]), int(parts[4]))
+    with open(path + ".tmp", "w", newline="\n") as fh:
+        for g, (p, d, s_, n) in rows.items():
+            fh.write(f"{g} {p} {d} {s_:.6f} {n}\n")
+    os.replace(path + ".tmp", path)
+    return rows
+
+
 def resume_output(out, header):
     """{game number} already in a (partly) written output, its data cut back to the indexed games. A foreign or
     damaged output is refused."""
@@ -176,6 +246,8 @@ def resume_output(out, header):
             sys.exit(f"{out} holds data but has no index: not touched")
         with open(out, "wb"), open(shards.index_path(out), "w", newline="\n") as idx:
             idx.write(header + "\n")
+        if os.path.exists(accounting_path(out)):
+            os.remove(accounting_path(out))  # no game of this output exists
         return set()
     have, games = shards.read_index(out)
     if have != header:
@@ -205,6 +277,7 @@ def label(args):
     limit = (chess.engine.Limit(nodes=args.nodes) if args.nodes else chess.engine.Limit(depth=args.depth)
              if args.depth else chess.engine.Limit(time=args.movetime / 1000))
     sha = engine_sha256(cmd)
+    files = option_files(options)
     probe = Labeler(cmd, options, limit)
     name = probe.name
     labelers = [probe] + [Labeler(cmd, options, limit) for _ in range(args.workers - 1)]
@@ -217,28 +290,58 @@ def label(args):
                 sys.exit(f"{path}: needs its nags_datagen shard index (--first-game): {e}")
             if sum(g.bytes for g in games) != os.path.getsize(path):
                 sys.exit(f"{path}: its index does not cover the file (an unfinished shard?)")
+            if shards.header_fields(src_header).get("state") != "1":
+                sys.exit(f"{path}: its records hold no castling rights, en-passant square or move counters "
+                         "(written without nags_datagen --record-state on), so the positions are not known exactly "
+                         "and are not guessed. Relabel during play instead: nags_datagen --relabel-nodes N "
+                         "--relabel-select random:1 with this shard's seed and game range")
+            source_sha = file_sha256(path)
             chosen = select_games(games, args.fraction, args.max_games, args.select_seed)
             out = os.path.join(args.out_dir, os.path.basename(path))
             if os.path.realpath(out) == os.path.realpath(path):
                 sys.exit("--out-dir must not be the source's directory")
             header = (src_header + f" teacher={name.replace(' ', '_')} teacher-sha={(sha or 'unknown')[:16]}"
                       f" teacher-limit={limit_text(args)} teacher-scale={args.scale:g} teacher-cap={args.cap}"
-                      f" teacher-mate={args.mate}"
-                      + "".join(f" teacher-option={k}:{v}" for k, v in sorted(options.items()))
+                      f" teacher-mate={args.mate} source-sha={(source_sha or 'unknown')[:16]}"
+                      + "".join(f" teacher-option={k}:{v.replace(' ', '_')}" for k, v in sorted(options.items()))
+                      + "".join(f" teacher-file={k}:{(h or 'unknown')[:16]}" for k, h in files.items())
                       + f" select={args.fraction or 1:g}/{args.max_games or 0}/{args.select_seed}")
             done = resume_output(out, header)
+            accounting = read_accounting(out, done)
             todo = [g for g in chosen if g.number not in done]
             print(f"{os.path.basename(path)}: {len(chosen)} of {len(games)} games chosen, {len(done)} already "
                   f"labelled, {len(todo)} to label by {name} ({limit_text(args)}, {args.workers} workers)", flush=True)
             side = out + ".teacher.json"
-            stats = {"engine": name, "command": cmd, "engine_sha256": sha, "options": options,
-                     "limit": limit_text(args), "scale": args.scale, "cap": args.cap, "mate": args.mate,
-                     "source": os.path.basename(path), "source_header": src_header, "games": 0, "positions": 0,
-                     "dropped": 0, "engine_seconds": 0.0, "wall_seconds": 0.0}
+            sittings = []
             if os.path.exists(side) and done:
-                with open(side) as fh:
-                    stats.update({k: v for k, v in json.load(fh).items()
-                                  if k in ("games", "positions", "dropped", "engine_seconds", "wall_seconds")})
+                try:
+                    with open(side) as fh:
+                        sittings = list(json.load(fh).get("sittings", []))
+                except (OSError, ValueError):
+                    pass
+            sitting = {"started": time.strftime("%Y-%m-%dT%H:%M:%S"), "wall_seconds": 0.0, "games": 0}
+            sittings.append(sitting)
+            t0 = time.time()
+
+            def save():
+                sitting["wall_seconds"] = round(time.time() - t0, 1)
+                rows = list(accounting.values())
+                labelled = sum(r[0] + r[1] for r in rows)
+                stats = {"engine": name, "command": cmd, "engine_sha256": sha, "options": options,
+                         "option_files_sha256": files, "limit": limit_text(args), "scale": args.scale,
+                         "cap": args.cap, "mate": args.mate, "source": os.path.basename(path),
+                         "source_sha256": source_sha, "source_header": src_header, "header": header,
+                         "games": len(rows), "positions": sum(r[0] for r in rows), "dropped": sum(r[1] for r in rows),
+                         "engine_seconds": sum(r[2] for r in rows), "nodes": sum(r[3] for r in rows),
+                         "games_without_accounting": len(done - set(accounting)),
+                         "wall_seconds": round(sum(x["wall_seconds"] for x in sittings), 1), "sittings": sittings,
+                         "engine_seconds_per_position": sum(r[2] for r in rows) / labelled if labelled else None,
+                         "nodes_per_position": sum(r[3] for r in rows) / labelled if labelled else None}
+                with open(side + ".tmp", "w") as fh:
+                    json.dump(stats, fh, indent=1)
+                os.replace(side + ".tmp", side)
+                return stats
+
             free = list(labelers)
             lock = threading.Lock()
 
@@ -255,32 +358,31 @@ def label(args):
                     with lock:
                         free.append(lab)
 
-            t0, last = time.time(), time.time()
+            last = time.time()
+            # Per game: its bytes, then its accounting line, then its index line. A game in the index therefore
+            # always has its accounting, and a stop between the writes leaves a game that is labelled again.
             with open(out, "ab") as data, open(shards.index_path(out), "a", newline="\n") as idx, \
+                    open(accounting_path(out), "a", newline="\n") as acc, \
                     concurrent.futures.ThreadPoolExecutor(args.workers) as pool:
                 for n, fut in enumerate(concurrent.futures.as_completed([pool.submit(work, g) for g in todo]), 1):
-                    game, recs, seconds, dropped = fut.result()
+                    game, recs, seconds, dropped, nodes = fut.result()
                     blob = b"".join(recs)
                     data.write(blob)
                     data.flush()
+                    acc.write(f"{game.number} {len(recs)} {dropped} {seconds:.6f} {nodes}\n")
+                    acc.flush()
                     result = "0.5" if game.result == 0.5 else str(int(game.result))
                     idx.write(f"{game.number} {len(recs)} {len(blob)} {result} {shards.fnv1a(blob):016x}\n")
                     idx.flush()
-                    stats["games"] += 1
-                    stats["positions"] += len(recs)
-                    stats["dropped"] += dropped
-                    stats["engine_seconds"] += seconds
+                    accounting[game.number] = (len(recs), dropped, seconds, nodes)
+                    sitting["games"] += 1
                     if time.time() - last > 30 or n == len(todo):
                         last = time.time()
+                        stats = save()
                         print(f"  games {n}/{len(todo)}  positions {stats['positions']}  "
-                              f"{stats['engine_seconds'] / max(1, stats['positions'] + stats['dropped']) * 1000:.1f} "
-                              "ms engine time a position", flush=True)
-            stats["wall_seconds"] += time.time() - t0
-            labelled = stats["positions"] + stats["dropped"]
-            stats["engine_seconds_per_position"] = stats["engine_seconds"] / labelled if labelled else None
-            with open(side + ".tmp", "w") as fh:
-                json.dump(stats, fh, indent=1)
-            os.replace(side + ".tmp", side)
+                              f"{(stats['engine_seconds_per_position'] or 0) * 1000:.1f} ms engine time a position",
+                              flush=True)
+            stats = save()
             print(f"wrote {out}: {stats['games']} games, {stats['positions']} positions ({stats['dropped']} dropped "
                   f"for mate scores)", flush=True)
     finally:

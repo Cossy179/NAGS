@@ -48,7 +48,10 @@ flag bits or layout, or validation that would reject a file accepted today.
 32-byte records: uint64 occupancy, 16 bytes of 4-bit piece codes (P N B R Q
 K p n b r q k = 0-11, ascending squares, low nibble first), int16 score
 (White's view), uint8 result (0/1/2), uint8 side to move, 4 reserved bytes
-(written 0, ignored when read). Text lines: `<FEN> | <score> | <result>`.
+(written 0, ignored when read; with `nags_datagen --record-state on`, opt-in,
+they hold the castling rights, en-passant file, halfmove clock and fullmove
+number, the header says `state=1`, and readers that ignore them train as
+before). Text lines: `<FEN> | <score> | <result>`.
 `nags_datagen` keeps its command line, and with `--threads 1` its output
 is a function of the binary, the embedded network and the arguments; a
 change that keeps the bench node count also keeps it byte-identical

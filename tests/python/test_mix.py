@@ -130,6 +130,6 @@ def test_book_selects_kinds(tmp_path):
     mix.main(["book", str(data), "--select", "imbalanced", "--max-score", "300", "--out", str(out)])
     assert [l.split()[0] for l in out.read_text().splitlines()] == ["r3k3/8/8/8/8/8/8/2B1KN2"]
     mix.main(["book", str(data), "--select", "pieces:20-32", "--out", str(out)])
-    assert out.read_text().splitlines() == ["rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"]
+    assert out.read_text().splitlines() == ["rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - -"]  # no recorded state: no rights
     mix.main(["book", str(data), "--select", "pawn-endings", "--out", str(out)])
     assert out.read_text().splitlines() == ["4k3/pp6/8/8/8/8/PPP5/4K3 w - -"]
